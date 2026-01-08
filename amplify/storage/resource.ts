@@ -22,15 +22,38 @@ import { defineStorage } from "@aws-amplify/backend";
 export const storage = defineStorage({
   name: 'storage-browser-test',
   access: (allow) => ({
-    'public/*': [
-      allow.guest.to(['read']),
-      allow.authenticated.to(['read', 'write', 'delete']),
-    ],
-    'step1/*': [
+    'ConversionFiles/*': [
       allow.authenticated.to(['read']),
       allow.entity('identity').to(['read', 'write', 'delete'])
-    ],
-    'step2/*': [
+    ]
+    ,
+    'ConversionFileErrors/*': [
+      allow.authenticated.to(['read']),
+      allow.entity('identity').to(['read', 'write', 'delete'])
+    ]
+    ,
+    'InitialUpload/*': [
+      allow.authenticated.to(['read']),
+      allow.entity('identity').to(['read', 'write', 'delete'])
+    ]
+    ,
+    'InitialUploadErrors/*': [
+      allow.authenticated.to(['read']),
+      allow.entity('identity').to(['read', 'write', 'delete'])
+    ]
+    ,
+    'TSQLFiles/*': [
+      allow.authenticated.to(['read']),
+      allow.entity('identity').to(['read', 'write', 'delete'])
+    ]
+    ,
+    'DataValidation/*': [
+      allow.authenticated.to(['read']),
+      allow.entity('identity').to(['read', 'write', 'delete'])
+    ]
+    ,
+    'ConversionFileErrors/Mock8/*': [
+      allow.authenticated.to(['read']),
       allow.entity('identity').to(['read', 'write', 'delete'])
     ]
   })
