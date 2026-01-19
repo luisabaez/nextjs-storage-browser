@@ -1,7 +1,8 @@
 'use client';
-import React, { useState, useEffect, useCallback } from 'react';
-import { list, downloadData, remove, copy, getUrl } from 'aws-amplify/storage';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { list, getUrl } from 'aws-amplify/storage';
 import { FileContextMenu, ContextMenuAction } from './FileContextMenu';
+import { SortOption } from './Toolbar';
 
 export interface FileItem {
   key: string;
@@ -25,6 +26,8 @@ interface CustomFileBrowserProps {
   refreshKey: number;
   showToast: (message: string, type: 'success' | 'error' | 'info') => void;
   addNotification: (title: string, message: string, type: NotificationType, path?: string) => void;
+  searchQuery: string;
+  sortOption: SortOption;
 }
 
 export function CustomFileBrowser({
@@ -38,13 +41,13 @@ export function CustomFileBrowser({
   refreshKey,
   showToast,
   addNotification,
+  searchQuery,
+  sortOption,
 }: CustomFileBrowserProps) {
   const [items, setItems] = useState<FileItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set());
   const [contextMenu, setContextMenu] = useState<{ item: FileItem; x: number; y: number } | null>(null);
-  const [sortBy, setSortBy] = useState<'name' | 'date' | 'size' | 'type'>('name');
-  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
 
   // Fetch files and folders
   const fetchItems = useCallback(async () => {
@@ -109,32 +112,37 @@ export function CustomFileBrowser({
     onSelectionChange([]);
   }, [currentPath, onSelectionChange]);
 
-  // Sort items
-  const sortedItems = React.useMemo(() => {
-    const sorted = [...items].sort((a, b) => {
+  // Filter items based on search query
+  const filteredItems = useMemo(() => {
+    if (!searchQuery.trim()) return items;
+    const query = searchQuery.toLowerCase();
+    return items.filter(item =>
+      item.name.toLowerCase().includes(query)
+    );
+  }, [items, searchQuery]);
+
+  // Sort items based on sortOption from toolbar
+  const sortedItems = useMemo(() => {
+    const sorted = [...filteredItems].sort((a, b) => {
       // Folders always come first
       if (a.type === 'folder' && b.type !== 'folder') return -1;
       if (a.type !== 'folder' && b.type === 'folder') return 1;
 
-      let comparison = 0;
-      switch (sortBy) {
-        case 'name':
-          comparison = a.name.localeCompare(b.name);
-          break;
-        case 'date':
-          comparison = (a.lastModified?.getTime() || 0) - (b.lastModified?.getTime() || 0);
-          break;
-        case 'size':
-          comparison = (a.size || 0) - (b.size || 0);
-          break;
-        case 'type':
-          comparison = a.name.split('.').pop()?.localeCompare(b.name.split('.').pop() || '') || 0;
-          break;
+      switch (sortOption) {
+        case 'name-asc':
+          return a.name.localeCompare(b.name);
+        case 'name-desc':
+          return b.name.localeCompare(a.name);
+        case 'date-newest':
+          return (b.lastModified?.getTime() || 0) - (a.lastModified?.getTime() || 0);
+        case 'date-oldest':
+          return (a.lastModified?.getTime() || 0) - (b.lastModified?.getTime() || 0);
+        default:
+          return a.name.localeCompare(b.name);
       }
-      return sortOrder === 'asc' ? comparison : -comparison;
     });
     return sorted;
-  }, [items, sortBy, sortOrder]);
+  }, [filteredItems, sortOption]);
 
   // Handle selection
   const handleSelect = (item: FileItem, checked: boolean) => {
@@ -145,15 +153,15 @@ export function CustomFileBrowser({
       newSelection.delete(item.key);
     }
     setSelectedItems(newSelection);
-    onSelectionChange(items.filter(i => newSelection.has(i.key)));
+    onSelectionChange(filteredItems.filter(i => newSelection.has(i.key)));
   };
 
-  // Handle select all
+  // Handle select all (only selects filtered/visible items)
   const handleSelectAll = (checked: boolean) => {
     if (checked) {
-      const allKeys = new Set(items.map(i => i.key));
+      const allKeys = new Set(filteredItems.map(i => i.key));
       setSelectedItems(allKeys);
-      onSelectionChange(items);
+      onSelectionChange(filteredItems);
     } else {
       setSelectedItems(new Set());
       onSelectionChange([]);
@@ -268,16 +276,6 @@ export function CustomFileBrowser({
     });
   };
 
-  // Handle sort
-  const handleSort = (column: 'name' | 'date' | 'size' | 'type') => {
-    if (sortBy === column) {
-      setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc');
-    } else {
-      setSortBy(column);
-      setSortOrder('asc');
-    }
-  };
-
   // Get file icon
   const getFileIcon = (item: FileItem) => {
     if (item.type === 'folder') return '📁';
@@ -298,8 +296,19 @@ export function CustomFileBrowser({
     }
   };
 
-  const isAllSelected = items.length > 0 && selectedItems.size === items.length;
-  const isPartiallySelected = selectedItems.size > 0 && selectedItems.size < items.length;
+  // Get sort label for header display
+  const getSortLabel = () => {
+    switch (sortOption) {
+      case 'name-asc': return 'Name ↑';
+      case 'name-desc': return 'Name ↓';
+      case 'date-newest': return 'Date ↓';
+      case 'date-oldest': return 'Date ↑';
+      default: return 'Name ↑';
+    }
+  };
+
+  const isAllSelected = filteredItems.length > 0 && selectedItems.size === filteredItems.length;
+  const isPartiallySelected = selectedItems.size > 0 && selectedItems.size < filteredItems.length;
 
   return (
     <div className="custom-file-browser">
@@ -316,23 +325,14 @@ export function CustomFileBrowser({
             title="Select all"
           />
         </div>
-        <div
-          className={`file-table-cell name-cell sortable ${sortBy === 'name' ? 'sorted' : ''}`}
-          onClick={() => handleSort('name')}
-        >
-          Name {sortBy === 'name' && (sortOrder === 'asc' ? '↑' : '↓')}
+        <div className="file-table-cell name-cell">
+          Name
         </div>
-        <div
-          className={`file-table-cell date-cell sortable ${sortBy === 'date' ? 'sorted' : ''}`}
-          onClick={() => handleSort('date')}
-        >
-          Modified {sortBy === 'date' && (sortOrder === 'asc' ? '↑' : '↓')}
+        <div className="file-table-cell date-cell">
+          Modified
         </div>
-        <div
-          className={`file-table-cell size-cell sortable ${sortBy === 'size' ? 'sorted' : ''}`}
-          onClick={() => handleSort('size')}
-        >
-          Size {sortBy === 'size' && (sortOrder === 'asc' ? '↑' : '↓')}
+        <div className="file-table-cell size-cell">
+          Size
         </div>
         <div className="file-table-cell actions-cell">Actions</div>
       </div>
@@ -345,7 +345,7 @@ export function CustomFileBrowser({
         </div>
       )}
 
-      {/* Empty State */}
+      {/* Empty State - No items at all */}
       {!loading && items.length === 0 && (
         <div className="file-table-empty">
           <span className="empty-icon">📂</span>
@@ -356,8 +356,19 @@ export function CustomFileBrowser({
         </div>
       )}
 
+      {/* No results from search */}
+      {!loading && items.length > 0 && filteredItems.length === 0 && (
+        <div className="file-table-empty">
+          <span className="empty-icon">🔍</span>
+          <p>No files match "{searchQuery}"</p>
+          <button className="btn btn-secondary" onClick={() => {}}>
+            Clear Search
+          </button>
+        </div>
+      )}
+
       {/* File List */}
-      {!loading && items.length > 0 && (
+      {!loading && filteredItems.length > 0 && (
         <div className="file-table-body">
           {sortedItems.map((item) => (
             <div
@@ -401,6 +412,13 @@ export function CustomFileBrowser({
               </div>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Search results count */}
+      {!loading && searchQuery && filteredItems.length > 0 && (
+        <div className="search-results-count">
+          Found {filteredItems.length} item{filteredItems.length !== 1 ? 's' : ''} matching "{searchQuery}"
         </div>
       )}
 

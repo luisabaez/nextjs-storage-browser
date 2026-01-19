@@ -9,7 +9,7 @@ import config from '../amplify_outputs.json';
 
 // Components
 import { CustomFileBrowser, FileItem } from './components/CustomFileBrowser';
-import { Toolbar } from './components/Toolbar';
+import { Toolbar, SortOption } from './components/Toolbar';
 import { RenameModal } from './components/RenameModal';
 import { MoveToModal } from './components/MoveToModal';
 import { ConfirmDialog } from './components/ConfirmDialog';
@@ -83,6 +83,10 @@ function FileBrowser() {
   const [uploads, setUploads] = useState<UploadItem[]>([]);
   const [isNotificationOpen, setIsNotificationOpen] = useState(false);
   const [availableFolders, setAvailableFolders] = useState<{ path: string; name: string; level: number }[]>([]);
+
+  // Search and sort state
+  const [searchQuery, setSearchQuery] = useState('');
+  const [sortOption, setSortOption] = useState<SortOption>('name-asc');
 
   // Hooks
   const { toasts, removeToast, success, error: showError, info } = useToast();
@@ -814,6 +818,10 @@ function FileBrowser() {
             onRefresh={handleRefresh}
             onCreateFolder={() => setShowCreateFolder(true)}
             isProcessing={isProcessing}
+            searchQuery={searchQuery}
+            onSearchChange={setSearchQuery}
+            sortOption={sortOption}
+            onSortChange={setSortOption}
           />
 
           {/* Custom File Browser */}
@@ -829,6 +837,8 @@ function FileBrowser() {
               refreshKey={refreshKey}
               showToast={showToast}
               addNotification={addNotification}
+              searchQuery={searchQuery}
+              sortOption={sortOption}
             />
           </div>
         </main>

@@ -1,6 +1,8 @@
 'use client';
 import React from 'react';
 
+export type SortOption = 'name-asc' | 'name-desc' | 'date-newest' | 'date-oldest';
+
 interface ToolbarProps {
   selectedCount: number;
   onUpload: () => void;
@@ -11,6 +13,10 @@ interface ToolbarProps {
   onRefresh: () => void;
   onCreateFolder: () => void;
   isProcessing?: boolean;
+  searchQuery: string;
+  onSearchChange: (query: string) => void;
+  sortOption: SortOption;
+  onSortChange: (option: SortOption) => void;
 }
 
 export function Toolbar({
@@ -23,6 +29,10 @@ export function Toolbar({
   onRefresh,
   onCreateFolder,
   isProcessing = false,
+  searchQuery,
+  onSearchChange,
+  sortOption,
+  onSortChange,
 }: ToolbarProps) {
   const hasSelection = selectedCount > 0;
 
@@ -100,6 +110,40 @@ export function Toolbar({
             {selectedCount} item{selectedCount !== 1 ? 's' : ''} selected
           </span>
         )}
+
+        {/* Search Input */}
+        <div className="toolbar-search">
+          <span className="search-icon">🔍</span>
+          <input
+            type="text"
+            className="search-input"
+            placeholder="Search files..."
+            value={searchQuery}
+            onChange={(e) => onSearchChange(e.target.value)}
+          />
+          {searchQuery && (
+            <button
+              className="search-clear"
+              onClick={() => onSearchChange('')}
+              title="Clear search"
+            >
+              ×
+            </button>
+          )}
+        </div>
+
+        {/* Sort Dropdown */}
+        <select
+          className="toolbar-sort"
+          value={sortOption}
+          onChange={(e) => onSortChange(e.target.value as SortOption)}
+          title="Sort by"
+        >
+          <option value="name-asc">Name (A-Z)</option>
+          <option value="name-desc">Name (Z-A)</option>
+          <option value="date-newest">Newest First</option>
+          <option value="date-oldest">Oldest First</option>
+        </select>
 
         <button
           className="toolbar-btn icon-only"

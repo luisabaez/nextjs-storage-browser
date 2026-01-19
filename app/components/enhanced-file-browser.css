@@ -1298,6 +1298,97 @@
   border-radius: 16px;
 }
 
+/* Search Input */
+.toolbar-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: white;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  min-width: 200px;
+  transition: all 0.15s ease;
+}
+
+.toolbar-search:focus-within {
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+.search-icon {
+  font-size: 14px;
+  color: #9ca3af;
+  flex-shrink: 0;
+}
+
+.search-input {
+  flex: 1;
+  border: none;
+  outline: none;
+  font-size: 13px;
+  color: #374151;
+  background: transparent;
+  min-width: 0;
+}
+
+.search-input::placeholder {
+  color: #9ca3af;
+}
+
+.search-clear {
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #e5e7eb;
+  border: none;
+  border-radius: 50%;
+  font-size: 14px;
+  color: #6b7280;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+}
+
+.search-clear:hover {
+  background: #d1d5db;
+  color: #374151;
+}
+
+/* Sort Dropdown */
+.toolbar-sort {
+  padding: 8px 12px;
+  background: white;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  font-size: 13px;
+  color: #374151;
+  cursor: pointer;
+  outline: none;
+  transition: all 0.15s ease;
+  min-width: 140px;
+}
+
+.toolbar-sort:hover {
+  border-color: #cbd5e1;
+}
+
+.toolbar-sort:focus {
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+/* Search Results Count */
+.search-results-count {
+  padding: 8px 16px;
+  background: #f0f9ff;
+  border-top: 1px solid #bae6fd;
+  font-size: 13px;
+  color: #0369a1;
+}
+
 /* Create Folder Modal */
 .input-error {
   border-color: #ef4444 !important;
@@ -1312,19 +1403,50 @@
 
 /* Responsive adjustments */
 @media (max-width: 768px) {
-  .file-browser-toolbar {
+  .toolbar {
     flex-direction: column;
     gap: 12px;
     align-items: stretch;
   }
 
-  .toolbar-left,
+  .toolbar-left {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
   .toolbar-right {
+    flex-wrap: wrap;
     justify-content: space-between;
   }
 
+  .toolbar-search {
+    min-width: 150px;
+    flex: 1;
+  }
+
+  .toolbar-sort {
+    min-width: 120px;
+  }
+
+  .toolbar-btn .toolbar-label {
+    display: none;
+  }
+
+  .toolbar-btn {
+    padding: 8px 10px;
+  }
+
   .size-col,
-  .date-col {
+  .date-col,
+  .date-cell,
+  .size-cell {
+    display: none;
+  }
+
+  .file-table-header .date-cell,
+  .file-table-header .size-cell,
+  .file-table-row .date-cell,
+  .file-table-row .size-cell {
     display: none;
   }
 
