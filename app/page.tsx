@@ -1,28 +1,25 @@
 'use client';
-import React, { useEffect, useState, useMemo, useCallback } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { Amplify } from 'aws-amplify';
 import { signOut, fetchUserAttributes } from 'aws-amplify/auth';
 import { Button, withAuthenticator } from '@aws-amplify/ui-react';
-import {
-  createStorageBrowser,
-  createAmplifyAuthAdapter,
-  elementsDefault,
-} from '@aws-amplify/ui-react-storage/browser';
-import '@aws-amplify/ui-react-storage/styles.css';
-import '@aws-amplify/ui-react-storage/storage-browser-styles.css';
+import '@aws-amplify/ui-react/styles.css';
 import './components/enhanced-file-browser.css';
 import config from '../amplify_outputs.json';
 
 // Components
+import { CustomFileBrowser, FileItem } from './components/CustomFileBrowser';
+import { Toolbar } from './components/Toolbar';
 import { RenameModal } from './components/RenameModal';
 import { MoveToModal } from './components/MoveToModal';
 import { ConfirmDialog } from './components/ConfirmDialog';
+import { CreateFolderModal } from './components/CreateFolderModal';
 import { ToastContainer, useToast } from './components/Toast';
 import { NotificationCenter, useNotifications } from './components/NotificationCenter';
 import { UploadProgress, UploadItem } from './components/UploadProgress';
 
 // Amplify Storage imports
-import { uploadData, downloadData, remove, copy, list } from 'aws-amplify/storage';
+import { uploadData, remove, copy, list, getUrl } from 'aws-amplify/storage';
 
 Amplify.configure(config);
 
@@ -42,16 +39,6 @@ interface QuickLink {
   id: string;
   path: string;
   name: string;
-}
-
-// File item interface
-interface FileItem {
-  key: string;
-  name: string;
-  type: 'file' | 'folder';
-  size?: number;
-  lastModified?: Date;
-  path: string;
 }
 
 // Folder configuration with icons and colors
@@ -84,10 +71,14 @@ function FileBrowser() {
   const [newLinkName, setNewLinkName] = useState('');
   const [showContextMenu, setShowContextMenu] = useState(false);
 
-  // Enhanced features state
+  // File selection and actions state
+  const [selectedItems, setSelectedItems] = useState<FileItem[]>([]);
   const [renameItem, setRenameItem] = useState<FileItem | null>(null);
   const [moveItem, setMoveItem] = useState<{ item: FileItem; mode: 'move' | 'copy' } | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState<FileItem | null>(null);
+  const [bulkDeleteConfirm, setBulkDeleteConfirm] = useState(false);
+  const [bulkMoveMode, setBulkMoveMode] = useState<'move' | 'copy' | null>(null);
+  const [showCreateFolder, setShowCreateFolder] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [uploads, setUploads] = useState<UploadItem[]>([]);
   const [isNotificationOpen, setIsNotificationOpen] = useState(false);
@@ -179,29 +170,20 @@ function FileBrowser() {
     fetchFolders();
   }, [refreshKey]);
 
-  // Create storage browser - memoized to prevent unnecessary recreation
-  const { StorageBrowser } = useMemo(() => {
-    const prefixes = currentPath
-      ? [currentPath]
-      : folders.map(f => f.path);
-
-    return createStorageBrowser({
-      elements: elementsDefault,
-      config: createAmplifyAuthAdapter({
-        options: {
-          defaultPrefixes: prefixes,
-        },
-      }),
-    });
-  }, [currentPath, refreshKey]);
-
   // Handle folder navigation
-  const handleFolderClick = (path: string) => {
+  const handleFolderClick = useCallback((path: string) => {
     setCurrentPath(path);
+    setSelectedItems([]);
     setRefreshKey(prev => prev + 1);
     setSidebarOpen(false);
     setShowContextMenu(false);
-  };
+  }, []);
+
+  // Handle navigation from custom browser
+  const handleNavigate = useCallback((path: string) => {
+    setCurrentPath(path);
+    setSelectedItems([]);
+  }, []);
 
   // Get user initials for avatar
   const getUserInitials = (email: string) => {
@@ -218,10 +200,26 @@ function FileBrowser() {
     if (!currentPath) return 'All Folders';
     const folder = folders.find(f => f.path === currentPath);
     if (folder) return folder.name;
-    // Check quick links
     const quickLink = quickLinks.find(ql => ql.path === currentPath);
     if (quickLink) return quickLink.name;
     return currentPath.replace(/\/$/, '').split('/').pop() || currentPath;
+  };
+
+  // Build breadcrumb path
+  const getBreadcrumbPath = () => {
+    if (!currentPath) return [];
+    const parts = currentPath.split('/').filter(Boolean);
+    const breadcrumbs: { name: string; path: string }[] = [];
+    let path = '';
+    for (const part of parts) {
+      path += part + '/';
+      const folder = folders.find(f => f.path === path);
+      breadcrumbs.push({
+        name: folder?.name || part,
+        path: path,
+      });
+    }
+    return breadcrumbs;
   };
 
   // Add a new quick link
@@ -272,6 +270,18 @@ function FileBrowser() {
     setQuickLinks(prev => prev.filter(ql => ql.id !== id));
   };
 
+  // Handle selection change from custom browser
+  const handleSelectionChange = useCallback((items: FileItem[]) => {
+    setSelectedItems(items);
+  }, []);
+
+  // Toast helper for custom browser
+  const showToast = useCallback((message: string, type: 'success' | 'error' | 'info') => {
+    if (type === 'success') success(message);
+    else if (type === 'error') showError(message);
+    else info(message);
+  }, [success, showError, info]);
+
   // Rename handler
   const handleRename = async (newName: string) => {
     if (!renameItem) return;
@@ -283,7 +293,6 @@ function FileBrowser() {
         : oldPath.substring(0, oldPath.lastIndexOf('/') + 1);
       const newPath = parentPath + newName + (renameItem.type === 'folder' ? '/' : '');
 
-      // For folders, we need to copy all contents
       if (renameItem.type === 'folder') {
         const contents = await list({ path: oldPath, options: { listAll: true } });
         for (const item of contents.items) {
@@ -314,7 +323,7 @@ function FileBrowser() {
     }
   };
 
-  // Move/Copy handler
+  // Move/Copy handler for single item
   const handleMoveOrCopy = async (destinationPath: string) => {
     if (!moveItem) return;
     setIsProcessing(true);
@@ -361,7 +370,55 @@ function FileBrowser() {
     }
   };
 
-  // Delete handler
+  // Bulk Move/Copy handler
+  const handleBulkMoveOrCopy = async (destinationPath: string) => {
+    if (!bulkMoveMode || selectedItems.length === 0) return;
+    setIsProcessing(true);
+    try {
+      for (const item of selectedItems) {
+        const newPath = destinationPath + item.name + (item.type === 'folder' ? '/' : '');
+
+        if (item.type === 'folder') {
+          const contents = await list({ path: item.path, options: { listAll: true } });
+          for (const file of contents.items) {
+            const newItemPath = file.path.replace(item.path, newPath);
+            await copy({
+              source: { path: file.path },
+              destination: { path: newItemPath },
+            });
+            if (bulkMoveMode === 'move') {
+              await remove({ path: file.path });
+            }
+          }
+        } else {
+          await copy({
+            source: { path: item.path },
+            destination: { path: newPath },
+          });
+          if (bulkMoveMode === 'move') {
+            await remove({ path: item.path });
+          }
+        }
+      }
+
+      success(`${bulkMoveMode === 'move' ? 'Moved' : 'Copied'} ${selectedItems.length} items`);
+      addNotification(
+        bulkMoveMode === 'move' ? 'Items Moved' : 'Items Copied',
+        `${selectedItems.length} items ${bulkMoveMode === 'move' ? 'moved' : 'copied'} to ${destinationPath || 'root'}`,
+        bulkMoveMode
+      );
+      setBulkMoveMode(null);
+      setSelectedItems([]);
+      setRefreshKey(prev => prev + 1);
+    } catch (err) {
+      console.error('Bulk Move/Copy error:', err);
+      showError(`Failed to ${bulkMoveMode}`);
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  // Delete handler for single item
   const handleDelete = async () => {
     if (!deleteConfirm) return;
     setIsProcessing(true);
@@ -384,6 +441,93 @@ function FileBrowser() {
       showError('Failed to delete');
     } finally {
       setIsProcessing(false);
+    }
+  };
+
+  // Bulk delete handler
+  const handleBulkDelete = async () => {
+    if (selectedItems.length === 0) return;
+    setIsProcessing(true);
+    try {
+      for (const item of selectedItems) {
+        if (item.type === 'folder') {
+          const contents = await list({ path: item.path, options: { listAll: true } });
+          for (const file of contents.items) {
+            await remove({ path: file.path });
+          }
+        } else {
+          await remove({ path: item.path });
+        }
+      }
+
+      success(`Deleted ${selectedItems.length} items`);
+      addNotification('Items Deleted', `${selectedItems.length} items have been deleted`, 'delete');
+      setBulkDeleteConfirm(false);
+      setSelectedItems([]);
+      setRefreshKey(prev => prev + 1);
+    } catch (err) {
+      console.error('Bulk delete error:', err);
+      showError('Failed to delete some items');
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  // Create folder handler
+  const handleCreateFolder = async (folderName: string) => {
+    setIsProcessing(true);
+    try {
+      const basePath = currentPath || folders[0].path;
+      const newFolderPath = basePath + folderName + '/.keep';
+
+      // Create a placeholder file to create the folder
+      await uploadData({
+        path: newFolderPath,
+        data: new Blob([''], { type: 'text/plain' }),
+      }).result;
+
+      success(`Created folder: ${folderName}`);
+      addNotification('Folder Created', `${folderName} has been created`, 'info', basePath + folderName + '/');
+      setShowCreateFolder(false);
+      setRefreshKey(prev => prev + 1);
+    } catch (err) {
+      console.error('Create folder error:', err);
+      showError('Failed to create folder');
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  // Download handler for selected items
+  const handleDownloadSelected = async () => {
+    if (selectedItems.length === 0) return;
+
+    for (const item of selectedItems) {
+      if (item.type === 'folder') {
+        info(`Cannot download folder "${item.name}" directly`);
+        continue;
+      }
+
+      try {
+        const result = await getUrl({
+          path: item.path,
+          options: { expiresIn: 3600 },
+        });
+
+        const link = document.createElement('a');
+        link.href = result.url.toString();
+        link.download = item.name;
+        link.target = '_blank';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+
+        success(`Downloading ${item.name}`);
+        addNotification('File Downloaded', `${item.name} downloaded`, 'download', item.path);
+      } catch (err) {
+        console.error('Download error:', err);
+        showError(`Failed to download ${item.name}`);
+      }
     }
   };
 
@@ -463,6 +607,13 @@ function FileBrowser() {
     setUploads([]);
   };
 
+  // Refresh
+  const handleRefresh = () => {
+    setRefreshKey(prev => prev + 1);
+  };
+
+  const breadcrumbs = getBreadcrumbPath();
+
   return (
     <div className="app-container">
       {/* Hidden file input for uploads */}
@@ -477,7 +628,6 @@ function FileBrowser() {
       {/* Header */}
       <header className="app-header">
         <div className="header-left">
-          {/* Mobile menu toggle */}
           <button
             className="menu-toggle"
             onClick={() => setSidebarOpen(!sidebarOpen)}
@@ -494,16 +644,6 @@ function FileBrowser() {
         </div>
 
         <div className="header-right">
-          {/* Upload button */}
-          <Button
-            className="upload-btn"
-            size="small"
-            onClick={() => fileInputRef.current?.click()}
-          >
-            📤 Upload
-          </Button>
-
-          {/* Notification button */}
           <button
             className="notification-btn"
             onClick={() => setIsNotificationOpen(true)}
@@ -538,7 +678,6 @@ function FileBrowser() {
 
         {/* Sidebar */}
         <aside className={`sidebar ${sidebarOpen ? 'open' : ''} ${sidebarCollapsed ? 'collapsed' : ''}`}>
-          {/* Collapse Toggle Button */}
           <button
             className="sidebar-collapse-btn"
             onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
@@ -547,7 +686,6 @@ function FileBrowser() {
             {sidebarCollapsed ? '»' : '«'}
           </button>
 
-          {/* Folders Section */}
           <h2 className="sidebar-title">Folders</h2>
           <nav>
             <ul className="sidebar-nav">
@@ -564,7 +702,7 @@ function FileBrowser() {
               {folders.map((folder) => (
                 <li key={folder.path} className="sidebar-item">
                   <button
-                    className={`sidebar-link ${currentPath === folder.path ? 'active' : ''}`}
+                    className={`sidebar-link ${currentPath.startsWith(folder.path) ? 'active' : ''}`}
                     onClick={() => handleFolderClick(folder.path)}
                     data-folder={folder.type}
                   >
@@ -576,7 +714,6 @@ function FileBrowser() {
             </ul>
           </nav>
 
-          {/* Quick Links Section */}
           <h2 className="sidebar-title quick-links-title">Quick Links</h2>
           <nav>
             <ul className="sidebar-nav">
@@ -623,22 +760,27 @@ function FileBrowser() {
               <button
                 className="breadcrumb-link"
                 onClick={() => handleFolderClick('')}
-                style={{
-                  background: 'none',
-                  border: 'none',
-                  cursor: 'pointer',
-                  padding: 0,
-                  font: 'inherit'
-                }}
               >
                 Home
               </button>
             </span>
+            {breadcrumbs.map((crumb, index) => (
+              <React.Fragment key={crumb.path}>
+                <span className="breadcrumb-separator">/</span>
+                {index === breadcrumbs.length - 1 ? (
+                  <span className="breadcrumb-current">{crumb.name}</span>
+                ) : (
+                  <button
+                    className="breadcrumb-link"
+                    onClick={() => handleFolderClick(crumb.path)}
+                  >
+                    {crumb.name}
+                  </button>
+                )}
+              </React.Fragment>
+            ))}
             {currentPath && (
               <>
-                <span className="breadcrumb-separator">/</span>
-                <span className="breadcrumb-current">{getCurrentFolderName()}</span>
-                {/* Context menu button */}
                 <button
                   className="breadcrumb-menu-btn"
                   onClick={() => setShowContextMenu(!showContextMenu)}
@@ -661,9 +803,33 @@ function FileBrowser() {
             )}
           </div>
 
-          {/* Storage Browser */}
+          {/* Toolbar */}
+          <Toolbar
+            selectedCount={selectedItems.length}
+            onUpload={() => fileInputRef.current?.click()}
+            onDownload={handleDownloadSelected}
+            onDelete={() => setBulkDeleteConfirm(true)}
+            onMoveTo={() => setBulkMoveMode('move')}
+            onCopyTo={() => setBulkMoveMode('copy')}
+            onRefresh={handleRefresh}
+            onCreateFolder={() => setShowCreateFolder(true)}
+            isProcessing={isProcessing}
+          />
+
+          {/* Custom File Browser */}
           <div className="storage-browser-wrapper">
-            <StorageBrowser key={refreshKey} />
+            <CustomFileBrowser
+              currentPath={currentPath || ''}
+              onNavigate={handleNavigate}
+              onRename={(item) => setRenameItem(item)}
+              onMove={(item, mode) => setMoveItem({ item, mode })}
+              onDelete={(item) => setDeleteConfirm(item)}
+              onUpload={() => fileInputRef.current?.click()}
+              onSelectionChange={handleSelectionChange}
+              refreshKey={refreshKey}
+              showToast={showToast}
+              addNotification={addNotification}
+            />
           </div>
         </main>
       </div>
@@ -732,6 +898,14 @@ function FileBrowser() {
         />
       )}
 
+      {/* Create Folder Modal */}
+      <CreateFolderModal
+        isOpen={showCreateFolder}
+        onClose={() => setShowCreateFolder(false)}
+        onCreate={handleCreateFolder}
+        isLoading={isProcessing}
+      />
+
       {/* Rename Modal */}
       <RenameModal
         isOpen={!!renameItem}
@@ -742,7 +916,7 @@ function FileBrowser() {
         isLoading={isProcessing}
       />
 
-      {/* Move/Copy Modal */}
+      {/* Move/Copy Modal for single item */}
       {moveItem && (
         <MoveToModal
           isOpen={!!moveItem}
@@ -757,7 +931,22 @@ function FileBrowser() {
         />
       )}
 
-      {/* Delete Confirmation */}
+      {/* Move/Copy Modal for bulk selection */}
+      {bulkMoveMode && (
+        <MoveToModal
+          isOpen={!!bulkMoveMode}
+          onClose={() => setBulkMoveMode(null)}
+          onMove={handleBulkMoveOrCopy}
+          itemName={`${selectedItems.length} items`}
+          itemType="file"
+          currentPath={currentPath}
+          availableFolders={availableFolders}
+          mode={bulkMoveMode}
+          isLoading={isProcessing}
+        />
+      )}
+
+      {/* Delete Confirmation for single item */}
       <ConfirmDialog
         isOpen={!!deleteConfirm}
         onClose={() => setDeleteConfirm(null)}
@@ -765,6 +954,18 @@ function FileBrowser() {
         title="Delete Item"
         message={`Are you sure you want to delete "${deleteConfirm?.name}"? This action cannot be undone.`}
         confirmText="Delete"
+        isDangerous
+        isLoading={isProcessing}
+      />
+
+      {/* Delete Confirmation for bulk selection */}
+      <ConfirmDialog
+        isOpen={bulkDeleteConfirm}
+        onClose={() => setBulkDeleteConfirm(false)}
+        onConfirm={handleBulkDelete}
+        title="Delete Items"
+        message={`Are you sure you want to delete ${selectedItems.length} items? This action cannot be undone.`}
+        confirmText="Delete All"
         isDangerous
         isLoading={isProcessing}
       />
