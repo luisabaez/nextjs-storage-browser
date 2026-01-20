@@ -9,7 +9,7 @@ import config from '../amplify_outputs.json';
 
 // Components
 import { CustomFileBrowser, FileItem } from './components/CustomFileBrowser';
-import { Toolbar, SortOption } from './components/Toolbar';
+import { Toolbar, SortOption, SearchScope } from './components/Toolbar';
 import { RenameModal } from './components/RenameModal';
 import { MoveToModal } from './components/MoveToModal';
 import { ConfirmDialog } from './components/ConfirmDialog';
@@ -87,6 +87,7 @@ function FileBrowser() {
   // Search and sort state
   const [searchQuery, setSearchQuery] = useState('');
   const [sortOption, setSortOption] = useState<SortOption>('name-asc');
+  const [searchScope, setSearchScope] = useState<SearchScope>('current');
 
   // Hooks
   const { toasts, removeToast, success, error: showError, info } = useToast();
@@ -822,6 +823,9 @@ function FileBrowser() {
             onSearchChange={setSearchQuery}
             sortOption={sortOption}
             onSortChange={setSortOption}
+            searchScope={searchScope}
+            onSearchScopeChange={setSearchScope}
+            currentFolderName={getCurrentFolderName()}
           />
 
           {/* Custom File Browser */}
@@ -839,6 +843,7 @@ function FileBrowser() {
               addNotification={addNotification}
               searchQuery={searchQuery}
               sortOption={sortOption}
+              searchScope={searchScope}
             />
           </div>
         </main>

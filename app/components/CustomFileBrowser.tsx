@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { list, getUrl } from 'aws-amplify/storage';
 import { FileContextMenu, ContextMenuAction } from './FileContextMenu';
-import { SortOption } from './Toolbar';
+import { SortOption, SearchScope } from './Toolbar';
 
 export interface FileItem {
   key: string;
@@ -28,6 +28,7 @@ interface CustomFileBrowserProps {
   addNotification: (title: string, message: string, type: NotificationType, path?: string) => void;
   searchQuery: string;
   sortOption: SortOption;
+  searchScope: SearchScope;
 }
 
 export function CustomFileBrowser({
@@ -43,9 +44,12 @@ export function CustomFileBrowser({
   addNotification,
   searchQuery,
   sortOption,
+  searchScope,
 }: CustomFileBrowserProps) {
   const [items, setItems] = useState<FileItem[]>([]);
+  const [allItems, setAllItems] = useState<FileItem[]>([]); // For global search
   const [loading, setLoading] = useState(true);
+  const [searchLoading, setSearchLoading] = useState(false);
   const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set());
   const [contextMenu, setContextMenu] = useState<{ item: FileItem; x: number; y: number } | null>(null);
 
@@ -102,9 +106,62 @@ export function CustomFileBrowser({
     }
   }, [currentPath, showToast]);
 
+  // Fetch all items for global search
+  const fetchAllItems = useCallback(async () => {
+    setSearchLoading(true);
+    try {
+      const result = await list({
+        path: '', // Search from root
+        options: { listAll: true },
+      });
+
+      const fileItems: FileItem[] = [];
+
+      for (const item of result.items) {
+        // Skip placeholder files like .keep
+        if (item.path.endsWith('.keep')) continue;
+
+        const parts = item.path.split('/').filter(Boolean);
+        if (parts.length === 0) continue;
+
+        const fileName = parts[parts.length - 1];
+        const parentPath = item.path.substring(0, item.path.lastIndexOf('/') + 1);
+
+        fileItems.push({
+          key: item.path,
+          name: fileName,
+          type: 'file',
+          size: item.size,
+          lastModified: item.lastModified,
+          path: item.path,
+        });
+      }
+
+      setAllItems(fileItems);
+    } catch (error) {
+      console.error('Error fetching all items:', error);
+    } finally {
+      setSearchLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     fetchItems();
   }, [fetchItems, refreshKey]);
+
+  // Fetch all items when scope changes to 'all' and there's a search query
+  useEffect(() => {
+    if (searchScope === 'all' && searchQuery.trim() && allItems.length === 0) {
+      fetchAllItems();
+    }
+  }, [searchScope, searchQuery, allItems.length, fetchAllItems]);
+
+  // Refetch all items when refresh key changes (if we're in global search mode)
+  useEffect(() => {
+    if (searchScope === 'all' && searchQuery.trim()) {
+      fetchAllItems();
+    }
+  }, [refreshKey, searchScope, searchQuery, fetchAllItems]);
 
   // Clear selection when path changes
   useEffect(() => {
@@ -112,14 +169,24 @@ export function CustomFileBrowser({
     onSelectionChange([]);
   }, [currentPath, onSelectionChange]);
 
-  // Filter items based on search query
+  // Filter items based on search query and scope
   const filteredItems = useMemo(() => {
     if (!searchQuery.trim()) return items;
+
     const query = searchQuery.toLowerCase();
-    return items.filter(item =>
-      item.name.toLowerCase().includes(query)
-    );
-  }, [items, searchQuery]);
+
+    if (searchScope === 'all') {
+      // Search all items
+      return allItems.filter(item =>
+        item.name.toLowerCase().includes(query)
+      );
+    } else {
+      // Search current folder only
+      return items.filter(item =>
+        item.name.toLowerCase().includes(query)
+      );
+    }
+  }, [items, allItems, searchQuery, searchScope]);
 
   // Sort items based on sortOption from toolbar
   const sortedItems = useMemo(() => {
@@ -338,10 +405,10 @@ export function CustomFileBrowser({
       </div>
 
       {/* Loading State */}
-      {loading && (
+      {(loading || searchLoading) && (
         <div className="file-table-loading">
           <div className="loading-spinner"></div>
-          <span>Loading files...</span>
+          <span>{searchLoading ? 'Searching all files...' : 'Loading files...'}</span>
         </div>
       )}
 
@@ -387,12 +454,26 @@ export function CustomFileBrowser({
               </div>
               <div className="file-table-cell name-cell">
                 <span className="file-icon">{getFileIcon(item)}</span>
-                <span
-                  className={`file-name ${item.type === 'folder' ? 'folder-name' : ''}`}
-                  onClick={() => item.type === 'folder' && onNavigate(item.path)}
-                >
-                  {item.name}
-                </span>
+                <div className="file-name-container">
+                  <span
+                    className={`file-name ${item.type === 'folder' ? 'folder-name' : ''}`}
+                    onClick={() => item.type === 'folder' && onNavigate(item.path)}
+                  >
+                    {item.name}
+                  </span>
+                  {searchScope === 'all' && searchQuery.trim() && (
+                    <span
+                      className="file-location"
+                      onClick={() => {
+                        const parentPath = item.path.substring(0, item.path.lastIndexOf('/') + 1);
+                        onNavigate(parentPath);
+                      }}
+                      title="Go to folder"
+                    >
+                      📁 {item.path.substring(0, item.path.lastIndexOf('/')) || 'Root'}
+                    </span>
+                  )}
+                </div>
               </div>
               <div className="file-table-cell date-cell">
                 {formatDate(item.lastModified)}
@@ -416,9 +497,10 @@ export function CustomFileBrowser({
       )}
 
       {/* Search results count */}
-      {!loading && searchQuery && filteredItems.length > 0 && (
+      {!loading && !searchLoading && searchQuery && filteredItems.length > 0 && (
         <div className="search-results-count">
           Found {filteredItems.length} item{filteredItems.length !== 1 ? 's' : ''} matching "{searchQuery}"
+          {searchScope === 'all' && <span className="search-scope-indicator"> (searching all files)</span>}
         </div>
       )}
 

@@ -2,6 +2,7 @@
 import React from 'react';
 
 export type SortOption = 'name-asc' | 'name-desc' | 'date-newest' | 'date-oldest';
+export type SearchScope = 'current' | 'all';
 
 interface ToolbarProps {
   selectedCount: number;
@@ -17,6 +18,9 @@ interface ToolbarProps {
   onSearchChange: (query: string) => void;
   sortOption: SortOption;
   onSortChange: (option: SortOption) => void;
+  searchScope: SearchScope;
+  onSearchScopeChange: (scope: SearchScope) => void;
+  currentFolderName: string;
 }
 
 export function Toolbar({
@@ -33,6 +37,9 @@ export function Toolbar({
   onSearchChange,
   sortOption,
   onSortChange,
+  searchScope,
+  onSearchScopeChange,
+  currentFolderName,
 }: ToolbarProps) {
   const hasSelection = selectedCount > 0;
 
@@ -111,25 +118,36 @@ export function Toolbar({
           </span>
         )}
 
-        {/* Search Input */}
-        <div className="toolbar-search">
-          <span className="search-icon">🔍</span>
-          <input
-            type="text"
-            className="search-input"
-            placeholder="Search files..."
-            value={searchQuery}
-            onChange={(e) => onSearchChange(e.target.value)}
-          />
-          {searchQuery && (
-            <button
-              className="search-clear"
-              onClick={() => onSearchChange('')}
-              title="Clear search"
-            >
-              ×
-            </button>
-          )}
+        {/* Search Input with Scope */}
+        <div className="toolbar-search-container">
+          <div className="toolbar-search">
+            <span className="search-icon">🔍</span>
+            <input
+              type="text"
+              className="search-input"
+              placeholder={searchScope === 'current' ? `Search in ${currentFolderName}...` : 'Search all files...'}
+              value={searchQuery}
+              onChange={(e) => onSearchChange(e.target.value)}
+            />
+            {searchQuery && (
+              <button
+                className="search-clear"
+                onClick={() => onSearchChange('')}
+                title="Clear search"
+              >
+                ×
+              </button>
+            )}
+          </div>
+          <select
+            className="toolbar-search-scope"
+            value={searchScope}
+            onChange={(e) => onSearchScopeChange(e.target.value as SearchScope)}
+            title="Search scope"
+          >
+            <option value="current">Current Folder</option>
+            <option value="all">All Files</option>
+          </select>
         </div>
 
         {/* Sort Dropdown */}
