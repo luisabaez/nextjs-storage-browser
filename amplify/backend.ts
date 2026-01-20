@@ -14,8 +14,7 @@ const backend = defineBackend({
 });
 
 // Grant SES permissions to the pre-sign-up Lambda function
-const preSignUpLambda = backend.preSignUp.resources.lambda;
-preSignUpLambda.addToRolePolicy(
+backend.preSignUp.resources.lambda.addToRolePolicy(
   new PolicyStatement({
     effect: Effect.ALLOW,
     actions: ["ses:SendEmail", "ses:SendRawEmail"],
