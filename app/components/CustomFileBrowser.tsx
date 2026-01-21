@@ -21,6 +21,7 @@ interface CustomFileBrowserProps {
   onRename: (item: FileItem) => void;
   onMove: (item: FileItem, mode: 'move' | 'copy') => void;
   onDelete: (item: FileItem) => void;
+  onPreview: (item: FileItem) => void;
   onUpload: () => void;
   onSelectionChange: (items: FileItem[]) => void;
   refreshKey: number;
@@ -37,6 +38,7 @@ export function CustomFileBrowser({
   onRename,
   onMove,
   onDelete,
+  onPreview,
   onUpload,
   onSelectionChange,
   refreshKey,
@@ -235,10 +237,12 @@ export function CustomFileBrowser({
     }
   };
 
-  // Handle folder double-click
+  // Handle item double-click - folders open, files preview
   const handleItemDoubleClick = (item: FileItem) => {
     if (item.type === 'folder') {
       onNavigate(item.path);
+    } else {
+      onPreview(item);
     }
   };
 
@@ -273,19 +277,31 @@ export function CustomFileBrowser({
 
   // Context menu actions
   const getContextMenuActions = (item: FileItem): ContextMenuAction[] => {
-    const actions: ContextMenuAction[] = [
-      {
+    const actions: ContextMenuAction[] = [];
+
+    if (item.type === 'folder') {
+      actions.push({
         id: 'open',
-        label: item.type === 'folder' ? 'Open' : 'Download',
-        icon: item.type === 'folder' ? <span>📂</span> : <span>⬇️</span>,
-        onClick: () => {
-          if (item.type === 'folder') {
-            onNavigate(item.path);
-          } else {
-            handleDownload(item);
-          }
-        },
-      },
+        label: 'Open',
+        icon: <span>📂</span>,
+        onClick: () => onNavigate(item.path),
+      });
+    } else {
+      actions.push({
+        id: 'preview',
+        label: 'Preview',
+        icon: <span>👁️</span>,
+        onClick: () => onPreview(item),
+      });
+      actions.push({
+        id: 'download',
+        label: 'Download',
+        icon: <span>⬇️</span>,
+        onClick: () => handleDownload(item),
+      });
+    }
+
+    actions.push(
       {
         id: 'rename',
         label: 'Rename',
@@ -311,8 +327,9 @@ export function CustomFileBrowser({
         onClick: () => onDelete(item),
         divider: true,
         danger: true,
-      },
-    ];
+      }
+    );
+
     return actions;
   };
 

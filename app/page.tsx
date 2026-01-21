@@ -17,6 +17,7 @@ import { CreateFolderModal } from './components/CreateFolderModal';
 import { ToastContainer, useToast } from './components/Toast';
 import { NotificationCenter, useNotifications } from './components/NotificationCenter';
 import { UploadProgress, UploadItem } from './components/UploadProgress';
+import { FilePreviewModal } from './components/FilePreviewModal';
 
 // Amplify Storage imports
 import { uploadData, remove, copy, list, getUrl } from 'aws-amplify/storage';
@@ -83,6 +84,7 @@ function FileBrowser() {
   const [uploads, setUploads] = useState<UploadItem[]>([]);
   const [isNotificationOpen, setIsNotificationOpen] = useState(false);
   const [availableFolders, setAvailableFolders] = useState<{ path: string; name: string; level: number }[]>([]);
+  const [previewFile, setPreviewFile] = useState<FileItem | null>(null);
 
   // Search and sort state
   const [searchQuery, setSearchQuery] = useState('');
@@ -617,6 +619,41 @@ function FileBrowser() {
     setRefreshKey(prev => prev + 1);
   };
 
+  // Preview file handler
+  const handlePreview = useCallback((item: FileItem) => {
+    if (item.type === 'folder') {
+      info('Cannot preview folders');
+      return;
+    }
+    setPreviewFile(item);
+  }, [info]);
+
+  // Download preview file handler
+  const handleDownloadPreviewFile = async () => {
+    if (!previewFile) return;
+
+    try {
+      const result = await getUrl({
+        path: previewFile.path,
+        options: { expiresIn: 3600 },
+      });
+
+      const link = document.createElement('a');
+      link.href = result.url.toString();
+      link.download = previewFile.name;
+      link.target = '_blank';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+
+      success(`Downloading ${previewFile.name}`);
+      addNotification('File Downloaded', `${previewFile.name} downloaded`, 'download', previewFile.path);
+    } catch (err) {
+      console.error('Download error:', err);
+      showError(`Failed to download ${previewFile.name}`);
+    }
+  };
+
   const breadcrumbs = getBreadcrumbPath();
 
   return (
@@ -836,6 +873,7 @@ function FileBrowser() {
               onRename={(item) => setRenameItem(item)}
               onMove={(item, mode) => setMoveItem({ item, mode })}
               onDelete={(item) => setDeleteConfirm(item)}
+              onPreview={handlePreview}
               onUpload={() => fileInputRef.current?.click()}
               onSelectionChange={handleSelectionChange}
               refreshKey={refreshKey}
@@ -983,6 +1021,14 @@ function FileBrowser() {
         confirmText="Delete All"
         isDangerous
         isLoading={isProcessing}
+      />
+
+      {/* File Preview Modal */}
+      <FilePreviewModal
+        isOpen={!!previewFile}
+        onClose={() => setPreviewFile(null)}
+        file={previewFile}
+        onDownload={handleDownloadPreviewFile}
       />
 
       {/* Upload Progress */}
