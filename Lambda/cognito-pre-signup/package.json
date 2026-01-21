@@ -1,0 +1,9 @@
+{
+  "name": "cognito-pre-signup",
+  "version": "1.0.0",
+  "description": "Cognito Pre Sign-Up Lambda trigger for admin approval workflow",
+  "main": "index.js",
+  "dependencies": {
+    "@aws-sdk/client-ses": "^3.400.0"
+  }
+}

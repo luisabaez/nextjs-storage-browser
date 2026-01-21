@@ -1,0 +1,11 @@
+{
+  "name": "user-approval-handler",
+  "version": "1.0.0",
+  "description": "Lambda function to handle user approval/denial for Hacienda ERP",
+  "main": "index.js",
+  "dependencies": {
+    "@aws-sdk/client-cognito-identity-provider": "^3.0.0",
+    "@aws-sdk/client-ses": "^3.0.0",
+    "@aws-sdk/client-lambda": "^3.0.0"
+  }
+}

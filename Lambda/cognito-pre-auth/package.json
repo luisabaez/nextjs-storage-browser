@@ -1,0 +1,7 @@
+{
+  "name": "cognito-pre-auth",
+  "version": "1.0.0",
+  "description": "Cognito Pre Authentication Lambda trigger to block unapproved users",
+  "main": "index.js",
+  "dependencies": {}
+}

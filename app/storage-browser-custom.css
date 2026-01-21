@@ -171,6 +171,45 @@ body {
   gap: 16px;
 }
 
+/* Admin Link */
+.admin-link {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: var(--radius-md);
+  backdrop-filter: blur(4px);
+  color: white;
+  text-decoration: none;
+  font-size: 14px;
+  font-weight: 500;
+  transition: all 0.2s ease;
+}
+
+.admin-link:hover {
+  background: rgba(255, 255, 255, 0.25);
+  transform: translateY(-1px);
+}
+
+.admin-icon {
+  font-size: 16px;
+}
+
+.admin-text {
+  color: rgba(255, 255, 255, 0.95);
+}
+
+@media (max-width: 640px) {
+  .admin-text {
+    display: none;
+  }
+
+  .admin-link {
+    padding: 8px 10px;
+  }
+}
+
 .user-info {
   display: flex;
   align-items: center;

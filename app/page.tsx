@@ -6,6 +6,8 @@ import { Button, withAuthenticator } from '@aws-amplify/ui-react';
 import '@aws-amplify/ui-react/styles.css';
 import './components/enhanced-file-browser.css';
 import config from '../amplify_outputs.json';
+import Link from 'next/link';
+import { isAdminUser } from './admin/types';
 
 // Components
 import { CustomFileBrowser, FileItem } from './components/CustomFileBrowser';
@@ -59,6 +61,7 @@ const defaultQuickLinks: QuickLink[] = [
 
 function FileBrowser() {
   const [userEmail, setUserEmail] = useState<string>('');
+  const [isAdmin, setIsAdmin] = useState(false);
   const [currentPath, setCurrentPath] = useState<string>('');
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -120,11 +123,13 @@ function FileBrowser() {
   }, [quickLinks]);
 
   useEffect(() => {
-    // Fetch user attributes
+    // Fetch user attributes and check admin status
     async function getAttributes() {
       try {
         const attributes = await fetchUserAttributes();
-        setUserEmail(attributes.email || '');
+        const email = attributes.email || '';
+        setUserEmail(email);
+        setIsAdmin(isAdminUser(email));
       } catch (error) {
         console.error('Error fetching user attributes', error);
       }
@@ -686,6 +691,13 @@ function FileBrowser() {
         </div>
 
         <div className="header-right">
+          {isAdmin && (
+            <Link href="/admin" className="admin-link" title="Admin Dashboard">
+              <span className="admin-icon">🛡️</span>
+              <span className="admin-text">Admin</span>
+            </Link>
+          )}
+
           <button
             className="notification-btn"
             onClick={() => setIsNotificationOpen(true)}
