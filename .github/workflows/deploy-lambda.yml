@@ -5,14 +5,16 @@
 # WHAT THIS DOES:
 # ---------------
 # When you push changes to the Lambda/ folder in GitHub, this workflow
-# automatically deploys all your Python code to the "TestFunction" Lambda
-# in AWS.
+# automatically deploys your Python code to the appropriate Lambda function
+# based on the branch:
+#   - main branch    → deploys to "TestFunction" (PRODUCTION)
+#   - develop branch → deploys to "Hacienda-ERP-FileBrowser-Develop" (DEV)
 #
 # HOW IT WORKS:
 # -------------
-# 1. Packages all Python files from Lambda/ folder into a single zip
-# 2. Uploads the zip to the TestFunction Lambda in AWS
-# 3. All 20 Python files are deployed together as one Lambda function
+# 1. Determines which Lambda to deploy based on branch name
+# 2. Packages all Python files from Lambda/ folder into a single zip
+# 3. Uploads the zip to the appropriate Lambda in AWS
 #
 # WHICH FILE RUNS?
 # ----------------
@@ -28,9 +30,9 @@ name: Deploy Lambda Function
 on:
   push:
     branches:
-      - various-new-fucntionality
       - main
       - master
+      - develop
     paths:
       # Only runs when Lambda folder changes
       - 'Lambda/**'
@@ -41,15 +43,13 @@ on:
 env:
   AWS_REGION: us-east-1
   PYTHON_VERSION: '3.11'
-  # The name of your Lambda function in AWS
-  LAMBDA_FUNCTION_NAME: TestFunction
 
 jobs:
   # ==========================================================================
   # JOB: PACKAGE AND DEPLOY
   # ==========================================================================
   deploy:
-    name: Package and Deploy to TestFunction
+    name: Package and Deploy Lambda
     runs-on: ubuntu-latest
 
     steps:
@@ -60,7 +60,26 @@ jobs:
         uses: actions/checkout@v4
 
       # ----------------------------------------------------------------------
-      # STEP 2: Set up Python
+      # STEP 2: Determine Lambda function name based on branch
+      # ----------------------------------------------------------------------
+      - name: Set Lambda Function Name
+        id: set-lambda
+        run: |
+          if [[ "${{ github.ref }}" == "refs/heads/main" || "${{ github.ref }}" == "refs/heads/master" ]]; then
+            echo "LAMBDA_FUNCTION_NAME=TestFunction" >> $GITHUB_ENV
+            echo "ENVIRONMENT=PRODUCTION" >> $GITHUB_ENV
+            echo "Deploying to PRODUCTION Lambda: TestFunction"
+          elif [[ "${{ github.ref }}" == "refs/heads/develop" ]]; then
+            echo "LAMBDA_FUNCTION_NAME=Hacienda-ERP-FileBrowser-Develop" >> $GITHUB_ENV
+            echo "ENVIRONMENT=DEVELOPMENT" >> $GITHUB_ENV
+            echo "Deploying to DEVELOPMENT Lambda: Hacienda-ERP-FileBrowser-Develop"
+          else
+            echo "Unknown branch - skipping deployment"
+            exit 1
+          fi
+
+      # ----------------------------------------------------------------------
+      # STEP 3: Set up Python
       # ----------------------------------------------------------------------
       - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5
@@ -68,7 +87,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
 
       # ----------------------------------------------------------------------
-      # STEP 3: Install dependencies (if requirements.txt exists)
+      # STEP 4: Install dependencies (if requirements.txt exists)
       # ----------------------------------------------------------------------
       - name: Install Dependencies
         run: |
@@ -80,12 +99,14 @@ jobs:
           fi
 
       # ----------------------------------------------------------------------
-      # STEP 4: Create deployment package (zip file)
+      # STEP 5: Create deployment package (zip file)
       # ----------------------------------------------------------------------
       - name: Create Deployment Package
         run: |
           echo "========================================"
           echo "Creating Lambda deployment package..."
+          echo "Environment: ${{ env.ENVIRONMENT }}"
+          echo "Target Lambda: ${{ env.LAMBDA_FUNCTION_NAME }}"
           echo "========================================"
 
           cd Lambda
@@ -107,7 +128,7 @@ jobs:
           echo "========================================"
 
       # ----------------------------------------------------------------------
-      # STEP 5: Configure AWS credentials
+      # STEP 6: Configure AWS credentials
       # ----------------------------------------------------------------------
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -117,12 +138,13 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       # ----------------------------------------------------------------------
-      # STEP 6: Deploy to AWS Lambda
+      # STEP 7: Deploy to AWS Lambda
       # ----------------------------------------------------------------------
       - name: Deploy to AWS Lambda
         run: |
           echo "========================================"
           echo "Deploying to Lambda: ${{ env.LAMBDA_FUNCTION_NAME }}"
+          echo "Environment: ${{ env.ENVIRONMENT }}"
           echo "========================================"
 
           aws lambda update-function-code \
@@ -136,12 +158,13 @@ jobs:
           echo "========================================"
 
       # ----------------------------------------------------------------------
-      # STEP 7: Show deployment info
+      # STEP 8: Show deployment info
       # ----------------------------------------------------------------------
       - name: Verify Deployment
         run: |
           echo "========================================"
           echo "Lambda Function Details:"
+          echo "Environment: ${{ env.ENVIRONMENT }}"
           echo "========================================"
 
           aws lambda get-function \
@@ -150,49 +173,21 @@ jobs:
             --output table
 
           echo ""
-          echo "Files deployed:"
-          echo "---------------"
-          echo "  - Split_CSV_File_By_BU_FiveCharacters.py"
-          echo "  - add_tags_to_s3_object.py"
-          echo "  - build_tsql_from_tags.py"
-          echo "  - execute_tsql.py"
-          echo "  - find_file_by_tags.py"
-          echo "  - generate_validation_file.py"
-          echo "  - get_aws_secret.py"
-          echo "  - get_bu_split_field.py"
-          echo "  - get_cognito_email.py"
-          echo "  - get_tags_from_file.py"
-          echo "  - lambda_function.py"
-          echo "  - load_file.py"
-          echo "  - load_file_ap_invoices_prifas.py"
-          echo "  - parse_filename.py"
-          echo "  - relocate_file.py"
-          echo "  - s3_helper.py"
-          echo "  - s3_upload.py"
-          echo "  - send_file_notification_email.py"
-          echo "  - validate_headers.py"
-          echo "  - validate_tag_values.py"
-          echo ""
           echo "========================================"
 
 # ============================================================================
-# HOW THIS WORKFLOW WORKS (VISUAL)
+# BRANCH → LAMBDA MAPPING
 # ============================================================================
 #
-#   GitHub Push to Lambda/ folder
-#              │
-#              ▼
-#   ┌─────────────────────────────────┐
-#   │  1. Checkout code               │
-#   │  2. Set up Python               │
-#   │  3. Install dependencies        │
-#   │  4. Zip all .py files together  │
-#   │  5. Configure AWS credentials   │
-#   │  6. Upload zip to TestFunction  │
-#   │  7. Verify deployment           │
-#   └─────────────────────────────────┘
-#              │
-#              ▼
-#   TestFunction Lambda updated with all 20 Python files!
+#   ┌─────────────────────────────────────────────────────────────────────┐
+#   │  BRANCH        │  LAMBDA FUNCTION                  │  ENVIRONMENT   │
+#   ├─────────────────────────────────────────────────────────────────────┤
+#   │  main/master   │  TestFunction                     │  PRODUCTION    │
+#   │  develop       │  Hacienda-ERP-FileBrowser-Develop │  DEVELOPMENT   │
+#   └─────────────────────────────────────────────────────────────────────┘
+#
+#   S3 Bucket Triggers:
+#   - hacienda-erp-dev → triggers Hacienda-ERP-FileBrowser-Develop
+#   - hacienda-erp-prd → triggers TestFunction (or Validation_FileHeaders)
 #
 # ============================================================================

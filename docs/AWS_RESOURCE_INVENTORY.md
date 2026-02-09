@@ -34,13 +34,13 @@ This document provides an inventory of all AWS resources used by the Hacienda ER
 
 ### Lambda Functions
 
-| Resource | Environment | Name | Purpose | Trigger | Action Needed |
-|----------|-------------|------|---------|---------|---------------|
-| Lambda | SHARED | `cognito-pre-signup-approval` | Sends admin email when new user signs up | Cognito Pre Sign-Up | None |
-| Lambda | SHARED | `cognito-pre-auth-approval` | Validates user is on approved list before login | Cognito Pre Auth | None |
-| Lambda | SHARED | `user-approval-handler` | Handles approve/deny actions, admin dashboard API | Lambda Function URL | None |
-| Lambda | DEV | `TestFunction` | S3 event trigger for file processing | S3 ObjectCreated (hacienda-erp-dev) | **Needs rename to `Validation_FileHeaders-DEV`** |
-| Lambda | PRD | `Validation_FileHeaders` | S3 event trigger for file validation | None configured | **Needs S3 trigger configuration** |
+| Resource | Environment | Name | Purpose | Trigger | Status |
+|----------|-------------|------|---------|---------|--------|
+| Lambda | SHARED | `cognito-pre-signup-approval` | Sends admin email when new user signs up | Cognito Pre Sign-Up | Active |
+| Lambda | SHARED | `cognito-pre-auth-approval` | Validates user is on approved list before login | Cognito Pre Auth | Active |
+| Lambda | SHARED | `user-approval-handler` | Handles approve/deny actions, admin dashboard API | Lambda Function URL | Active |
+| Lambda | DEV | `Hacienda-ERP-FileBrowser-Develop` | S3 event trigger for file processing (DEV) | S3 ObjectCreated (hacienda-erp-dev) | **Active** |
+| Lambda | PRD | `TestFunction` | S3 event trigger for file processing (PRD) | S3 ObjectCreated (hacienda-erp-prd) | Active |
 | Lambda | SHARED | `production-cashflow-automation` | Cashflow automation processing | Unknown | Review needed |
 | Lambda | SHARED | `UploadPRIFASSuppliers` | PRIFAS supplier upload processing | Unknown | Review needed |
 
@@ -104,8 +104,8 @@ This document provides an inventory of all AWS resources used by the Hacienda ER
 ## Action Items
 
 ### High Priority
-1. **Rename `TestFunction` Lambda** to `Validation_FileHeaders-DEV` for clarity
-2. **Configure S3 trigger** on `hacienda-erp-prd` bucket for `Validation_FileHeaders` Lambda
+1. ~~**Rename `TestFunction` Lambda**~~ - DONE: Created `Hacienda-ERP-FileBrowser-Develop` for DEV
+2. **Configure S3 trigger** on `hacienda-erp-prd` bucket for `TestFunction` Lambda (PRD)
 
 ### Medium Priority
 3. Review and potentially deprecate legacy Cognito user pools
@@ -114,7 +114,7 @@ This document provides an inventory of all AWS resources used by the Hacienda ER
 
 ### Low Priority
 6. Clean up unused Amplify-generated Lambda functions
-7. Standardize naming conventions across all resources
+7. Consider renaming `TestFunction` to `Hacienda-ERP-FileBrowser-Production` for consistency
 
 ---
 
@@ -138,7 +138,7 @@ This document provides an inventory of all AWS resources used by the Hacienda ER
 {
   "LambdaFunctionConfigurations": [
     {
-      "LambdaFunctionArn": "arn:aws:lambda:us-east-1:087243890715:function:TestFunction",
+      "LambdaFunctionArn": "arn:aws:lambda:us-east-1:087243890715:function:Hacienda-ERP-FileBrowser-Develop",
       "Events": ["s3:ObjectCreated:*"]
     }
   ]
@@ -146,7 +146,10 @@ This document provides an inventory of all AWS resources used by the Hacienda ER
 ```
 
 **hacienda-erp-prd:**
-- No Lambda triggers configured
+- Lambda trigger needed for `TestFunction`
 
-### Recommended Configuration
-Both DEV and PRD buckets should have matching trigger configurations pointing to their respective Lambda functions.
+### Branch → Lambda → S3 Mapping
+| Branch | Lambda Function | S3 Bucket |
+|--------|-----------------|-----------|
+| `develop` | `Hacienda-ERP-FileBrowser-Develop` | `hacienda-erp-dev` |
+| `main` | `TestFunction` | `hacienda-erp-prd` |
