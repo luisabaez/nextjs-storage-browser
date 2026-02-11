@@ -619,6 +619,18 @@
   gap: 8px;
 }
 
+.user-email-link {
+  color: #3b82f6;
+  text-decoration: none;
+  font-weight: 500;
+  transition: color 0.2s;
+}
+
+.user-email-link:hover {
+  color: #2563eb;
+  text-decoration: underline;
+}
+
 .admin-badge {
   display: inline-block;
   padding: 2px 8px;

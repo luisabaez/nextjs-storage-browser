@@ -586,7 +586,12 @@ function AdminDashboard() {
                         <tr key={user.email}>
                           <td>
                             <div className="user-email-cell">
-                              {user.email}
+                              <Link
+                                href={`/admin/users/${encodeURIComponent(user.username)}`}
+                                className="user-email-link"
+                              >
+                                {user.email}
+                              </Link>
                               {isUserAdmin && (
                                 <span className="admin-badge">Admin</span>
                               )}
@@ -604,27 +609,32 @@ function AdminDashboard() {
                             </span>
                           </td>
                           <td>
-                            {!isApproved && user.status === 'CONFIRMED' && (
-                              <div className="action-buttons">
-                                <button
-                                  className="btn btn-sm btn-success"
-                                  onClick={() => handleApprove(user.email)}
-                                  disabled={processingUser === user.email}
-                                >
-                                  {processingUser === user.email ? 'Processing...' : 'Approve'}
-                                </button>
-                                <button
-                                  className="btn btn-sm btn-danger"
-                                  onClick={() => handleDeny(user.email)}
-                                  disabled={processingUser === user.email}
-                                >
-                                  Deny
-                                </button>
-                              </div>
-                            )}
-                            {isApproved && (
-                              <span className="approved-text">Access Granted</span>
-                            )}
+                            <div className="action-buttons">
+                              {!isApproved && user.status === 'CONFIRMED' && (
+                                <>
+                                  <button
+                                    className="btn btn-sm btn-success"
+                                    onClick={() => handleApprove(user.email)}
+                                    disabled={processingUser === user.email}
+                                  >
+                                    {processingUser === user.email ? 'Processing...' : 'Approve'}
+                                  </button>
+                                  <button
+                                    className="btn btn-sm btn-danger"
+                                    onClick={() => handleDeny(user.email)}
+                                    disabled={processingUser === user.email}
+                                  >
+                                    Deny
+                                  </button>
+                                </>
+                              )}
+                              <Link
+                                href={`/admin/users/${encodeURIComponent(user.username)}`}
+                                className="btn btn-sm btn-secondary"
+                              >
+                                Permissions
+                              </Link>
+                            </div>
                           </td>
                         </tr>
                       );

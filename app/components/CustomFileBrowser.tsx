@@ -3,6 +3,16 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { list, getUrl } from 'aws-amplify/storage';
 import { FileContextMenu, ContextMenuAction } from './FileContextMenu';
 import { SortOption, SearchScope } from './Toolbar';
+import {
+  isAdminUser,
+  extractSourceFromPath,
+  getUserPermissions,
+  SourceTag
+} from '../admin/types';
+import {
+  generateShareableLink,
+  copyToClipboard
+} from '../lib/shareableLinks';
 
 export interface FileItem {
   key: string;
@@ -11,6 +21,7 @@ export interface FileItem {
   size?: number;
   lastModified?: Date;
   path: string;
+  sourceTag?: string; // Source tag extracted from path
 }
 
 type NotificationType = 'upload' | 'download' | 'delete' | 'move' | 'copy' | 'info' | 'error';
@@ -30,6 +41,30 @@ interface CustomFileBrowserProps {
   searchQuery: string;
   sortOption: SortOption;
   searchScope: SearchScope;
+  userEmail?: string; // Current user email for permission filtering
+}
+
+// Helper function to check if user can access a file based on source permissions
+function canUserAccessFile(userEmail: string | undefined, filePath: string): boolean {
+  if (!userEmail) return true; // If no user email, allow access (will be filtered at auth level)
+
+  // Admins can access everything
+  if (isAdminUser(userEmail)) return true;
+
+  // Extract source from path
+  const source = extractSourceFromPath(filePath);
+
+  // If no source tag in path, allow access (file not in source-protected area)
+  if (!source) return true;
+
+  // Check user permissions
+  const permissions = getUserPermissions(userEmail);
+  if (!permissions || permissions.allowedSources.length === 0) {
+    // No permissions set means no access to source-protected files
+    return false;
+  }
+
+  return permissions.allowedSources.includes(source as SourceTag);
 }
 
 export function CustomFileBrowser({
@@ -47,6 +82,7 @@ export function CustomFileBrowser({
   searchQuery,
   sortOption,
   searchScope,
+  userEmail,
 }: CustomFileBrowserProps) {
   const [items, setItems] = useState<FileItem[]>([]);
   const [allItems, setAllItems] = useState<FileItem[]>([]); // For global search
@@ -73,8 +109,14 @@ export function CustomFileBrowser({
 
         if (parts.length === 0) continue;
 
+        // Check source permission for the full path
+        if (!canUserAccessFile(userEmail, item.path)) {
+          continue; // Skip files/folders user doesn't have permission to access
+        }
+
         if (parts.length === 1) {
           // Direct file in current folder
+          const sourceTag = extractSourceFromPath(item.path);
           fileItems.push({
             key: item.path,
             name: parts[0],
@@ -82,6 +124,7 @@ export function CustomFileBrowser({
             size: item.size,
             lastModified: item.lastModified,
             path: item.path,
+            sourceTag: sourceTag || undefined,
           });
         } else {
           // Subfolder
@@ -89,11 +132,13 @@ export function CustomFileBrowser({
           const folderPath = currentPath + folderName + '/';
           if (!seenFolders.has(folderPath)) {
             seenFolders.add(folderPath);
+            const sourceTag = extractSourceFromPath(folderPath);
             fileItems.push({
               key: folderPath,
               name: folderName,
               type: 'folder',
               path: folderPath,
+              sourceTag: sourceTag || undefined,
             });
           }
         }
@@ -106,7 +151,7 @@ export function CustomFileBrowser({
     } finally {
       setLoading(false);
     }
-  }, [currentPath, showToast]);
+  }, [currentPath, showToast, userEmail]);
 
   // Fetch all items for global search
   const fetchAllItems = useCallback(async () => {
@@ -123,11 +168,16 @@ export function CustomFileBrowser({
         // Skip placeholder files like .keep
         if (item.path.endsWith('.keep')) continue;
 
+        // Check source permission for the full path
+        if (!canUserAccessFile(userEmail, item.path)) {
+          continue; // Skip files user doesn't have permission to access
+        }
+
         const parts = item.path.split('/').filter(Boolean);
         if (parts.length === 0) continue;
 
         const fileName = parts[parts.length - 1];
-        const parentPath = item.path.substring(0, item.path.lastIndexOf('/') + 1);
+        const sourceTag = extractSourceFromPath(item.path);
 
         fileItems.push({
           key: item.path,
@@ -136,6 +186,7 @@ export function CustomFileBrowser({
           size: item.size,
           lastModified: item.lastModified,
           path: item.path,
+          sourceTag: sourceTag || undefined,
         });
       }
 
@@ -145,7 +196,7 @@ export function CustomFileBrowser({
     } finally {
       setSearchLoading(false);
     }
-  }, []);
+  }, [userEmail]);
 
   useEffect(() => {
     fetchItems();
@@ -246,6 +297,27 @@ export function CustomFileBrowser({
     }
   };
 
+  // Handle share - generate shareable link and copy to clipboard
+  const handleShare = async (item: FileItem) => {
+    if (item.type === 'folder') {
+      showToast('Cannot share folders directly', 'info');
+      return;
+    }
+    try {
+      const { url } = generateShareableLink(item.path, item.name, userEmail || 'unknown');
+      const copied = await copyToClipboard(url);
+      if (copied) {
+        showToast(`Link copied to clipboard!`, 'success');
+        addNotification('Link Shared', `Shareable link created for ${item.name}`, 'info', item.path);
+      } else {
+        showToast('Failed to copy link', 'error');
+      }
+    } catch (error) {
+      console.error('Share error:', error);
+      showToast('Failed to create shareable link', 'error');
+    }
+  };
+
   // Handle download
   const handleDownload = async (item: FileItem) => {
     if (item.type === 'folder') {
@@ -298,6 +370,12 @@ export function CustomFileBrowser({
         label: 'Download',
         icon: <span>⬇️</span>,
         onClick: () => handleDownload(item),
+      });
+      actions.push({
+        id: 'share',
+        label: 'Share Link',
+        icon: <span>🔗</span>,
+        onClick: () => handleShare(item),
       });
     }
 

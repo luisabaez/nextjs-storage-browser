@@ -894,6 +894,7 @@ function FileBrowser() {
               searchQuery={searchQuery}
               sortOption={sortOption}
               searchScope={searchScope}
+              userEmail={userEmail}
             />
           </div>
         </main>
