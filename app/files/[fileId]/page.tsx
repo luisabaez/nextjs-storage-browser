@@ -1,15 +1,14 @@
 'use client';
 
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Amplify } from 'aws-amplify';
-import { signOut, fetchUserAttributes } from 'aws-amplify/auth';
+import { fetchUserAttributes } from 'aws-amplify/auth';
 import { withAuthenticator } from '@aws-amplify/ui-react';
-import { getUrl } from 'aws-amplify/storage';
 import '@aws-amplify/ui-react/styles.css';
 import '../../components/enhanced-file-browser.css';
 import './shared-file.css';
 import config from '../../../amplify_outputs.json';
-import { useParams, useRouter, useSearchParams } from 'next/navigation';
+import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import {
   isAdminUser,
@@ -17,37 +16,34 @@ import {
   getUserPermissions,
   SourceTag,
 } from '../../admin/types';
-import { decodeShareableFileId, getSharedFileInfo } from '../../lib/shareableLinks';
+import { getSharedFileInfo } from '../../lib/shareableLinks';
 
 Amplify.configure(config);
 
-interface FileInfo {
-  path: string;
-  name: string;
-  source?: string;
-}
-
+/**
+ * Shared File Page
+ *
+ * This page handles shareable file links. When a user visits a shared link:
+ * 1. They are authenticated (via withAuthenticator)
+ * 2. Their permissions are checked
+ * 3. If authorized, they are redirected to the main file browser at the file's location
+ *    with a query parameter to trigger file preview
+ */
 function SharedFilePage() {
   const params = useParams();
   const router = useRouter();
-  const searchParams = useSearchParams();
   const fileId = params.fileId as string;
 
-  const [userEmail, setUserEmail] = useState('');
   const [isLoading, setIsLoading] = useState(true);
-  const [fileInfo, setFileInfo] = useState<FileInfo | null>(null);
-  const [fileUrl, setFileUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [hasPermission, setHasPermission] = useState(false);
+  const [fileSource, setFileSource] = useState<string | null>(null);
 
-  // Check user and fetch file
   useEffect(() => {
-    async function checkUserAndLoadFile() {
+    async function checkUserAndRedirect() {
       try {
         // Get user info
         const attributes = await fetchUserAttributes();
         const email = attributes.email || '';
-        setUserEmail(email);
 
         // Decode file ID to get path
         const sharedInfo = getSharedFileInfo(fileId);
@@ -59,8 +55,7 @@ function SharedFilePage() {
 
         const { path, name } = sharedInfo;
         const source = extractSourceFromPath(path);
-
-        setFileInfo({ path, name, source: source || undefined });
+        setFileSource(source);
 
         // Check permissions
         const isAdmin = isAdminUser(email);
@@ -74,64 +69,56 @@ function SharedFilePage() {
           canAccess = true;
         }
 
-        setHasPermission(canAccess);
-
-        if (canAccess) {
-          // Get signed URL for the file
-          const urlResult = await getUrl({
-            path: path,
-            options: { expiresIn: 3600 }, // 1 hour
-          });
-          setFileUrl(urlResult.url.toString());
+        if (!canAccess) {
+          setError('access_denied');
+          setIsLoading(false);
+          return;
         }
+
+        // Get the parent folder path for navigation
+        const parentPath = path.substring(0, path.lastIndexOf('/') + 1);
+
+        // Redirect to main file browser with the file path
+        // The preview query param will trigger the file preview modal
+        const encodedPath = encodeURIComponent(path);
+        router.replace(`/?path=${encodeURIComponent(parentPath)}&preview=${encodedPath}`);
+
       } catch (err) {
-        console.error('Error loading shared file:', err);
-        setError('Failed to load the shared file');
-      } finally {
+        console.error('Error processing shared file link:', err);
+        setError('Failed to process the shared file link');
         setIsLoading(false);
       }
     }
 
-    checkUserAndLoadFile();
-  }, [fileId]);
-
-  // Handle download
-  const handleDownload = async () => {
-    if (!fileUrl || !fileInfo) return;
-
-    try {
-      const response = await fetch(fileUrl);
-      const blob = await response.blob();
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = fileInfo.name;
-      document.body.appendChild(a);
-      a.click();
-      window.URL.revokeObjectURL(url);
-      document.body.removeChild(a);
-    } catch (err) {
-      console.error('Download error:', err);
-    }
-  };
-
-  // Get file type for preview
-  const getFileType = (name: string): string => {
-    const ext = name.split('.').pop()?.toLowerCase() || '';
-    if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp'].includes(ext)) return 'image';
-    if (ext === 'pdf') return 'pdf';
-    if (['mp4', 'webm', 'ogg', 'mov'].includes(ext)) return 'video';
-    if (['mp3', 'wav', 'ogg', 'aac', 'm4a'].includes(ext)) return 'audio';
-    if (['doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx'].includes(ext)) return 'office';
-    if (['txt', 'md', 'json', 'xml', 'csv'].includes(ext)) return 'text';
-    return 'other';
-  };
+    checkUserAndRedirect();
+  }, [fileId, router]);
 
   if (isLoading) {
     return (
       <div className="shared-file-loading">
         <div className="spinner"></div>
         <p>Loading file...</p>
+      </div>
+    );
+  }
+
+  if (error === 'access_denied') {
+    return (
+      <div className="shared-file-error">
+        <div className="error-icon">🔒</div>
+        <h1>Access Denied</h1>
+        <p>You don't have permission to view this file.</p>
+        {fileSource && (
+          <p className="error-detail">
+            This file requires access to the <strong>{fileSource}</strong> data source.
+            Please contact an administrator to request access.
+          </p>
+        )}
+        <div className="error-actions">
+          <Link href="/" className="btn btn-primary">
+            Go to File Browser
+          </Link>
+        </div>
       </div>
     );
   }
@@ -149,116 +136,7 @@ function SharedFilePage() {
     );
   }
 
-  if (!hasPermission) {
-    return (
-      <div className="shared-file-error">
-        <div className="error-icon">🔒</div>
-        <h1>Access Denied</h1>
-        <p>You don't have permission to view this file.</p>
-        {fileInfo?.source && (
-          <p className="error-detail">
-            This file requires access to the <strong>{fileInfo.source}</strong> data source.
-            Please contact an administrator to request access.
-          </p>
-        )}
-        <div className="error-actions">
-          <Link href="/" className="btn btn-primary">
-            Go to File Browser
-          </Link>
-          <button onClick={() => signOut()} className="btn btn-secondary">
-            Sign Out
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  const fileType = fileInfo ? getFileType(fileInfo.name) : 'other';
-
-  return (
-    <div className="shared-file-container">
-      <header className="shared-file-header">
-        <Link href="/" className="back-link">
-          <span>←</span> Back to Files
-        </Link>
-        <div className="header-info">
-          <h1>{fileInfo?.name}</h1>
-          {fileInfo?.source && (
-            <span className="source-badge">{fileInfo.source}</span>
-          )}
-        </div>
-        <div className="header-actions">
-          <span className="user-email">{userEmail}</span>
-          <button onClick={() => signOut()} className="btn btn-ghost">
-            Sign Out
-          </button>
-        </div>
-      </header>
-
-      <main className="shared-file-main">
-        <div className="file-preview-container">
-          {fileType === 'image' && fileUrl && (
-            <img src={fileUrl} alt={fileInfo?.name} className="preview-image" />
-          )}
-
-          {fileType === 'pdf' && fileUrl && (
-            <iframe
-              src={fileUrl}
-              className="preview-pdf"
-              title={fileInfo?.name}
-            />
-          )}
-
-          {fileType === 'video' && fileUrl && (
-            <video controls className="preview-video">
-              <source src={fileUrl} />
-              Your browser does not support the video tag.
-            </video>
-          )}
-
-          {fileType === 'audio' && fileUrl && (
-            <div className="preview-audio-container">
-              <div className="audio-icon">🎵</div>
-              <p>{fileInfo?.name}</p>
-              <audio controls className="preview-audio">
-                <source src={fileUrl} />
-                Your browser does not support the audio tag.
-              </audio>
-            </div>
-          )}
-
-          {fileType === 'office' && fileUrl && (
-            <div className="preview-office">
-              <iframe
-                src={`https://view.officeapps.live.com/op/embed.aspx?src=${encodeURIComponent(fileUrl)}`}
-                className="office-iframe"
-                title={fileInfo?.name}
-              />
-            </div>
-          )}
-
-          {(fileType === 'text' || fileType === 'other') && (
-            <div className="preview-unsupported">
-              <div className="file-icon">📄</div>
-              <p>{fileInfo?.name}</p>
-              <p className="preview-note">
-                Preview not available for this file type.
-              </p>
-            </div>
-          )}
-        </div>
-
-        <div className="file-actions">
-          <button onClick={handleDownload} className="btn btn-primary btn-lg">
-            <span>⬇️</span> Download File
-          </button>
-          <Link href="/" className="btn btn-secondary btn-lg">
-            Browse All Files
-          </Link>
-        </div>
-      </main>
-    </div>
-  );
+  return null;
 }
 
 export default withAuthenticator(SharedFilePage);
