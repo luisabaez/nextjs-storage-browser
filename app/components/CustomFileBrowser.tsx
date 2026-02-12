@@ -11,6 +11,7 @@ import {
 } from '../admin/types';
 import {
   generateShareableLink,
+  generateShareableFolderLink,
   copyToClipboard
 } from '../lib/shareableLinks';
 
@@ -299,16 +300,20 @@ export function CustomFileBrowser({
 
   // Handle share - generate shareable link and copy to clipboard
   const handleShare = async (item: FileItem) => {
-    if (item.type === 'folder') {
-      showToast('Cannot share folders directly', 'info');
-      return;
-    }
     try {
-      const { url } = generateShareableLink(item.path, item.name, userEmail || 'unknown');
+      let url: string;
+      if (item.type === 'folder') {
+        const result = generateShareableFolderLink(item.path, item.name, userEmail || 'unknown');
+        url = result.url;
+      } else {
+        const result = generateShareableLink(item.path, item.name, userEmail || 'unknown');
+        url = result.url;
+      }
       const copied = await copyToClipboard(url);
       if (copied) {
         showToast(`Link copied to clipboard!`, 'success');
-        addNotification('Link Shared', `Shareable link created for ${item.name}`, 'info', item.path);
+        const itemType = item.type === 'folder' ? 'Folder' : 'File';
+        addNotification(`${itemType} Link Shared`, `Shareable link created for ${item.name}`, 'info', item.path);
       } else {
         showToast('Failed to copy link', 'error');
       }
@@ -357,6 +362,12 @@ export function CustomFileBrowser({
         label: 'Open',
         icon: <span>📂</span>,
         onClick: () => onNavigate(item.path),
+      });
+      actions.push({
+        id: 'share',
+        label: 'Share Link',
+        icon: <span>🔗</span>,
+        onClick: () => handleShare(item),
       });
     } else {
       actions.push({
