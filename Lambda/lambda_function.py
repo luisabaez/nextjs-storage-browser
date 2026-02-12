@@ -102,7 +102,7 @@ def lambda_handler(event, context):
 
                 #Generate validation file name.
                 expected_file_validation_file_name = f"InitialUploadErrors/{last_modified_formatted} {parent_file_name}/{parent_file_name} (Expected File Validation).txt"
-                generate_file_expected_validation_file(tags_for_expected_validation_file, expected_file_validation_file_name)
+                generate_file_expected_validation_file(bucket_name, tags_for_expected_validation_file, expected_file_validation_file_name)
 
             else: 
                 errors_and_warnings = {"File Expected Validation": "Pass"}
@@ -164,7 +164,7 @@ def lambda_handler(event, context):
 
             #Generate and upload the File Validation File.
             print(f"In lambda_function before calling generate_file_name_validation_file the tagsforvalidationfile are: {tagsforvalidationfile}")
-            generate_file_name_validation_file(tagsforvalidationfile, validation_file_name)
+            generate_file_name_validation_file( bucket_name,tagsforvalidationfile, validation_file_name)
 
             #relocate file
             relocate_file(bucket_name, file_key, tagsfromfilename, None)

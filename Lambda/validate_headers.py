@@ -171,7 +171,7 @@ def ValidateHeaders(bucket_name, file_key):
         
         output_file_key = f"InitialUploadErrors/{last_modified_formatted} {parent_file_name}/{parent_file_name} (Header Validation).xlsx"
         print(f"Tags to add to header validation file are: {tagsforvalidationfile}") #For troubleshooting
-        generate_header_validation_file(tagsforvalidationfile, output_file_key, comparison_results)
+        generate_header_validation_file(bucket_name, tagsforvalidationfile, output_file_key, comparison_results)
 
         # Get user email and send notification
         #user_email = get_user_email_from_s3(bucket_name, file_key)

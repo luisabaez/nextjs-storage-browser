@@ -65,7 +65,7 @@ def load_file(csv_bucket_name, csv_file_key):
 
         #Generate validation file name.
         error_file_key = f"ConversionFileErrors/{folders_for_error_file_key}/{last_modified_formatted} {parent_file_name}/{parent_file_name} (CSV File Read Error).txt"
-        generate_conversion_file_upload_error_file(tags_for_csv_file_read_error, error_file_key, e)
+        generate_conversion_file_upload_error_file(csv_bucket_name, tags_for_csv_file_read_error, error_file_key, e)
 
         #Relocate the parent file.
         new_parent_file_key = f"ConversionFileErrors/{folders_for_error_file_key}/{last_modified_formatted} {parent_file_name}/{parent_file_name}"
@@ -122,7 +122,7 @@ def load_file(csv_bucket_name, csv_file_key):
             #Generate validation file name.
             message = f"No TSQL Upload File found for {parent_file_name}."
             error_file_key = f"ConversionFileErrors/{folders_for_error_file_key}/{last_modified_formatted} {parent_file_name}/{parent_file_name} (TSQL Not Found Error).txt"
-            generate_tsql_not_found_error_file(tags_for_tsql_not_found_error, error_file_key, message)
+            generate_tsql_not_found_error_file(csv_bucket_name, tags_for_tsql_not_found_error, error_file_key, message)
 
             #Relocate the parent file.
             new_parent_file_key = f"ConversionFileErrors/{folders_for_error_file_key}/{last_modified_formatted} {parent_file_name}/{parent_file_name}"
