@@ -100,19 +100,74 @@ export const MOCK_TAGS = generateMockTags();
 // ============================================
 // BUSINESS UNIT TAGS
 // ============================================
-// Business unit tags - can be expanded as needed
-export const BUSINESS_UNIT_TAGS = [
-  'FIN',
-  'HR',
-  'IT',
-  'OPS',
-  'LEGAL',
-  'SALES',
-  'MARKETING',
-  'PROCUREMENT',
+// Default business unit numbers - more can be added dynamically
+export const DEFAULT_BUSINESS_UNIT_TAGS = [
+  '00014',
+  '00015',
+  '00016',
+  '00017',
+  '00018',
+  '00019',
+  '00020',
+  '00021',
+  '00022',
+  '00023',
+  '00024',
+  '00025',
 ] as const;
 
-export type BusinessUnitTag = typeof BUSINESS_UNIT_TAGS[number];
+export type DefaultBusinessUnitTag = typeof DEFAULT_BUSINESS_UNIT_TAGS[number];
+
+// Storage key for dynamic business unit tags
+const DYNAMIC_BU_TAGS_KEY = 'hacienda-dynamic-bu-tags';
+
+// Get all business unit tags (default + dynamic)
+export function getAllBusinessUnitTags(): string[] {
+  const defaultTags = [...DEFAULT_BUSINESS_UNIT_TAGS];
+  if (typeof window === 'undefined') return defaultTags;
+
+  const stored = localStorage.getItem(DYNAMIC_BU_TAGS_KEY);
+  if (!stored) return defaultTags;
+
+  try {
+    const dynamicTags: string[] = JSON.parse(stored);
+    // Combine and dedupe
+    const allTags = new Set([...defaultTags, ...dynamicTags]);
+    return Array.from(allTags).sort();
+  } catch {
+    return defaultTags;
+  }
+}
+
+// Add a new dynamic business unit tag
+export function addDynamicBusinessUnitTag(tag: string): void {
+  if (typeof window === 'undefined') return;
+
+  const stored = localStorage.getItem(DYNAMIC_BU_TAGS_KEY);
+  let dynamicTags: string[] = [];
+
+  if (stored) {
+    try {
+      dynamicTags = JSON.parse(stored);
+    } catch {
+      dynamicTags = [];
+    }
+  }
+
+  // Normalize tag and check if it already exists
+  const normalizedTag = tag.trim();
+  if (!normalizedTag) return;
+
+  // Check against both default and dynamic tags
+  const allExisting = new Set([...DEFAULT_BUSINESS_UNIT_TAGS, ...dynamicTags]);
+  if (!allExisting.has(normalizedTag)) {
+    dynamicTags.push(normalizedTag);
+    localStorage.setItem(DYNAMIC_BU_TAGS_KEY, JSON.stringify(dynamicTags));
+  }
+}
+
+// Legacy export for backward compatibility
+export const BUSINESS_UNIT_TAGS = DEFAULT_BUSINESS_UNIT_TAGS;
 
 // ============================================
 // USER INTERFACES
@@ -388,12 +443,22 @@ export function extractMockFromPath(path: string): string | null {
 
 // Extract business unit from a file path
 export function extractBusinessUnitFromPath(path: string): string | null {
-  const upperPath = path.toUpperCase();
-  for (const unit of BUSINESS_UNIT_TAGS) {
-    if (upperPath.includes(`/${unit}/`) || upperPath.includes(`\\${unit}\\`)) {
+  const allUnits = getAllBusinessUnitTags();
+  for (const unit of allUnits) {
+    if (path.includes(`/${unit}/`) || path.includes(`\\${unit}\\`) ||
+        path.includes(`/${unit}.`) || path.includes(`_${unit}_`) ||
+        path.includes(`_${unit}.`)) {
       return unit;
     }
   }
+
+  // Also try to match any 5-digit BU pattern like 00014, 00015, etc.
+  const buPattern = /\/(\d{5})\//;
+  const match = buPattern.exec(path);
+  if (match) {
+    return match[1];
+  }
+
   return null;
 }
 

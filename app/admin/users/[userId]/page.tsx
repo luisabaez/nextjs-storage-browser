@@ -14,12 +14,12 @@ import {
   SOURCE_TAGS,
   SourceTag,
   MOCK_TAGS,
-  BUSINESS_UNIT_TAGS,
   getAllEntityTags,
   addDynamicEntityTag,
+  getAllBusinessUnitTags,
+  addDynamicBusinessUnitTag,
   getUserPermissions,
   saveUserFullPermissions,
-  UserPermissions,
 } from '../../types';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
@@ -54,12 +54,18 @@ function UserDetailPage() {
   const [newEntityTag, setNewEntityTag] = useState('');
   const [showAddEntity, setShowAddEntity] = useState(false);
 
+  // Business Unit tags (can be dynamic)
+  const [businessUnitTags, setBusinessUnitTags] = useState<string[]>([]);
+  const [newBUTag, setNewBUTag] = useState('');
+  const [showAddBU, setShowAddBU] = useState(false);
+
   // Active tab for permissions
   const [activeTab, setActiveTab] = useState<'source' | 'entity' | 'mock' | 'businessUnit'>('source');
 
-  // Load entity tags
+  // Load entity and business unit tags
   useEffect(() => {
     setEntityTags(getAllEntityTags());
+    setBusinessUnitTags(getAllBusinessUnitTags());
   }, []);
 
   // Check admin status
@@ -185,7 +191,7 @@ function UserDetailPage() {
   };
 
   const handleSelectAllBusinessUnits = () => {
-    setSelectedBusinessUnits([...BUSINESS_UNIT_TAGS]);
+    setSelectedBusinessUnits([...businessUnitTags]);
     setSaveMessage(null);
   };
 
@@ -201,6 +207,15 @@ function UserDetailPage() {
     setEntityTags(getAllEntityTags());
     setNewEntityTag('');
     setShowAddEntity(false);
+  };
+
+  // Add new business unit tag
+  const handleAddBUTag = () => {
+    if (!newBUTag.trim()) return;
+    addDynamicBusinessUnitTag(newBUTag.trim());
+    setBusinessUnitTags(getAllBusinessUnitTags());
+    setNewBUTag('');
+    setShowAddBU(false);
   };
 
   // Save permissions
@@ -398,7 +413,7 @@ function UserDetailPage() {
               onClick={() => setActiveTab('businessUnit')}
             >
               Business Units
-              <span className="tab-count">{selectedBusinessUnits.length}/{BUSINESS_UNIT_TAGS.length}</span>
+              <span className="tab-count">{selectedBusinessUnits.length}/{businessUnitTags.length}</span>
             </button>
           </div>
 
@@ -541,12 +556,45 @@ function UserDetailPage() {
                 <button type="button" className="btn btn-sm btn-secondary" onClick={handleClearAllBusinessUnits}>
                   Clear All
                 </button>
+                <button
+                  type="button"
+                  className="btn btn-sm btn-primary"
+                  onClick={() => setShowAddBU(!showAddBU)}
+                >
+                  + Add BU
+                </button>
                 <span className="selected-count">
-                  {selectedBusinessUnits.length} of {BUSINESS_UNIT_TAGS.length} selected
+                  {selectedBusinessUnits.length} of {businessUnitTags.length} selected
                 </span>
               </div>
+
+              {showAddBU && (
+                <div className="add-entity-form">
+                  <input
+                    type="text"
+                    placeholder="Enter BU number (e.g., 00026)"
+                    value={newBUTag}
+                    onChange={(e) => setNewBUTag(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleAddBUTag()}
+                  />
+                  <button type="button" className="btn btn-sm btn-primary" onClick={handleAddBUTag}>
+                    Add
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-secondary"
+                    onClick={() => { setShowAddBU(false); setNewBUTag(''); }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              )}
+
+              <p className="permission-note">
+                Business Unit numbers as they appear in file paths (e.g., 00014, 00015).
+              </p>
               <div className="permissions-grid">
-                {BUSINESS_UNIT_TAGS.map(unit => (
+                {businessUnitTags.map(unit => (
                   <label key={unit} className="permission-item">
                     <input
                       type="checkbox"
