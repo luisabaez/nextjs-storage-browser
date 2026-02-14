@@ -6,7 +6,7 @@ import { fetchUserAttributes } from 'aws-amplify/auth';
 import { withAuthenticator } from '@aws-amplify/ui-react';
 import '@aws-amplify/ui-react/styles.css';
 import '../../components/enhanced-file-browser.css';
-import './shared-file.css';
+import './shared-folder.css';
 import config from '../../../amplify_outputs.json';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
@@ -16,27 +16,26 @@ import {
   getUserPermissions,
   SourceTag,
 } from '../../admin/types';
-import { getSharedFileInfo } from '../../lib/shareableLinks';
+import { getSharedFolderInfo } from '../../lib/shareableLinks';
 
 Amplify.configure(config);
 
 /**
- * Shared File Page
+ * Shared Folder Page
  *
- * This page handles shareable file links. When a user visits a shared link:
+ * This page handles shareable folder links. When a user visits a shared link:
  * 1. They are authenticated (via withAuthenticator)
  * 2. Their permissions are checked
- * 3. If authorized, they are redirected to the main file browser at the file's location
- *    with a query parameter to trigger file preview
+ * 3. If authorized, they are redirected to the main file browser at the folder's location
  */
-function SharedFilePage() {
+function SharedFolderPage() {
   const params = useParams();
   const router = useRouter();
-  const fileId = params.fileId as string;
+  const folderId = params.folderId as string;
 
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [fileSource, setFileSource] = useState<string | null>(null);
+  const [folderSource, setFolderSource] = useState<string | null>(null);
 
   useEffect(() => {
     async function checkUserAndRedirect() {
@@ -45,17 +44,17 @@ function SharedFilePage() {
         const attributes = await fetchUserAttributes();
         const email = attributes.email || '';
 
-        // Decode file ID to get path
-        const sharedInfo = getSharedFileInfo(fileId);
+        // Decode folder ID to get path
+        const sharedInfo = getSharedFolderInfo(folderId);
         if (!sharedInfo) {
           setError('Invalid or expired share link');
           setIsLoading(false);
           return;
         }
 
-        const { path, name } = sharedInfo;
+        const { path } = sharedInfo;
         const source = extractSourceFromPath(path);
-        setFileSource(source);
+        setFolderSource(source);
 
         // Check permissions
         const isAdmin = isAdminUser(email);
@@ -75,42 +74,37 @@ function SharedFilePage() {
           return;
         }
 
-        // Get the parent folder path for navigation
-        const parentPath = path.substring(0, path.lastIndexOf('/') + 1);
-
-        // Redirect to main file browser with the file path
-        // The preview query param will trigger the file preview modal
-        const encodedPath = encodeURIComponent(path);
-        router.replace(`/?path=${encodeURIComponent(parentPath)}&preview=${encodedPath}`);
+        // Redirect to main file browser at the folder path
+        router.replace(`/?path=${encodeURIComponent(path)}`);
 
       } catch (err) {
-        console.error('Error processing shared file link:', err);
-        setError('Failed to process the shared file link');
+        console.error('Error processing shared folder link:', err);
+        setError('Failed to process the shared folder link');
         setIsLoading(false);
       }
     }
 
     checkUserAndRedirect();
-  }, [fileId, router]);
+  }, [folderId, router]);
 
   if (isLoading) {
     return (
-      <div className="shared-file-loading">
+      <div className="shared-folder-loading">
         <div className="spinner"></div>
-        <p>Loading file...</p>
+        <p>Loading folder...</p>
       </div>
     );
   }
 
   if (error === 'access_denied') {
     return (
-      <div className="shared-file-error">
+      <div className="shared-folder-error">
         <div className="error-icon">🔒</div>
         <h1>Access Denied</h1>
-        <p>You don't have permission to view this file.</p>
-        {fileSource && (
+        <p>You don't have permission to view this folder.</p>
+        {folderSource && (
           <p className="error-detail">
-            This file requires access to the <strong>{fileSource}</strong> data source.
+            This folder requires access to the <strong>{folderSource}</strong> data source.
             Please contact an administrator to request access.
           </p>
         )}
@@ -125,9 +119,9 @@ function SharedFilePage() {
 
   if (error) {
     return (
-      <div className="shared-file-error">
+      <div className="shared-folder-error">
         <div className="error-icon">⚠️</div>
-        <h1>Unable to Load File</h1>
+        <h1>Unable to Load Folder</h1>
         <p>{error}</p>
         <Link href="/" className="btn btn-primary">
           Go to File Browser
@@ -139,4 +133,4 @@ function SharedFilePage() {
   return null;
 }
 
-export default withAuthenticator(SharedFilePage);
+export default withAuthenticator(SharedFolderPage);

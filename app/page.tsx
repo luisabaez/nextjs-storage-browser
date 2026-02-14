@@ -7,6 +7,7 @@ import '@aws-amplify/ui-react/styles.css';
 import './components/enhanced-file-browser.css';
 import config from '../amplify_outputs.json';
 import Link from 'next/link';
+import { useSearchParams } from 'next/navigation';
 import { isAdminUser } from './admin/types';
 
 // Components
@@ -104,6 +105,39 @@ function FileBrowser() {
     clearAll,
     unreadCount,
   } = useNotifications();
+  const searchParams = useSearchParams();
+
+  // Handle URL query parameters for shared links (path and preview)
+  useEffect(() => {
+    const pathParam = searchParams.get('path');
+    const previewParam = searchParams.get('preview');
+
+    if (pathParam) {
+      // Set the current path from URL parameter
+      setCurrentPath(decodeURIComponent(pathParam));
+    }
+
+    if (previewParam) {
+      // Create a FileItem for preview from the path
+      const filePath = decodeURIComponent(previewParam);
+      const fileName = filePath.split('/').pop() || filePath;
+      const previewItem: FileItem = {
+        key: filePath,
+        name: fileName,
+        type: 'file',
+        path: filePath,
+      };
+      // Small delay to ensure the page has loaded
+      setTimeout(() => {
+        setPreviewFile(previewItem);
+      }, 500);
+    }
+
+    // Clear the URL parameters after processing (optional - keeps URL clean)
+    if (pathParam || previewParam) {
+      window.history.replaceState({}, '', '/');
+    }
+  }, [searchParams]);
 
   // Load quick links from localStorage on mount
   useEffect(() => {

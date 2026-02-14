@@ -1,18 +1,23 @@
 /**
- * Shareable File Links Library
+ * Shareable Links Library
  *
- * Generates and decodes shareable links for files in the storage system.
- * Links are formatted as: /files/{fileId}
- * where fileId is a base64-encoded representation of the file path.
+ * Generates and decodes shareable links for files and folders in the storage system.
+ * Links are formatted as:
+ *   - Files: /files/{fileId}
+ *   - Folders: /folders/{folderId}
+ * where the ID is a base64-encoded representation of the path.
  */
 
 // Storage key for shared links registry
 const SHARED_LINKS_KEY = 'hacienda-shared-links';
 
+export type ShareableType = 'file' | 'folder';
+
 export interface SharedLink {
   id: string;
   path: string;
   name: string;
+  type: ShareableType;
   createdAt: string;
   createdBy: string;
   expiresAt?: string;
@@ -56,14 +61,38 @@ export function generateShareableLink(
   fileName: string,
   createdBy: string
 ): { url: string; id: string } {
-  const id = generateShareableFileId(filePath);
+  return generateShareableLinkWithType(filePath, fileName, createdBy, 'file');
+}
+
+/**
+ * Generate a shareable link for a folder
+ */
+export function generateShareableFolderLink(
+  folderPath: string,
+  folderName: string,
+  createdBy: string
+): { url: string; id: string } {
+  return generateShareableLinkWithType(folderPath, folderName, createdBy, 'folder');
+}
+
+/**
+ * Generate a shareable link for a file or folder
+ */
+export function generateShareableLinkWithType(
+  path: string,
+  name: string,
+  createdBy: string,
+  type: ShareableType
+): { url: string; id: string } {
+  const id = generateShareableFileId(path);
 
   // Store the shared link info
   const sharedLinks = getAllSharedLinks();
   sharedLinks[id] = {
     id,
-    path: filePath,
-    name: fileName,
+    path,
+    name,
+    type,
     createdAt: new Date().toISOString(),
     createdBy,
   };
@@ -77,8 +106,10 @@ export function generateShareableLink(
     ? window.location.origin
     : '';
 
+  const routePath = type === 'folder' ? 'folders' : 'files';
+
   return {
-    url: `${baseUrl}/files/${id}`,
+    url: `${baseUrl}/${routePath}/${id}`,
     id,
   };
 }
@@ -102,13 +133,14 @@ export function getAllSharedLinks(): Record<string, SharedLink> {
 /**
  * Get shared file info from an ID
  */
-export function getSharedFileInfo(fileId: string): { path: string; name: string } | null {
+export function getSharedFileInfo(fileId: string): { path: string; name: string; type?: ShareableType } | null {
   // First check the registry
   const sharedLinks = getAllSharedLinks();
   if (sharedLinks[fileId]) {
     return {
       path: sharedLinks[fileId].path,
       name: sharedLinks[fileId].name,
+      type: sharedLinks[fileId].type,
     };
   }
 
@@ -117,10 +149,22 @@ export function getSharedFileInfo(fileId: string): { path: string; name: string 
   if (!path) return null;
 
   // Extract filename from path
-  const parts = path.split('/');
+  const parts = path.split('/').filter(Boolean);
   const name = parts[parts.length - 1] || path;
 
-  return { path, name };
+  // Determine if it's a folder (ends with /)
+  const type: ShareableType = path.endsWith('/') ? 'folder' : 'file';
+
+  return { path, name, type };
+}
+
+/**
+ * Get shared folder info from an ID
+ */
+export function getSharedFolderInfo(folderId: string): { path: string; name: string } | null {
+  const info = getSharedFileInfo(folderId);
+  if (!info) return null;
+  return { path: info.path, name: info.name };
 }
 
 /**

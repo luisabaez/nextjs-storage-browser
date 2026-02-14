@@ -6,11 +6,11 @@ import { SortOption, SearchScope } from './Toolbar';
 import {
   isAdminUser,
   extractSourceFromPath,
-  getUserPermissions,
-  SourceTag
+  canUserAccessPath,
 } from '../admin/types';
 import {
   generateShareableLink,
+  generateShareableFolderLink,
   copyToClipboard
 } from '../lib/shareableLinks';
 
@@ -44,27 +44,12 @@ interface CustomFileBrowserProps {
   userEmail?: string; // Current user email for permission filtering
 }
 
-// Helper function to check if user can access a file based on source permissions
+// Helper function to check if user can access a file based on all permission types
 function canUserAccessFile(userEmail: string | undefined, filePath: string): boolean {
   if (!userEmail) return true; // If no user email, allow access (will be filtered at auth level)
 
-  // Admins can access everything
-  if (isAdminUser(userEmail)) return true;
-
-  // Extract source from path
-  const source = extractSourceFromPath(filePath);
-
-  // If no source tag in path, allow access (file not in source-protected area)
-  if (!source) return true;
-
-  // Check user permissions
-  const permissions = getUserPermissions(userEmail);
-  if (!permissions || permissions.allowedSources.length === 0) {
-    // No permissions set means no access to source-protected files
-    return false;
-  }
-
-  return permissions.allowedSources.includes(source as SourceTag);
+  // Use the comprehensive permission check from types.ts
+  return canUserAccessPath(userEmail, filePath);
 }
 
 export function CustomFileBrowser({
@@ -299,16 +284,20 @@ export function CustomFileBrowser({
 
   // Handle share - generate shareable link and copy to clipboard
   const handleShare = async (item: FileItem) => {
-    if (item.type === 'folder') {
-      showToast('Cannot share folders directly', 'info');
-      return;
-    }
     try {
-      const { url } = generateShareableLink(item.path, item.name, userEmail || 'unknown');
+      let url: string;
+      if (item.type === 'folder') {
+        const result = generateShareableFolderLink(item.path, item.name, userEmail || 'unknown');
+        url = result.url;
+      } else {
+        const result = generateShareableLink(item.path, item.name, userEmail || 'unknown');
+        url = result.url;
+      }
       const copied = await copyToClipboard(url);
       if (copied) {
         showToast(`Link copied to clipboard!`, 'success');
-        addNotification('Link Shared', `Shareable link created for ${item.name}`, 'info', item.path);
+        const itemType = item.type === 'folder' ? 'Folder' : 'File';
+        addNotification(`${itemType} Link Shared`, `Shareable link created for ${item.name}`, 'info', item.path);
       } else {
         showToast('Failed to copy link', 'error');
       }
@@ -357,6 +346,12 @@ export function CustomFileBrowser({
         label: 'Open',
         icon: <span>📂</span>,
         onClick: () => onNavigate(item.path),
+      });
+      actions.push({
+        id: 'share',
+        label: 'Share Link',
+        icon: <span>🔗</span>,
+        onClick: () => handleShare(item),
       });
     } else {
       actions.push({

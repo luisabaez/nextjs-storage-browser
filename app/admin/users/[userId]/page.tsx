@@ -13,8 +13,13 @@ import {
   CognitoUser,
   SOURCE_TAGS,
   SourceTag,
+  MOCK_TAGS,
+  getAllEntityTags,
+  addDynamicEntityTag,
+  getAllBusinessUnitTags,
+  addDynamicBusinessUnitTag,
   getUserPermissions,
-  saveUserPermissions,
+  saveUserFullPermissions,
 } from '../../types';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
@@ -34,10 +39,34 @@ function UserDetailPage() {
   const [isAdmin, setIsAdmin] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [user, setUser] = useState<CognitoUser | null>(null);
-  const [selectedSources, setSelectedSources] = useState<SourceTag[]>([]);
   const [isSaving, setIsSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [isApproved, setIsApproved] = useState(false);
+
+  // Permission states
+  const [selectedSources, setSelectedSources] = useState<SourceTag[]>([]);
+  const [selectedEntities, setSelectedEntities] = useState<string[]>([]);
+  const [selectedMocks, setSelectedMocks] = useState<string[]>([]);
+  const [selectedBusinessUnits, setSelectedBusinessUnits] = useState<string[]>([]);
+
+  // Entity tags (can be dynamic)
+  const [entityTags, setEntityTags] = useState<string[]>([]);
+  const [newEntityTag, setNewEntityTag] = useState('');
+  const [showAddEntity, setShowAddEntity] = useState(false);
+
+  // Business Unit tags (can be dynamic)
+  const [businessUnitTags, setBusinessUnitTags] = useState<string[]>([]);
+  const [newBUTag, setNewBUTag] = useState('');
+  const [showAddBU, setShowAddBU] = useState(false);
+
+  // Active tab for permissions
+  const [activeTab, setActiveTab] = useState<'source' | 'entity' | 'mock' | 'businessUnit'>('source');
+
+  // Load entity and business unit tags
+  useEffect(() => {
+    setEntityTags(getAllEntityTags());
+    setBusinessUnitTags(getAllBusinessUnitTags());
+  }, []);
 
   // Check admin status
   useEffect(() => {
@@ -79,7 +108,10 @@ function UserDetailPage() {
           // Load existing permissions
           const permissions = getUserPermissions(foundUser.email);
           if (permissions) {
-            setSelectedSources(permissions.allowedSources);
+            setSelectedSources(permissions.allowedSources || []);
+            setSelectedEntities(permissions.allowedEntities || []);
+            setSelectedMocks(permissions.allowedMocks || []);
+            setSelectedBusinessUnits(permissions.allowedBusinessUnits || []);
           }
         }
       }
@@ -94,31 +126,96 @@ function UserDetailPage() {
     if (isAdmin) {
       fetchUserData();
     } else if (!isLoading && !isAdmin && adminEmail) {
-      // Not an admin, stop loading
       setIsLoading(false);
     }
   }, [isAdmin, adminEmail, fetchUserData, isLoading]);
 
-  // Handle source toggle
+  // Toggle handlers
   const handleSourceToggle = (source: SourceTag) => {
     setSelectedSources(prev =>
-      prev.includes(source)
-        ? prev.filter(s => s !== source)
-        : [...prev, source]
+      prev.includes(source) ? prev.filter(s => s !== source) : [...prev, source]
     );
     setSaveMessage(null);
   };
 
-  // Handle select all
-  const handleSelectAll = () => {
+  const handleEntityToggle = (entity: string) => {
+    setSelectedEntities(prev =>
+      prev.includes(entity) ? prev.filter(e => e !== entity) : [...prev, entity]
+    );
+    setSaveMessage(null);
+  };
+
+  const handleMockToggle = (mock: string) => {
+    setSelectedMocks(prev =>
+      prev.includes(mock) ? prev.filter(m => m !== mock) : [...prev, mock]
+    );
+    setSaveMessage(null);
+  };
+
+  const handleBusinessUnitToggle = (unit: string) => {
+    setSelectedBusinessUnits(prev =>
+      prev.includes(unit) ? prev.filter(u => u !== unit) : [...prev, unit]
+    );
+    setSaveMessage(null);
+  };
+
+  // Select/Clear all handlers
+  const handleSelectAllSources = () => {
     setSelectedSources([...SOURCE_TAGS]);
     setSaveMessage(null);
   };
 
-  // Handle clear all
-  const handleClearAll = () => {
+  const handleClearAllSources = () => {
     setSelectedSources([]);
     setSaveMessage(null);
+  };
+
+  const handleSelectAllEntities = () => {
+    setSelectedEntities([...entityTags]);
+    setSaveMessage(null);
+  };
+
+  const handleClearAllEntities = () => {
+    setSelectedEntities([]);
+    setSaveMessage(null);
+  };
+
+  const handleSelectAllMocks = () => {
+    setSelectedMocks([...MOCK_TAGS]);
+    setSaveMessage(null);
+  };
+
+  const handleClearAllMocks = () => {
+    setSelectedMocks([]);
+    setSaveMessage(null);
+  };
+
+  const handleSelectAllBusinessUnits = () => {
+    setSelectedBusinessUnits([...businessUnitTags]);
+    setSaveMessage(null);
+  };
+
+  const handleClearAllBusinessUnits = () => {
+    setSelectedBusinessUnits([]);
+    setSaveMessage(null);
+  };
+
+  // Add new entity tag
+  const handleAddEntityTag = () => {
+    if (!newEntityTag.trim()) return;
+    addDynamicEntityTag(newEntityTag.trim());
+    setEntityTags(getAllEntityTags());
+    setNewEntityTag('');
+    setShowAddEntity(false);
+  };
+
+  // Add new business unit tag
+  const handleAddBUTag = () => {
+    if (!newBUTag.trim()) return;
+    addDynamicBusinessUnitTag(newBUTag.trim());
+    setBusinessUnitTags(getAllBusinessUnitTags());
+    setNewBUTag('');
+    setShowAddBU(false);
   };
 
   // Save permissions
@@ -129,8 +226,17 @@ function UserDetailPage() {
     setSaveMessage(null);
 
     try {
-      saveUserPermissions(user.email, selectedSources, adminEmail);
-      setSaveMessage({ type: 'success', text: 'Permissions saved successfully!' });
+      saveUserFullPermissions(
+        user.email,
+        {
+          allowedSources: selectedSources,
+          allowedEntities: selectedEntities,
+          allowedMocks: selectedMocks,
+          allowedBusinessUnits: selectedBusinessUnits,
+        },
+        adminEmail
+      );
+      setSaveMessage({ type: 'success', text: 'All permissions saved successfully!' });
     } catch (error) {
       console.error('Error saving permissions:', error);
       setSaveMessage({ type: 'error', text: 'Failed to save permissions. Please try again.' });
@@ -189,6 +295,8 @@ function UserDetailPage() {
     );
   }
 
+  const isUserAdmin = isAdminUser(user.email);
+
   return (
     <div className="admin-container">
       {/* Header */}
@@ -221,7 +329,7 @@ function UserDetailPage() {
                 <span className={`status-tag ${user.status.toLowerCase()}`}>
                   {user.status}
                 </span>
-                {isAdminUser(user.email) && (
+                {isUserAdmin && (
                   <span className="admin-badge">Admin</span>
                 )}
               </div>
@@ -261,60 +369,247 @@ function UserDetailPage() {
           </div>
         </div>
 
-        {/* Source Permissions Card */}
+        {/* Permissions Card */}
         <div className="user-detail-card">
           <div className="permissions-header">
-            <h3>Source Access Permissions</h3>
+            <h3>Access Permissions</h3>
             <p className="permissions-description">
-              Select which data sources this user can access. Files are organized by source tags
-              (e.g., PRIFAS, HACIENDA). Users will only see files from their permitted sources.
+              Configure which data sources, entities, mock numbers, and business units this user can access.
+              Users will only see files matching their permitted tags.
             </p>
-            {isAdminUser(user.email) && (
+            {isUserAdmin && (
               <div className="admin-notice">
                 <span className="notice-icon">ℹ️</span>
-                <span>Admin users automatically have access to all sources.</span>
+                <span>Admin users automatically have access to all permissions.</span>
               </div>
             )}
           </div>
 
-          <div className="permissions-actions">
+          {/* Permission Tabs */}
+          <div className="permission-tabs">
             <button
-              type="button"
-              className="btn btn-sm btn-secondary"
-              onClick={handleSelectAll}
+              className={`permission-tab ${activeTab === 'source' ? 'active' : ''}`}
+              onClick={() => setActiveTab('source')}
             >
-              Select All
+              Sources
+              <span className="tab-count">{selectedSources.length}/{SOURCE_TAGS.length}</span>
             </button>
             <button
-              type="button"
-              className="btn btn-sm btn-secondary"
-              onClick={handleClearAll}
+              className={`permission-tab ${activeTab === 'entity' ? 'active' : ''}`}
+              onClick={() => setActiveTab('entity')}
             >
-              Clear All
+              Data Entities
+              <span className="tab-count">{selectedEntities.length}/{entityTags.length}</span>
             </button>
-            <span className="selected-count">
-              {selectedSources.length} of {SOURCE_TAGS.length} selected
-            </span>
+            <button
+              className={`permission-tab ${activeTab === 'mock' ? 'active' : ''}`}
+              onClick={() => setActiveTab('mock')}
+            >
+              Mock Numbers
+              <span className="tab-count">{selectedMocks.length}/{MOCK_TAGS.length}</span>
+            </button>
+            <button
+              className={`permission-tab ${activeTab === 'businessUnit' ? 'active' : ''}`}
+              onClick={() => setActiveTab('businessUnit')}
+            >
+              Business Units
+              <span className="tab-count">{selectedBusinessUnits.length}/{businessUnitTags.length}</span>
+            </button>
           </div>
 
-          <div className="permissions-grid">
-            {SOURCE_TAGS.map(source => (
-              <label key={source} className="permission-item">
-                <input
-                  type="checkbox"
-                  checked={selectedSources.includes(source)}
-                  onChange={() => handleSourceToggle(source)}
-                  disabled={isAdminUser(user.email)}
-                />
-                <span className="permission-label">
-                  <span className="source-name">{source}</span>
-                  <span className="source-path">
-                    e.g., Data Validation/MOCK 8/FIN/AP Invoices/{source}/
-                  </span>
+          {/* Source Permissions Tab */}
+          {activeTab === 'source' && (
+            <div className="permission-tab-content">
+              <div className="permissions-actions">
+                <button type="button" className="btn btn-sm btn-secondary" onClick={handleSelectAllSources}>
+                  Select All
+                </button>
+                <button type="button" className="btn btn-sm btn-secondary" onClick={handleClearAllSources}>
+                  Clear All
+                </button>
+                <span className="selected-count">
+                  {selectedSources.length} of {SOURCE_TAGS.length} selected
                 </span>
-              </label>
-            ))}
-          </div>
+              </div>
+              <div className="permissions-grid">
+                {SOURCE_TAGS.map(source => (
+                  <label key={source} className="permission-item">
+                    <input
+                      type="checkbox"
+                      checked={selectedSources.includes(source)}
+                      onChange={() => handleSourceToggle(source)}
+                      disabled={isUserAdmin}
+                    />
+                    <span className="permission-label">
+                      <span className="tag-name">{source}</span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Entity Permissions Tab */}
+          {activeTab === 'entity' && (
+            <div className="permission-tab-content">
+              <div className="permissions-actions">
+                <button type="button" className="btn btn-sm btn-secondary" onClick={handleSelectAllEntities}>
+                  Select All
+                </button>
+                <button type="button" className="btn btn-sm btn-secondary" onClick={handleClearAllEntities}>
+                  Clear All
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-sm btn-primary"
+                  onClick={() => setShowAddEntity(!showAddEntity)}
+                >
+                  + Add Entity
+                </button>
+                <span className="selected-count">
+                  {selectedEntities.length} of {entityTags.length} selected
+                </span>
+              </div>
+
+              {showAddEntity && (
+                <div className="add-entity-form">
+                  <input
+                    type="text"
+                    placeholder="Enter new entity tag (e.g., Person_Phone)"
+                    value={newEntityTag}
+                    onChange={(e) => setNewEntityTag(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleAddEntityTag()}
+                  />
+                  <button type="button" className="btn btn-sm btn-primary" onClick={handleAddEntityTag}>
+                    Add
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-secondary"
+                    onClick={() => { setShowAddEntity(false); setNewEntityTag(''); }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              )}
+
+              <div className="permissions-grid">
+                {entityTags.map(entity => (
+                  <label key={entity} className="permission-item">
+                    <input
+                      type="checkbox"
+                      checked={selectedEntities.includes(entity)}
+                      onChange={() => handleEntityToggle(entity)}
+                      disabled={isUserAdmin}
+                    />
+                    <span className="permission-label">
+                      <span className="tag-name">{entity}</span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Mock Permissions Tab */}
+          {activeTab === 'mock' && (
+            <div className="permission-tab-content">
+              <div className="permissions-actions">
+                <button type="button" className="btn btn-sm btn-secondary" onClick={handleSelectAllMocks}>
+                  Select All
+                </button>
+                <button type="button" className="btn btn-sm btn-secondary" onClick={handleClearAllMocks}>
+                  Clear All
+                </button>
+                <span className="selected-count">
+                  {selectedMocks.length} of {MOCK_TAGS.length} selected
+                </span>
+              </div>
+              <p className="permission-note">
+                PRE versions are for files that arrive before the main MOCK cycle.
+              </p>
+              <div className="permissions-grid mock-grid">
+                {MOCK_TAGS.map(mock => (
+                  <label key={mock} className={`permission-item ${mock.includes('PRE') ? 'pre-mock' : ''}`}>
+                    <input
+                      type="checkbox"
+                      checked={selectedMocks.includes(mock)}
+                      onChange={() => handleMockToggle(mock)}
+                      disabled={isUserAdmin}
+                    />
+                    <span className="permission-label">
+                      <span className="tag-name">{mock}</span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Business Unit Permissions Tab */}
+          {activeTab === 'businessUnit' && (
+            <div className="permission-tab-content">
+              <div className="permissions-actions">
+                <button type="button" className="btn btn-sm btn-secondary" onClick={handleSelectAllBusinessUnits}>
+                  Select All
+                </button>
+                <button type="button" className="btn btn-sm btn-secondary" onClick={handleClearAllBusinessUnits}>
+                  Clear All
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-sm btn-primary"
+                  onClick={() => setShowAddBU(!showAddBU)}
+                >
+                  + Add BU
+                </button>
+                <span className="selected-count">
+                  {selectedBusinessUnits.length} of {businessUnitTags.length} selected
+                </span>
+              </div>
+
+              {showAddBU && (
+                <div className="add-entity-form">
+                  <input
+                    type="text"
+                    placeholder="Enter BU number (e.g., 00026)"
+                    value={newBUTag}
+                    onChange={(e) => setNewBUTag(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleAddBUTag()}
+                  />
+                  <button type="button" className="btn btn-sm btn-primary" onClick={handleAddBUTag}>
+                    Add
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-secondary"
+                    onClick={() => { setShowAddBU(false); setNewBUTag(''); }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              )}
+
+              <p className="permission-note">
+                Business Unit numbers as they appear in file paths (e.g., 00014, 00015).
+              </p>
+              <div className="permissions-grid">
+                {businessUnitTags.map(unit => (
+                  <label key={unit} className="permission-item">
+                    <input
+                      type="checkbox"
+                      checked={selectedBusinessUnits.includes(unit)}
+                      onChange={() => handleBusinessUnitToggle(unit)}
+                      disabled={isUserAdmin}
+                    />
+                    <span className="permission-label">
+                      <span className="tag-name">{unit}</span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
 
           {saveMessage && (
             <div className={`save-message ${saveMessage.type}`}>
@@ -327,9 +622,9 @@ function UserDetailPage() {
               type="button"
               className="btn btn-primary"
               onClick={handleSave}
-              disabled={isSaving || isAdminUser(user.email)}
+              disabled={isSaving || isUserAdmin}
             >
-              {isSaving ? 'Saving...' : 'Save Permissions'}
+              {isSaving ? 'Saving...' : 'Save All Permissions'}
             </button>
             <button
               type="button"
