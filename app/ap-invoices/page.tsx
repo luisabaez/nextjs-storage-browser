@@ -197,7 +197,7 @@ function APInvoiceDashboard() {
         for (const item of items) {
           if (!item.path || item.path.endsWith('/') || item.path.endsWith('_processing_status.json')) continue;
           const name = item.path.split('/').pop() || '';
-          if (!name || name.startsWith('_') || name.startsWith('.')) continue;
+          if (!name || name.startsWith('_') || name.startsWith('.') || name.endsWith('_error.txt')) continue;
 
           const parsed = parseAPFilename(name);
 
