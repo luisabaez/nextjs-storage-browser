@@ -219,9 +219,31 @@ function APInvoiceDashboard() {
       processItems(uploadedResult.items || [], 'uploaded', 'success');
       processItems(failedResult.items || [], 'failed', 'failed');
 
-      // Check for error detail files and attach error messages
+      // Load last processing status to get row counts
+      try {
+        const statusUrl = await getUrl({ path: S3_FOLDERS.input + '_processing_status.json' });
+        if (statusUrl?.url) {
+          const statusResp = await fetch(statusUrl.url.toString());
+          if (statusResp.ok) {
+            const statusData: ProcessingStatus = await statusResp.json();
+            if (statusData.files && statusData.files.length > 0) {
+              for (const file of allFiles) {
+                const match = statusData.files.find(sf => sf.filename === file.name);
+                if (match) {
+                  if (match.rowCount) file.rowCount = match.rowCount;
+                  if (match.error) file.errorMessage = match.error;
+                }
+              }
+            }
+          }
+        }
+      } catch {
+        // No status file, that's ok
+      }
+
+      // Check for error detail files for failed files without error messages
       for (const file of allFiles) {
-        if (file.status === 'failed') {
+        if (file.status === 'failed' && !file.errorMessage) {
           try {
             const errorKey = file.key + '_error.txt';
             const errorUrl = await getUrl({ path: errorKey });
