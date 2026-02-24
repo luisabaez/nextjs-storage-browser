@@ -33,6 +33,7 @@ INPUT_FOLDER = "APInvoiceInput/"
 UPLOADED_FOLDER = "UploadedAPInvoices/"
 FAILED_FOLDER = "FailedAPInvoices/"
 STATUS_FILE_KEY = "APInvoiceInput/_processing_status.json"
+HISTORY_FOLDER_KEY = "APInvoiceInput/_processing_history/"
 
 s3_client = boto3.client("s3")
 
@@ -87,6 +88,36 @@ def write_status(bucket, status_data):
         Body=json.dumps(status_data, default=str),
         ContentType="application/json",
     )
+
+
+def write_history(bucket, status_data):
+    """Archive the final processing status to history folder with timestamp key."""
+    completed_at = status_data.get("completedAt", datetime.utcnow().isoformat())
+    # Format: 2026-02-24T15-30-45Z (replace colons for S3 key safety)
+    safe_timestamp = completed_at.replace(":", "-")
+    # Truncate microseconds if present
+    if "." in safe_timestamp:
+        safe_timestamp = safe_timestamp.split(".")[0]
+    safe_timestamp += "Z"
+    history_key = f"{HISTORY_FOLDER_KEY}{safe_timestamp}.json"
+
+    # Calculate duration if both timestamps present
+    history_data = dict(status_data)
+    if status_data.get("startedAt") and status_data.get("completedAt"):
+        try:
+            start = datetime.fromisoformat(status_data["startedAt"])
+            end = datetime.fromisoformat(status_data["completedAt"])
+            history_data["durationSeconds"] = (end - start).total_seconds()
+        except (ValueError, TypeError):
+            pass
+
+    s3_client.put_object(
+        Bucket=bucket,
+        Key=history_key,
+        Body=json.dumps(history_data, default=str),
+        ContentType="application/json",
+    )
+    print(f"  Archived processing history to: {history_key}")
 
 
 def write_error_file(bucket, file_key, error_message):
@@ -350,6 +381,47 @@ def lambda_handler(event, context):
                 "body": json.dumps({"error": str(e)}),
             }
 
+    # ── HISTORY ACTION ──
+    if action == "history":
+        try:
+            history_files = []
+            paginator = s3_client.get_paginator("list_objects_v2")
+            for page in paginator.paginate(Bucket=bucket, Prefix=HISTORY_FOLDER_KEY):
+                for obj in page.get("Contents", []):
+                    key = obj["Key"]
+                    name = key.split("/")[-1]
+                    if not name or not name.endswith(".json"):
+                        continue
+                    history_files.append(key)
+
+            # Sort newest first (ISO timestamps sort lexicographically)
+            history_files.sort(reverse=True)
+
+            # Limit to last 50 runs
+            history_files = history_files[:50]
+
+            # Fetch content of each history file
+            runs = []
+            for hf_key in history_files:
+                try:
+                    resp = s3_client.get_object(Bucket=bucket, Key=hf_key)
+                    data = json.loads(resp["Body"].read().decode("utf-8"))
+                    runs.append(data)
+                except Exception:
+                    continue
+
+            return {
+                "statusCode": 200,
+                "headers": headers,
+                "body": json.dumps({"runs": runs}, default=str),
+            }
+        except Exception as e:
+            return {
+                "statusCode": 500,
+                "headers": headers,
+                "body": json.dumps({"error": str(e)}),
+            }
+
     # ── PROCESS ACTION ──
     if action == "process":
         try:
@@ -430,6 +502,9 @@ def lambda_handler(event, context):
             status["status"] = "complete"
             status["completedAt"] = datetime.utcnow().isoformat()
             write_status(bucket, status)
+
+            # Archive to history
+            write_history(bucket, status)
 
             print(f"Processing complete: {status['successCount']} success, {status['failCount']} failed")
 

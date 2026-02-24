@@ -59,6 +59,28 @@ interface ProcessingStatus {
   }[];
 }
 
+interface HistoryRun {
+  status: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  totalFiles: number;
+  processedFiles: number;
+  successCount: number;
+  failCount: number;
+  durationSeconds?: number;
+  files: {
+    filename: string;
+    source: string;
+    type: string;
+    mockNumber: string;
+    status: string;
+    rowCount: number;
+    error: string | null;
+    startedAt: string | null;
+    completedAt: string | null;
+  }[];
+}
+
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const LAMBDA_URL = 'https://5ahxjcxhrcopng5hjgc2n6utxq0rwcmm.lambda-url.us-east-1.on.aws/';
@@ -71,7 +93,7 @@ const S3_FOLDERS = {
   failed: 'FailedAPInvoices/',
 };
 
-type TabId = 'all' | 'pending' | 'uploaded' | 'failed';
+type TabId = 'all' | 'pending' | 'uploaded' | 'failed' | 'history';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -166,6 +188,27 @@ function formatNumber(num: number): string {
   return num.toLocaleString();
 }
 
+function formatDuration(seconds: number): string {
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  const mins = Math.floor(seconds / 60);
+  const secs = Math.round(seconds % 60);
+  return `${mins}m ${secs}s`;
+}
+
+function formatHistoryDate(isoStr: string | null): string {
+  if (!isoStr) return '-';
+  const d = new Date(isoStr.includes('Z') || isoStr.includes('+') ? isoStr : isoStr + 'Z');
+  return d.toLocaleDateString('en-US', {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true,
+  });
+}
+
 // ─── Main Component ──────────────────────────────────────────────────────────
 
 function APInvoiceDashboard() {
@@ -181,6 +224,10 @@ function APInvoiceDashboard() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [pollingInterval, setPollingInterval] = useState<NodeJS.Timeout | null>(null);
   const [previewFile, setPreviewFile] = useState<{name: string; path: string; size?: number} | null>(null);
+  const [historyRuns, setHistoryRuns] = useState<HistoryRun[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyLoaded, setHistoryLoaded] = useState(false);
+  const [expandedHistoryRuns, setExpandedHistoryRuns] = useState<Set<number>>(new Set());
 
   // ─── Load files from S3 ──────────────────────────────────────────────────
 
@@ -331,6 +378,31 @@ function APInvoiceDashboard() {
     }
   }, [isProcessing, checkProcessingStatus]);
 
+  // ─── Load processing history ──────────────────────────────────────────────
+
+  const loadHistory = useCallback(async () => {
+    if (historyLoaded) return;
+    setHistoryLoading(true);
+    try {
+      const response = await fetch(`${LAMBDA_URL}?action=history`);
+      if (response.ok) {
+        const data = await response.json();
+        setHistoryRuns(data.runs || []);
+        setHistoryLoaded(true);
+      }
+    } catch (err) {
+      console.error('Error loading processing history:', err);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, [historyLoaded]);
+
+  useEffect(() => {
+    if (activeTab === 'history') {
+      loadHistory();
+    }
+  }, [activeTab, loadHistory]);
+
   // ─── Run AP Invoices ─────────────────────────────────────────────────────
 
   const handleRunAPInvoices = useCallback(async () => {
@@ -434,6 +506,18 @@ function APInvoiceDashboard() {
     });
   }, []);
 
+  const toggleHistoryRun = useCallback((index: number) => {
+    setExpandedHistoryRuns(prev => {
+      const next = new Set(prev);
+      if (next.has(index)) {
+        next.delete(index);
+      } else {
+        next.add(index);
+      }
+      return next;
+    });
+  }, []);
+
   // ─── Filtered files ──────────────────────────────────────────────────────
 
   const filteredFiles = useMemo(() => {
@@ -514,7 +598,7 @@ function APInvoiceDashboard() {
           </div>
         </div>
         <div className="ap-header-right">
-          <button className="ap-refresh-btn" onClick={loadFiles} title="Refresh">
+          <button className="ap-refresh-btn" onClick={() => { loadFiles(); if (activeTab === 'history') { setHistoryLoaded(false); } }} title="Refresh">
             &#x21bb; Refresh
           </button>
           <button
@@ -622,7 +706,7 @@ function APInvoiceDashboard() {
         )}
 
         {/* Filters */}
-        <div className="ap-filters">
+        {activeTab !== 'history' && <div className="ap-filters">
           <select
             className="ap-filter-select"
             value={filterSource}
@@ -667,7 +751,7 @@ function APInvoiceDashboard() {
               onChange={e => setSearchQuery(e.target.value)}
             />
           </div>
-        </div>
+        </div>}
 
         {/* Tabs + Table */}
         <div className="ap-tabs">
@@ -677,6 +761,7 @@ function APInvoiceDashboard() {
               { id: 'pending' as TabId, label: 'Pending', count: stats.pending },
               { id: 'uploaded' as TabId, label: 'Uploaded', count: stats.uploaded },
               { id: 'failed' as TabId, label: 'Failed', count: stats.failed },
+              { id: 'history' as TabId, label: 'History', count: historyRuns.length },
             ]).map(tab => (
               <button
                 key={tab.id}
@@ -689,8 +774,114 @@ function APInvoiceDashboard() {
             ))}
           </div>
 
-          {/* Table */}
-          {filteredFiles.length === 0 ? (
+          {/* Tab Content */}
+          {activeTab === 'history' ? (
+            <div className="ap-history-content">
+              {historyLoading ? (
+                <div className="ap-loading" style={{ padding: '40px' }}>
+                  <span className="ap-spinner"></span>
+                  Loading processing history...
+                </div>
+              ) : historyRuns.length === 0 ? (
+                <div className="ap-empty-state">
+                  <div className="ap-empty-icon">&#128218;</div>
+                  <h3>No processing history</h3>
+                  <p>Processing runs will appear here after invoices are processed.</p>
+                </div>
+              ) : (
+                <div className="ap-history-list">
+                  {historyRuns.map((run, index) => (
+                    <div key={index} className="ap-history-run">
+                      <div
+                        className="ap-history-run-header"
+                        onClick={() => toggleHistoryRun(index)}
+                      >
+                        <div className="ap-history-run-toggle">
+                          <span className={`ap-expand-btn ${expandedHistoryRuns.has(index) ? 'expanded' : ''}`}>
+                            &#9654;
+                          </span>
+                        </div>
+                        <div className="ap-history-run-date">
+                          {formatHistoryDate(run.completedAt || run.startedAt)}
+                        </div>
+                        <div className="ap-history-run-stats">
+                          <span className="ap-history-stat">
+                            <strong>{run.totalFiles}</strong> files
+                          </span>
+                          <span className="ap-history-stat success">
+                            <span className="ap-status-dot success"></span>
+                            {run.successCount} succeeded
+                          </span>
+                          {run.failCount > 0 && (
+                            <span className="ap-history-stat failed">
+                              <span className="ap-status-dot failed"></span>
+                              {run.failCount} failed
+                            </span>
+                          )}
+                          {run.durationSeconds != null && (
+                            <span className="ap-history-stat duration">
+                              &#9201; {formatDuration(run.durationSeconds)}
+                            </span>
+                          )}
+                        </div>
+                        <div className="ap-history-run-badge">
+                          <span className={`ap-status-badge ${run.failCount > 0 ? 'failed' : 'success'}`}>
+                            <span className={`ap-status-dot ${run.failCount > 0 ? 'failed' : 'success'}`}></span>
+                            {run.failCount > 0 ? 'Partial' : 'Success'}
+                          </span>
+                        </div>
+                      </div>
+                      {expandedHistoryRuns.has(index) && run.files && run.files.length > 0 && (
+                        <div className="ap-history-run-details">
+                          <table className="ap-file-table">
+                            <thead>
+                              <tr>
+                                <th>File Name</th>
+                                <th>Source</th>
+                                <th>Type</th>
+                                <th>Status</th>
+                                <th>Rows</th>
+                                <th>Error</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {run.files.map((f, fi) => (
+                                <tr key={fi} className={f.status === 'failed' ? 'ap-history-file-failed' : ''}>
+                                  <td><span className="ap-file-name">{f.filename}</span></td>
+                                  <td>
+                                    {f.source ? (
+                                      <span className={`ap-source-badge ${f.source.toLowerCase()}`}>{f.source}</span>
+                                    ) : <span style={{ color: '#999' }}>-</span>}
+                                  </td>
+                                  <td><span className="ap-type-badge">{f.type || 'Unknown'}</span></td>
+                                  <td>
+                                    <span className={`ap-status-badge ${f.status}`}>
+                                      <span className={`ap-status-dot ${f.status}`}></span>
+                                      {f.status.charAt(0).toUpperCase() + f.status.slice(1)}
+                                    </span>
+                                  </td>
+                                  <td>
+                                    <span className="ap-row-count">{f.rowCount ? formatNumber(f.rowCount) : '-'}</span>
+                                  </td>
+                                  <td>
+                                    {f.error ? (
+                                      <span className="ap-history-error-text" title={f.error}>
+                                        {f.error.length > 60 ? f.error.substring(0, 60) + '...' : f.error}
+                                      </span>
+                                    ) : <span style={{ color: '#999' }}>-</span>}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : filteredFiles.length === 0 ? (
             <div className="ap-empty-state">
               <div className="ap-empty-icon">&#128451;</div>
               <h3>No files found</h3>

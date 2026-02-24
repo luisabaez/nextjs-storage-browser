@@ -756,3 +756,126 @@
     max-height: 50vh;
   }
 }
+
+/* ─── History Tab ─────────────────────────────────────────────────────── */
+
+.ap-history-content {
+  padding: 0;
+}
+
+.ap-history-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.ap-history-run {
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.ap-history-run:last-child {
+  border-bottom: none;
+}
+
+.ap-history-run-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 20px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.ap-history-run-header:hover {
+  background: #f8fafc;
+}
+
+.ap-history-run-toggle {
+  flex-shrink: 0;
+  width: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ap-history-run-date {
+  font-size: 14px;
+  font-weight: 600;
+  color: #1a1a2e;
+  min-width: 220px;
+}
+
+.ap-history-run-stats {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex: 1;
+}
+
+.ap-history-stat {
+  font-size: 13px;
+  color: #555;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.ap-history-stat strong {
+  font-weight: 600;
+  color: #1a1a2e;
+}
+
+.ap-history-stat.success {
+  color: #16a34a;
+}
+
+.ap-history-stat.failed {
+  color: #dc2626;
+}
+
+.ap-history-stat.duration {
+  color: #666;
+}
+
+.ap-history-run-badge {
+  flex-shrink: 0;
+}
+
+.ap-history-run-details {
+  padding: 0 20px 16px 60px;
+}
+
+.ap-history-run-details .ap-file-table {
+  border: 1px solid #e8e8e8;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.ap-history-file-failed {
+  background: #fef2f2;
+}
+
+.ap-history-error-text {
+  font-size: 12px;
+  color: #dc2626;
+  max-width: 250px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: inline-block;
+}
+
+@media (max-width: 900px) {
+  .ap-history-run-header {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .ap-history-run-date {
+    min-width: unset;
+    flex: 1 1 100%;
+  }
+
+  .ap-history-run-details {
+    padding-left: 20px;
+  }
+}
