@@ -116,6 +116,42 @@
               "write",
               "delete"
             ]
+          },
+          "APInvoiceInput/*": {
+            "authenticated": [
+              "get",
+              "list"
+            ],
+            "entityidentity": [
+              "get",
+              "list",
+              "write",
+              "delete"
+            ]
+          },
+          "UploadedAPInvoices/*": {
+            "authenticated": [
+              "get",
+              "list"
+            ],
+            "entityidentity": [
+              "get",
+              "list",
+              "write",
+              "delete"
+            ]
+          },
+          "FailedAPInvoices/*": {
+            "authenticated": [
+              "get",
+              "list"
+            ],
+            "entityidentity": [
+              "get",
+              "list",
+              "write",
+              "delete"
+            ]
           }
         }
       }
