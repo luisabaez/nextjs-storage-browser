@@ -647,3 +647,112 @@
     font-size: 13px;
   }
 }
+
+/* ─── File Preview Modal Overrides ─────────────────────────────────────── */
+/* The base .modal in storage-browser-custom.css is 440px max-width.
+   Override for preview modal which needs more room for CSV content. */
+.modal.modal-lg {
+  max-width: 900px;
+  width: 90%;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.modal.modal-lg .modal-body {
+  padding: 16px 20px;
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.file-preview-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.preview-text-container {
+  flex: 1;
+  overflow: auto;
+  background: #1e293b;
+  border-radius: 8px;
+  max-height: 60vh;
+}
+
+.preview-text {
+  margin: 0;
+  padding: 16px;
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #e2e8f0;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+.preview-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 60px 20px;
+  color: #94a3b8;
+  gap: 12px;
+}
+
+.preview-loading .spinner {
+  width: 32px;
+  height: 32px;
+  border: 3px solid #334155;
+  border-top-color: #60a5fa;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+.preview-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 60px 20px;
+  color: #ef4444;
+  gap: 8px;
+  text-align: center;
+}
+
+.preview-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 0;
+  gap: 12px;
+  border-top: 1px solid #e2e8f0;
+  margin-top: 12px;
+}
+
+.preview-actions .btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.preview-file-info {
+  font-size: 13px;
+  color: #64748b;
+}
+
+@media (max-width: 768px) {
+  .modal.modal-lg {
+    width: calc(100% - 32px);
+    max-height: 90vh;
+  }
+
+  .preview-text-container {
+    max-height: 50vh;
+  }
+}
