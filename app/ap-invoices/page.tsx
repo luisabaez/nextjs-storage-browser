@@ -5,6 +5,7 @@ import { list, getUrl, remove, copy } from 'aws-amplify/storage';
 import { withAuthenticator } from '@aws-amplify/ui-react';
 import { useEffect, useState, useCallback, useMemo } from 'react';
 import Link from 'next/link';
+import { FilePreviewModal } from '../components/FilePreviewModal';
 import outputs from '../../amplify_outputs.json';
 import './ap-invoices.css';
 
@@ -179,6 +180,7 @@ function APInvoiceDashboard() {
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
   const [isProcessing, setIsProcessing] = useState(false);
   const [pollingInterval, setPollingInterval] = useState<NodeJS.Timeout | null>(null);
+  const [previewFile, setPreviewFile] = useState<{name: string; path: string; size?: number} | null>(null);
 
   // ─── Load files from S3 ──────────────────────────────────────────────────
 
@@ -378,16 +380,25 @@ function APInvoiceDashboard() {
 
   // ─── File actions ────────────────────────────────────────────────────────
 
-  const handleViewFile = useCallback(async (fileKey: string) => {
-    try {
-      const urlResult = await getUrl({ path: fileKey });
-      if (urlResult?.url) {
-        window.open(urlResult.url.toString(), '_blank');
-      }
-    } catch (err) {
-      console.error('Error getting file URL:', err);
-    }
+  const handleViewFile = useCallback((file: APFile) => {
+    setPreviewFile({ name: file.name, path: file.key, size: file.size });
   }, []);
+
+  const handleDownloadPreviewFile = useCallback(async () => {
+    if (!previewFile) return;
+    try {
+      const result = await getUrl({ path: previewFile.path, options: { expiresIn: 3600 } });
+      const link = document.createElement('a');
+      link.href = result.url.toString();
+      link.download = previewFile.name;
+      link.target = '_blank';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    } catch (err) {
+      console.error('Download error:', err);
+    }
+  }, [previewFile]);
 
   const toggleExpandRow = useCallback((key: string) => {
     setExpandedRows(prev => {
@@ -700,7 +711,7 @@ function APInvoiceDashboard() {
                         <div className="ap-file-name">
                           <span
                             className="ap-file-link"
-                            onClick={() => handleViewFile(file.key)}
+                            onClick={() => handleViewFile(file)}
                             title="Click to view file"
                           >
                             {file.name}
@@ -743,7 +754,7 @@ function APInvoiceDashboard() {
                       <td>
                         <button
                           className="ap-action-btn"
-                          onClick={() => handleViewFile(file.key)}
+                          onClick={() => handleViewFile(file)}
                           title="View file"
                         >
                           View
@@ -767,6 +778,13 @@ function APInvoiceDashboard() {
           )}
         </div>
       </div>
+
+      <FilePreviewModal
+        isOpen={!!previewFile}
+        onClose={() => setPreviewFile(null)}
+        file={previewFile}
+        onDownload={handleDownloadPreviewFile}
+      />
     </div>
   );
 }
