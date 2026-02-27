@@ -1,12 +1,19 @@
 """
-AP Invoice Processor Lambda Function
-=====================================
-Processes AP Invoice CSV files from S3, validates them, and loads data into
-SQL Server staging tables (Hacienda_ERP_Test database).
+Data File Processor Lambda Function
+====================================
+Processes FIN, SCM, and HCM data files (CSV/XLSX) from S3, validates them,
+and loads data into SQL Server staging tables (Hacienda_ERP_Test database).
 
 Invoked via Lambda Function URL with query parameters:
-    ?action=process  — Process all files in APInvoiceInput/
+    ?action=process  — Process all files in InputFiles/
     ?action=status   — Return current processing status
+    ?action=history  — Return processing run history
+    ?action=entities — Return entity registry for dashboard dropdowns
+
+Optional filters:
+    &module=FIN      — Only process files for a specific module
+    &entity=GL_BALANCES — Only process files matching entity
+    &mock=MOCK10     — Only process files with specific mock number
 
 Environment:
     - S3 Bucket: hacienda-erp-dev
@@ -23,17 +30,32 @@ import traceback
 from datetime import datetime
 
 from file_validator import parse_filename, validate_source, validate_csv_headers
-from column_mappings import get_mapping, get_table_name
-from table_definitions import get_create_table_sql
+from entity_registry import (
+    ENTITY_REGISTRY,
+    get_entity_info,
+    get_table_name as registry_get_table_name,
+    get_all_entities_for_module,
+    get_all_modules,
+    sanitize_column_name,
+)
+
+# Legacy AP Invoice imports (backward compat)
+from column_mappings import get_mapping as legacy_get_mapping
+from column_mappings import get_table_name as legacy_get_table_name
+from table_definitions import get_create_table_sql as legacy_get_create_table_sql
+
+# New column registry for non-legacy entities
+from column_registry import get_column_mapping
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
 DEFAULT_BUCKET = "hacienda-erp-dev"
-INPUT_FOLDER = "APInvoiceInput/"
-UPLOADED_FOLDER = "UploadedAPInvoices/"
-FAILED_FOLDER = "FailedAPInvoices/"
-STATUS_FILE_KEY = "APInvoiceInput/_processing_status.json"
-HISTORY_FOLDER_KEY = "APInvoiceInput/_processing_history/"
+INPUT_FOLDER = "InputFilesForProcessing/"
+PROCESSED_FOLDER = "ProcessedFiles/"
+FAILED_FOLDER = "FailedInvoices/"
+FAILED_UNMATCHED_FOLDER = "FailedUnmatchedFilenames/"
+STATUS_FILE_KEY = "InputFilesForProcessing/_processing_status.json"
+HISTORY_FOLDER_KEY = "InputFilesForProcessing/_processing_history/"
 
 s3_client = boto3.client("s3")
 
@@ -50,7 +72,7 @@ def get_connection_string():
 # ─── S3 Helpers ───────────────────────────────────────────────────────────────
 
 def list_input_files(bucket):
-    """List all CSV files in the input folder."""
+    """List all CSV/XLSX files in the input folder."""
     files = []
     paginator = s3_client.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=bucket, Prefix=INPUT_FOLDER):
@@ -60,7 +82,8 @@ def list_input_files(bucket):
             # Skip folder markers, status files, hidden files
             if not name or name.startswith("_") or name.startswith(".") or key.endswith("/"):
                 continue
-            if name.lower().endswith(".csv"):
+            lower_name = name.lower()
+            if lower_name.endswith(".csv") or lower_name.endswith(".xlsx"):
                 files.append({
                     "key": key,
                     "name": name,
@@ -93,15 +116,12 @@ def write_status(bucket, status_data):
 def write_history(bucket, status_data):
     """Archive the final processing status to history folder with timestamp key."""
     completed_at = status_data.get("completedAt", datetime.utcnow().isoformat())
-    # Format: 2026-02-24T15-30-45Z (replace colons for S3 key safety)
     safe_timestamp = completed_at.replace(":", "-")
-    # Truncate microseconds if present
     if "." in safe_timestamp:
         safe_timestamp = safe_timestamp.split(".")[0]
     safe_timestamp += "Z"
     history_key = f"{HISTORY_FOLDER_KEY}{safe_timestamp}.json"
 
-    # Calculate duration if both timestamps present
     history_data = dict(status_data)
     if status_data.get("startedAt") and status_data.get("completedAt"):
         try:
@@ -131,24 +151,28 @@ def write_error_file(bucket, file_key, error_message):
     )
 
 
-def read_csv_from_s3(bucket, key):
-    """Read a CSV file from S3 into a pandas DataFrame."""
+def read_file_from_s3(bucket, key, extension):
+    """Read a CSV or XLSX file from S3 into a pandas DataFrame."""
     response = s3_client.get_object(Bucket=bucket, Key=key)
-    content = response["Body"].read().decode("utf-8")
-    df = pd.read_csv(io.StringIO(content), dtype=str)
+    content = response["Body"].read()
+
+    if extension == "xlsx":
+        try:
+            import openpyxl  # noqa: F401
+        except ImportError:
+            raise ValueError("openpyxl is required for XLSX files but not installed")
+        df = pd.read_excel(io.BytesIO(content), dtype=str, engine="openpyxl")
+    else:
+        df = pd.read_csv(io.BytesIO(content), dtype=str, encoding="utf-8")
+
     df = df.fillna("")
     return df
 
 
 # ─── Table Management ─────────────────────────────────────────────────────────
 
-def ensure_table_exists(cursor, table_name, file_type, source):
-    """
-    Check if the target table exists; create it if not.
-
-    Uses SQL Server sys.tables to check existence, then creates using
-    the column definitions from table_definitions.py.
-    """
+def ensure_table_exists_legacy(cursor, table_name, file_type, source):
+    """Check if legacy AP Invoice table exists; create if not."""
     cursor.execute(
         "SELECT COUNT(*) FROM sys.tables WHERE name = ?",
         (table_name,)
@@ -157,10 +181,9 @@ def ensure_table_exists(cursor, table_name, file_type, source):
 
     if exists:
         print(f"  Table {table_name} exists")
-        return False  # did not create
+        return False
 
-    # Table doesn't exist — create it
-    create_sql = get_create_table_sql(table_name, file_type, source)
+    create_sql = legacy_get_create_table_sql(table_name, file_type, source)
     if not create_sql:
         raise ValueError(
             f"Cannot auto-create table {table_name}: "
@@ -171,24 +194,54 @@ def ensure_table_exists(cursor, table_name, file_type, source):
     cursor.execute(create_sql)
     cursor.connection.commit()
     print(f"  Table {table_name} created successfully")
-    return True  # table was created
+    return True
+
+
+def ensure_table_exists_dynamic(cursor, table_name, sql_columns):
+    """
+    Check if a table exists; create it dynamically from SQL column names.
+    All columns are NVARCHAR(500) to match the existing pattern.
+    """
+    cursor.execute(
+        "SELECT COUNT(*) FROM sys.tables WHERE name = ?",
+        (table_name,)
+    )
+    exists = cursor.fetchone()[0] > 0
+
+    if exists:
+        print(f"  Table {table_name} exists")
+        return False
+
+    # Build CREATE TABLE with all NVARCHAR(500) columns
+    col_defs = ",\n    ".join(f"[{col}] NVARCHAR(500)" for col in sql_columns)
+    create_sql = f"CREATE TABLE [{table_name}] (\n    {col_defs}\n)"
+
+    print(f"  Creating table {table_name}...")
+    cursor.execute(create_sql)
+    cursor.connection.commit()
+    print(f"  Table {table_name} created successfully")
+    return True
 
 
 # ─── Processing Logic ─────────────────────────────────────────────────────────
 
 def process_single_file(bucket, file_info, connection_str):
     """
-    Process a single AP Invoice CSV file.
+    Process a single data file (CSV or XLSX).
 
     Returns:
-        dict with keys: filename, status, rowCount, error, source, type, mockNumber
+        dict with keys: filename, status, rowCount, error, source, module,
+                        entity, entityDisplay, mockNumber
     """
     filename = file_info["name"]
     file_key = file_info["key"]
     result = {
         "filename": filename,
         "source": "",
-        "type": "",
+        "module": "",
+        "entity": "",
+        "entityDisplay": "",
+        "type": "",  # backward compat
         "mockNumber": "",
         "status": "processing",
         "rowCount": 0,
@@ -203,90 +256,129 @@ def process_single_file(bucket, file_info, connection_str):
         if not parsed["valid"]:
             raise ValueError(f"Invalid filename: {parsed['error']}")
 
-        result["source"] = parsed["source"]
-        result["type"] = parsed["file_type"]
-        result["mockNumber"] = parsed["mock_number"]
+        if parsed["is_excluded"]:
+            raise ValueError(f"File belongs to an excluded entity: {filename}")
 
-        file_type = parsed["file_type"]
+        result["source"] = parsed["source"]
+        result["module"] = parsed["module"]
+        result["entity"] = parsed["entity_prefix"]
+        result["entityDisplay"] = parsed["entity_display"]
+        result["mockNumber"] = parsed["mock_number"]
+        # Backward compat
+        result["type"] = parsed.get("file_type", parsed["entity_prefix"])
+
+        entity_prefix = parsed["entity_prefix"]
         source = parsed["source"]
         mock_number = parsed["mock_number"]
+        extension = parsed["extension"]
+        is_legacy = parsed["is_legacy"]
 
-        print(f"Processing: {filename} | Type={file_type} Source={source} Mock={mock_number}")
+        print(f"Processing: {filename} | Module={parsed['module']} Entity={entity_prefix} "
+              f"Source={source} Mock={mock_number}")
 
         # Step 2: Validate source
         if not validate_source(source):
-            raise ValueError(f"Unknown source agency: {source}")
+            print(f"  WARNING: Unknown source agency '{source}', proceeding anyway")
 
-        # Step 3: Get column mapping
-        mapping = get_mapping(file_type, source)
-        if not mapping:
-            raise ValueError(
-                f"No column mapping found for type={file_type}, source={source}. "
-                f"This source/type combination is not supported."
-            )
-
-        # Step 4: Read CSV from S3
-        print(f"  Reading CSV from S3: {file_key}")
-        df = read_csv_from_s3(bucket, file_key)
-        print(f"  CSV loaded: {len(df)} rows, {len(df.columns)} columns")
+        # Step 3: Read file from S3
+        print(f"  Reading {extension.upper()} from S3: {file_key}")
+        df = read_file_from_s3(bucket, file_key, extension)
+        print(f"  File loaded: {len(df)} rows, {len(df.columns)} columns")
 
         if len(df) == 0:
-            raise ValueError("CSV file is empty (header only, no data rows)")
+            raise ValueError("File is empty (header only, no data rows)")
 
-        # Step 5: Validate CSV headers
-        actual_headers = list(df.columns)
-        expected_csv_cols = mapping["csv_columns"]
-        is_valid, header_error = validate_csv_headers(actual_headers, expected_csv_cols)
-        if not is_valid:
-            raise ValueError(f"Header validation failed: {header_error}")
+        # Step 4: Route to legacy or new processing path
+        if is_legacy and parsed.get("file_type"):
+            # Legacy AP Invoice path
+            file_type = parsed["file_type"]
+            mapping = legacy_get_mapping(file_type, source)
+            if not mapping:
+                raise ValueError(
+                    f"No column mapping found for legacy type={file_type}, source={source}"
+                )
 
-        # Step 6: Determine target table
-        table_name = get_table_name(file_type, mock_number, source)
-        print(f"  Target table: {table_name}")
+            # Validate CSV headers
+            actual_headers = list(df.columns)
+            is_valid, header_error = validate_csv_headers(actual_headers, mapping["csv_columns"])
+            if not is_valid:
+                raise ValueError(f"Header validation failed: {header_error}")
 
-        # Step 7: Connect and truncate table
-        sql_columns = mapping["sql_columns"]
-        placeholders = ", ".join(["?"] * len(sql_columns))
-        col_list = ", ".join(sql_columns)
+            table_name = legacy_get_table_name(file_type, mock_number, source)
+            sql_columns = mapping["sql_columns"]
+            csv_columns = mapping["csv_columns"]
 
-        with pyodbc.connect(connection_str) as conn:
-            cursor = conn.cursor()
+            print(f"  Target table (legacy): {table_name}")
 
-            # Ensure table exists (auto-create if needed)
-            was_created = ensure_table_exists(cursor, table_name, file_type, source)
+            with pyodbc.connect(connection_str) as conn:
+                cursor = conn.cursor()
+                was_created = ensure_table_exists_legacy(cursor, table_name, file_type, source)
 
-            # Truncate the target table (skip if just created — it's empty)
-            if not was_created:
-                print(f"  Truncating table: {table_name}")
-                cursor.execute(f"DELETE FROM {table_name}")
-                conn.commit()
+                if not was_created:
+                    print(f"  Truncating table: {table_name}")
+                    cursor.execute(f"DELETE FROM [{table_name}]")
+                    conn.commit()
 
-            # Step 8: Build rows for insert
-            csv_cols = mapping["csv_columns"]
-            rows = []
-            for _, row in df.iterrows():
-                values = []
-                for csv_col in csv_cols:
-                    val = str(row.get(csv_col, "")).strip()
-                    values.append(val if val else None)
-                rows.append(tuple(values))
+                rows = _build_rows(df, csv_columns)
+                _batch_insert(cursor, conn, table_name, sql_columns, rows)
+                result["rowCount"] = len(rows)
 
-            # Step 9: Bulk insert
-            insert_sql = f"INSERT INTO {table_name} ({col_list}) VALUES ({placeholders})"
-            print(f"  Inserting {len(rows)} rows...")
+        else:
+            # New multi-module processing path
+            mapping = get_column_mapping(entity_prefix, source)
 
-            # Insert in batches of 1000 for large files
-            batch_size = 1000
-            for i in range(0, len(rows), batch_size):
-                batch = rows[i:i + batch_size]
-                cursor.executemany(insert_sql, batch)
-                conn.commit()
+            if mapping:
+                # Mapping found — validate headers and use mapped columns
+                csv_columns = mapping["csv_columns"]
+                sql_columns = mapping["sql_columns"]
 
-            result["rowCount"] = len(rows)
-            print(f"  Successfully inserted {len(rows)} rows into {table_name}")
+                actual_headers = list(df.columns)
+                is_valid, header_error = validate_csv_headers(actual_headers, csv_columns)
+                if not is_valid:
+                    raise ValueError(f"Header validation failed: {header_error}")
 
-        # Step 10: Move to uploaded folder
-        dest_key = f"{UPLOADED_FOLDER}{source}/{filename}"
+                table_name = registry_get_table_name(entity_prefix, mock_number, source)
+                print(f"  Target table (mapped): {table_name}")
+
+                with pyodbc.connect(connection_str) as conn:
+                    cursor = conn.cursor()
+                    was_created = ensure_table_exists_dynamic(cursor, table_name, sql_columns)
+
+                    if not was_created:
+                        print(f"  Truncating table: {table_name}")
+                        cursor.execute(f"DELETE FROM [{table_name}]")
+                        conn.commit()
+
+                    rows = _build_rows(df, csv_columns)
+                    _batch_insert(cursor, conn, table_name, sql_columns, rows)
+                    result["rowCount"] = len(rows)
+
+            else:
+                # No mapping — dynamic fallback: sanitize CSV headers
+                print(f"  WARNING: No column mapping for {entity_prefix}/{source}, "
+                      f"using dynamic fallback")
+                actual_headers = list(df.columns)
+                sql_columns = [sanitize_column_name(h) for h in actual_headers]
+                csv_columns = actual_headers
+
+                table_name = registry_get_table_name(entity_prefix, mock_number, source)
+                print(f"  Target table (dynamic): {table_name}")
+
+                with pyodbc.connect(connection_str) as conn:
+                    cursor = conn.cursor()
+                    was_created = ensure_table_exists_dynamic(cursor, table_name, sql_columns)
+
+                    if not was_created:
+                        print(f"  Truncating table: {table_name}")
+                        cursor.execute(f"DELETE FROM [{table_name}]")
+                        conn.commit()
+
+                    rows = _build_rows(df, csv_columns)
+                    _batch_insert(cursor, conn, table_name, sql_columns, rows)
+                    result["rowCount"] = len(rows)
+
+        # Step 5: Move to processed folder (organized by MODULE/MOCK/SOURCE/ENTITY)
+        dest_key = f"{PROCESSED_FOLDER}{parsed['module']}/{mock_number}/{source}/{entity_prefix}/{filename}"
         move_file(bucket, file_key, dest_key)
         print(f"  Moved to: {dest_key}")
 
@@ -305,7 +397,16 @@ def process_single_file(bucket, file_info, connection_str):
 
         # Move to failed folder
         try:
-            dest_key = f"{FAILED_FOLDER}{result.get('source', 'unknown')}/{filename}"
+            mock = result.get("mockNumber", "unknown")
+            src = result.get("source", "unknown")
+            mod = result.get("module", "")
+            entity = result.get("entity", "")
+            if mock and src and mock != "" and src != "" and mod and entity:
+                dest_key = f"{FAILED_FOLDER}{mod}/{mock}/{src}/{entity}/{filename}"
+            elif mock and src and mock != "" and src != "":
+                dest_key = f"{FAILED_FOLDER}{filename}"
+            else:
+                dest_key = f"{FAILED_UNMATCHED_FOLDER}{filename}"
             move_file(bucket, file_key, dest_key)
             write_error_file(bucket, dest_key, f"{error_msg}\n\n{tb}")
             print(f"  Moved to: {dest_key}")
@@ -315,25 +416,60 @@ def process_single_file(bucket, file_info, connection_str):
     return result
 
 
+def _build_rows(df, csv_columns):
+    """Build list of tuples from DataFrame for SQL insert."""
+    rows = []
+    for _, row in df.iterrows():
+        values = []
+        for csv_col in csv_columns:
+            val = str(row.get(csv_col, "")).strip()
+            values.append(val if val else None)
+        rows.append(tuple(values))
+    return rows
+
+
+def _batch_insert(cursor, conn, table_name, sql_columns, rows):
+    """Insert rows in batches of 1000."""
+    placeholders = ", ".join(["?"] * len(sql_columns))
+    col_list = ", ".join(f"[{c}]" for c in sql_columns)
+    insert_sql = f"INSERT INTO [{table_name}] ({col_list}) VALUES ({placeholders})"
+    print(f"  Inserting {len(rows)} rows...")
+
+    batch_size = 1000
+    for i in range(0, len(rows), batch_size):
+        batch = rows[i:i + batch_size]
+        cursor.executemany(insert_sql, batch)
+        conn.commit()
+
+    print(f"  Successfully inserted {len(rows)} rows into {table_name}")
+
+
 # ─── Lambda Handler ───────────────────────────────────────────────────────────
 
 def lambda_handler(event, context):
     """
     Main Lambda handler.
 
-    Supports two actions:
-        ?action=process  — Process all files in input folder
-        ?action=status   — Return current processing status
+    Supports actions:
+        ?action=process   — Process all files in input folder
+        ?action=status    — Return current processing status
+        ?action=history   — Return processing run history
+        ?action=entities  — Return entity registry for dashboard
     """
-    # Parse action from query string or body
-    action = "process"
-
+    # Parse query params
+    params = {}
     if "queryStringParameters" in event and event["queryStringParameters"]:
-        action = event["queryStringParameters"].get("action", "process")
+        params = event["queryStringParameters"]
     elif "rawQueryString" in event and event["rawQueryString"]:
         for param in event["rawQueryString"].split("&"):
-            if param.startswith("action="):
-                action = param.split("=")[1]
+            if "=" in param:
+                k, v = param.split("=", 1)
+                params[k] = v
+
+    action = params.get("action", "process")
+    filter_module = params.get("module", "").upper()
+    filter_entity = params.get("entity", "").upper()
+    filter_mock = params.get("mock", "").upper()
 
     # Parse bucket from body or use default
     bucket = DEFAULT_BUCKET
@@ -344,9 +480,10 @@ def lambda_handler(event, context):
         except (json.JSONDecodeError, TypeError):
             pass
 
-    print(f"AP Invoice Processor: action={action}, bucket={bucket}")
+    print(f"Data File Processor: action={action}, bucket={bucket}, "
+          f"module={filter_module}, entity={filter_entity}, mock={filter_mock}")
 
-    # CORS headers for Function URL
+    # CORS headers
     headers = {
         "Content-Type": "application/json",
         "Access-Control-Allow-Origin": "*",
@@ -357,6 +494,31 @@ def lambda_handler(event, context):
     # Handle OPTIONS (CORS preflight)
     if event.get("requestContext", {}).get("http", {}).get("method") == "OPTIONS":
         return {"statusCode": 200, "headers": headers, "body": ""}
+
+    # ── ENTITIES ACTION ──
+    if action == "entities":
+        try:
+            modules = get_all_modules()
+            entities_by_module = {}
+            for mod in modules:
+                entities_by_module[mod] = [
+                    {"prefix": prefix, "displayName": info["display_name"], "legacy": info["legacy"]}
+                    for prefix, info in get_all_entities_for_module(mod)
+                ]
+            return {
+                "statusCode": 200,
+                "headers": headers,
+                "body": json.dumps({
+                    "modules": modules,
+                    "entities": entities_by_module,
+                }),
+            }
+        except Exception as e:
+            return {
+                "statusCode": 500,
+                "headers": headers,
+                "body": json.dumps({"error": str(e)}),
+            }
 
     # ── STATUS ACTION ──
     if action == "status":
@@ -394,13 +556,9 @@ def lambda_handler(event, context):
                         continue
                     history_files.append(key)
 
-            # Sort newest first (ISO timestamps sort lexicographically)
             history_files.sort(reverse=True)
-
-            # Limit to last 50 runs
             history_files = history_files[:50]
 
-            # Fetch content of each history file
             runs = []
             for hf_key in history_files:
                 try:
@@ -425,8 +583,21 @@ def lambda_handler(event, context):
     # ── PROCESS ACTION ──
     if action == "process":
         try:
-            # List input files
             input_files = list_input_files(bucket)
+
+            # Apply filters
+            if filter_module or filter_entity or filter_mock:
+                filtered = []
+                for f in input_files:
+                    parsed = parse_filename(f["name"])
+                    if filter_module and parsed.get("module", "").upper() != filter_module:
+                        continue
+                    if filter_entity and filter_entity not in parsed.get("entity_prefix", "").upper():
+                        continue
+                    if filter_mock and parsed.get("mock_number", "").upper() != filter_mock:
+                        continue
+                    filtered.append(f)
+                input_files = filtered
 
             if not input_files:
                 return {
@@ -434,7 +605,7 @@ def lambda_handler(event, context):
                     "headers": headers,
                     "body": json.dumps({
                         "status": "complete",
-                        "message": "No files found in input folder",
+                        "message": "No files found matching criteria",
                         "totalFiles": 0,
                         "processedFiles": 0,
                         "successCount": 0,
@@ -457,13 +628,15 @@ def lambda_handler(event, context):
                 "files": [],
             }
 
-            # Initialize file status entries
             for f in input_files:
                 parsed = parse_filename(f["name"])
                 status["files"].append({
                     "filename": f["name"],
                     "source": parsed.get("source", ""),
-                    "type": parsed.get("file_type", ""),
+                    "module": parsed.get("module", ""),
+                    "entity": parsed.get("entity_prefix", ""),
+                    "entityDisplay": parsed.get("entity_display", ""),
+                    "type": parsed.get("file_type", parsed.get("entity_prefix", "")),
                     "mockNumber": parsed.get("mock_number", ""),
                     "status": "pending",
                     "rowCount": 0,
@@ -479,15 +652,12 @@ def lambda_handler(event, context):
 
             # Process each file
             for i, file_info in enumerate(input_files):
-                # Update status to show current file as processing
                 status["files"][i]["status"] = "processing"
                 status["files"][i]["startedAt"] = datetime.utcnow().isoformat()
                 write_status(bucket, status)
 
-                # Process the file
                 result = process_single_file(bucket, file_info, connection_str)
 
-                # Update status with result
                 status["files"][i] = result
                 status["processedFiles"] = i + 1
 
@@ -506,7 +676,8 @@ def lambda_handler(event, context):
             # Archive to history
             write_history(bucket, status)
 
-            print(f"Processing complete: {status['successCount']} success, {status['failCount']} failed")
+            print(f"Processing complete: {status['successCount']} success, "
+                  f"{status['failCount']} failed")
 
             return {
                 "statusCode": 200,
@@ -518,7 +689,6 @@ def lambda_handler(event, context):
             tb = traceback.format_exc()
             print(f"FATAL ERROR: {e}\n{tb}")
 
-            # Try to update status
             try:
                 error_status = {
                     "status": "error",
@@ -539,5 +709,8 @@ def lambda_handler(event, context):
     return {
         "statusCode": 400,
         "headers": headers,
-        "body": json.dumps({"error": f"Unknown action: {action}. Use 'process' or 'status'."}),
+        "body": json.dumps({
+            "error": f"Unknown action: {action}. "
+                     f"Use 'process', 'status', 'history', or 'entities'."
+        }),
     }

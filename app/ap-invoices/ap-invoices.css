@@ -153,7 +153,7 @@
 }
 
 .ap-stat-icon.total { background: #e8f0fe; }
-.ap-stat-icon.uploaded { background: #e6f4ea; }
+.ap-stat-icon.processed { background: #e6f4ea; }
 .ap-stat-icon.processing { background: #fef7e0; }
 .ap-stat-icon.failed { background: #fce8e6; }
 
@@ -417,8 +417,31 @@
 .ap-source-badge.sifde { background: #d1fae5; color: #059669; }
 .ap-source-badge.salud { background: #ede9fe; color: #7c3aed; }
 .ap-source-badge.retiro { background: #fee2e2; color: #dc2626; }
+.ap-source-badge.rhum { background: #fef9c3; color: #a16207; }
+.ap-source-badge.kronospol { background: #e0f2fe; color: #0369a1; }
+.ap-source-badge.kronospol_phase2 { background: #e0f2fe; color: #0369a1; }
+.ap-source-badge.doe { background: #f0fdf4; color: #15803d; }
+.ap-source-badge.adppolicia { background: #fdf2f8; color: #be185d; }
+.ap-source-badge.911 { background: #fff7ed; color: #c2410c; }
+.ap-source-badge.suri { background: #ecfdf5; color: #065f46; }
+.ap-source-badge.asg { background: #f5f3ff; color: #6d28d9; }
 
-/* Type badge */
+/* Module badge */
+.ap-module-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.ap-module-badge.fin { background: #dbeafe; color: #1d4ed8; }
+.ap-module-badge.hcm { background: #fef3c7; color: #b45309; }
+.ap-module-badge.scm { background: #d1fae5; color: #047857; }
+
+/* Entity/Type badge */
 .ap-type-badge {
   display: inline-block;
   padding: 2px 8px;

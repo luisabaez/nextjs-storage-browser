@@ -53,9 +53,10 @@ const folders = [
   { path: 'InitialUploadErrors/', name: 'Upload Errors', icon: '❌', type: 'error' },
   { path: 'TSQLFiles/', name: 'TSQL Files', icon: '🗃️', type: 'sql' },
   { path: 'DataValidation/', name: 'Data Validation', icon: '✅', type: 'validation' },
-  { path: 'APInvoiceInput/', name: 'AP Invoice Input', icon: '📥', type: 'upload' },
-  { path: 'UploadedAPInvoices/', name: 'Uploaded AP Invoices', icon: '✅', type: 'conversion' },
-  { path: 'FailedAPInvoices/', name: 'Failed AP Invoices', icon: '❌', type: 'error' },
+  { path: 'InputFilesForProcessing/', name: 'Input Files For Processing', icon: '📥', type: 'upload' },
+  { path: 'ProcessedFiles/', name: 'Processed Files', icon: '✅', type: 'conversion' },
+  { path: 'FailedInvoices/', name: 'Failed Files', icon: '❌', type: 'error' },
+  { path: 'FailedUnmatchedFilenames/', name: 'Unmatched Filenames', icon: '❓', type: 'error' },
 ];
 
 // Default quick links
@@ -728,9 +729,9 @@ function FileBrowser() {
         </div>
 
         <div className="header-right">
-          <Link href="/ap-invoices" className="admin-link" title="AP Invoice Dashboard">
+          <Link href="/ap-invoices" className="admin-link" title="File Processing Dashboard">
             <span className="admin-icon">📋</span>
-            <span className="admin-text">AP Invoices</span>
+            <span className="admin-text">File Processing</span>
           </Link>
           {isAdmin && (
             <Link href="/admin" className="admin-link" title="Admin Dashboard">

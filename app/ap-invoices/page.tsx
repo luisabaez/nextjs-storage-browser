@@ -15,13 +15,15 @@ Amplify.configure(outputs as any);
 
 interface ParsedFileInfo {
   filename: string;
-  pillar: string;
-  entityType: string;        // HDR, LINES, LINES_DTL1
-  entityTypeDisplay: string;  // Header, Lines, Lines DTL1
-  mockNumber: string;         // MOCK10
-  source: string;             // PRIFAS, HACIENDA, etc.
+  module: string;           // FIN, HCM, SCM
+  entityPrefix: string;     // FIN_AP_INVOICE_HDR, HCM_PERSON, etc.
+  entityDisplay: string;    // "AP Invoice Header", "Person", etc.
+  mockNumber: string;       // MOCK10, MOCK10PRE, MOCK11PRE
+  source: string;           // PRIFAS, HACIENDA, etc.
   dateStr: string;
   timeStr: string;
+  extension: string;        // csv, xlsx
+  isLegacy: boolean;
   valid: boolean;
   error?: string;
 }
@@ -31,11 +33,26 @@ interface APFile {
   name: string;
   size: number;
   lastModified: Date;
-  folder: 'input' | 'uploaded' | 'failed';
+  folder: 'input' | 'processed' | 'failed' | 'unmatched';
   parsed: ParsedFileInfo;
   status: 'pending' | 'processing' | 'success' | 'failed';
   rowCount?: number;
   errorMessage?: string;
+}
+
+interface ProcessingFileStatus {
+  filename: string;
+  source: string;
+  module: string;
+  entity: string;
+  entityDisplay: string;
+  type: string;
+  mockNumber: string;
+  status: string;
+  rowCount: number;
+  error: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
 }
 
 interface ProcessingStatus {
@@ -46,17 +63,7 @@ interface ProcessingStatus {
   processedFiles: number;
   successCount: number;
   failCount: number;
-  files: {
-    filename: string;
-    source: string;
-    type: string;
-    mockNumber: string;
-    status: string;
-    rowCount: number;
-    error: string | null;
-    startedAt: string | null;
-    completedAt: string | null;
-  }[];
+  files: ProcessingFileStatus[];
 }
 
 interface HistoryRun {
@@ -68,45 +75,116 @@ interface HistoryRun {
   successCount: number;
   failCount: number;
   durationSeconds?: number;
-  files: {
-    filename: string;
-    source: string;
-    type: string;
-    mockNumber: string;
-    status: string;
-    rowCount: number;
-    error: string | null;
-    startedAt: string | null;
-    completedAt: string | null;
-  }[];
+  files: ProcessingFileStatus[];
 }
+
+// ─── Entity Registry (mirrors Python entity_registry.py) ────────────────────
+
+interface EntityInfo {
+  module: string;
+  displayName: string;
+  legacy: boolean;
+}
+
+const ENTITY_REGISTRY: Record<string, EntityInfo> = {
+  // FIN (19)
+  FIN_AP_INVOICE_HDR: { module: 'FIN', displayName: 'AP Invoice Header', legacy: true },
+  FIN_AP_INVOICE_LINES_DTL1: { module: 'FIN', displayName: 'AP Invoice Lines Detail', legacy: true },
+  FIN_AP_INVOICE_LINES: { module: 'FIN', displayName: 'AP Invoice Lines', legacy: true },
+  FIN_AR_INVOICE_DISTRIBUTION: { module: 'FIN', displayName: 'AR Invoice Distribution', legacy: false },
+  FIN_AR_INVOICE_LINES: { module: 'FIN', displayName: 'AR Invoice Lines', legacy: false },
+  FIN_AR_INVOICE: { module: 'FIN', displayName: 'AR Invoice', legacy: false },
+  FIN_AWARDS_CFDACMIA: { module: 'FIN', displayName: 'Awards CFDA/CMIA', legacy: false },
+  FIN_BUDGETARY_BALANCES: { module: 'FIN', displayName: 'Budgetary Balances', legacy: false },
+  FIN_CUSTOMER_CONTACT: { module: 'FIN', displayName: 'Customer Contact', legacy: false },
+  FIN_CUSTOMER: { module: 'FIN', displayName: 'Customer', legacy: false },
+  FIN_GL_BALANCES: { module: 'FIN', displayName: 'GL Balances', legacy: false },
+  FIN_PROJECT_CLASS: { module: 'FIN', displayName: 'Project Class', legacy: false },
+  FIN_PROJECTS_CROSS_REFERENCES: { module: 'FIN', displayName: 'Projects Cross References', legacy: false },
+  FIN_PROJECTS_TASK_ACTIVITY: { module: 'FIN', displayName: 'Projects Task Activity', legacy: false },
+  FIN_PROJECTS_TEAM_MEMBERS: { module: 'FIN', displayName: 'Projects Team Members', legacy: false },
+  FIN_PROJECTS: { module: 'FIN', displayName: 'Projects', legacy: false },
+  FIN_REQ_DISTRIBUTION: { module: 'FIN', displayName: 'Requisition Distribution', legacy: false },
+  FIN_REQ_HDR: { module: 'FIN', displayName: 'Requisition Header', legacy: false },
+  FIN_REQ_LINE: { module: 'FIN', displayName: 'Requisition Line', legacy: false },
+  // HCM (18)
+  HCM_ASSIGNMENT_EIT_KRONOS: { module: 'HCM', displayName: 'Assignment EIT Kronos', legacy: false },
+  HCM_CONTRACT_SUPERVISOR: { module: 'HCM', displayName: 'Contract Supervisor', legacy: false },
+  HCM_COST_ALLOCATION: { module: 'HCM', displayName: 'Cost Allocation', legacy: false },
+  HCM_DEPARTMENT: { module: 'HCM', displayName: 'Department', legacy: false },
+  HCM_ELEMENT_ENTRY_COSTING: { module: 'HCM', displayName: 'Element Entry Costing', legacy: false },
+  HCM_ELEMENT_ENTRY: { module: 'HCM', displayName: 'Element Entry', legacy: false },
+  HCM_EXTERNAL_BANK_ACCOUNT: { module: 'HCM', displayName: 'External Bank Account', legacy: false },
+  HCM_JOBS: { module: 'HCM', displayName: 'Jobs', legacy: false },
+  HCM_LOCATION: { module: 'HCM', displayName: 'Location', legacy: false },
+  HCM_PERSONAL_PAYMENT_METHOD: { module: 'HCM', displayName: 'Personal Payment Method', legacy: false },
+  HCM_PERSON_ADDRESS: { module: 'HCM', displayName: 'Person Address', legacy: false },
+  HCM_PERSON_ASSIGNMENT: { module: 'HCM', displayName: 'Person Assignment', legacy: false },
+  HCM_PERSON_EMAIL: { module: 'HCM', displayName: 'Person Email', legacy: false },
+  HCM_PERSON_NAME: { module: 'HCM', displayName: 'Person Name', legacy: false },
+  HCM_PERSON_NID: { module: 'HCM', displayName: 'Person NID', legacy: false },
+  HCM_PERSON_SUPERVISOR: { module: 'HCM', displayName: 'Person Supervisor', legacy: false },
+  HCM_PERSON: { module: 'HCM', displayName: 'Person', legacy: false },
+  HCM_SENIORITY: { module: 'HCM', displayName: 'Seniority', legacy: false },
+  // SCM (19)
+  SCM_BU_RECENT_BILLTO_SHIPTO_LOCATION: { module: 'SCM', displayName: 'BU Recent BillTo/ShipTo Location', legacy: false },
+  SCM_CATALOG: { module: 'SCM', displayName: 'Catalog', legacy: false },
+  SCM_CATEGORY: { module: 'SCM', displayName: 'Category', legacy: false },
+  SCM_CONTRACTS_LINES: { module: 'SCM', displayName: 'Contracts Lines', legacy: false },
+  SCM_CONTRACTS: { module: 'SCM', displayName: 'Contracts', legacy: false },
+  SCM_CONTRACT_LINES: { module: 'SCM', displayName: 'Contract Lines', legacy: false },
+  SCM_ITEMS: { module: 'SCM', displayName: 'Items', legacy: false },
+  SCM_LOCATIONS: { module: 'SCM', displayName: 'Locations', legacy: false },
+  SCM_PURCHASE_ORDER_COMMENTS: { module: 'SCM', displayName: 'Purchase Order Comments', legacy: false },
+  SCM_PURCHASE_ORDER_LINE_DISTRIBUTION: { module: 'SCM', displayName: 'PO Line Distribution', legacy: false },
+  SCM_PURCHASE_ORDER_LINE_LOCATIONS: { module: 'SCM', displayName: 'PO Line Locations', legacy: false },
+  SCM_PURCHASE_ORDER_LINES: { module: 'SCM', displayName: 'Purchase Order Lines', legacy: false },
+  SCM_PURCHASE_ORDER: { module: 'SCM', displayName: 'Purchase Order', legacy: false },
+  SCM_SUPPLIER_ADDRESS: { module: 'SCM', displayName: 'Supplier Address', legacy: false },
+  SCM_SUPPLIER_BANK_ACCOUNTS: { module: 'SCM', displayName: 'Supplier Bank Accounts', legacy: false },
+  SCM_SUPPLIER_CONTACT: { module: 'SCM', displayName: 'Supplier Contact', legacy: false },
+  SCM_SUPPLIER_SITE_ASSIG: { module: 'SCM', displayName: 'Supplier Site Assignment', legacy: false },
+  SCM_SUPPLIER_SITE: { module: 'SCM', displayName: 'Supplier Site', legacy: false },
+  SCM_SUPPLIER: { module: 'SCM', displayName: 'Supplier', legacy: false },
+};
+
+// Sorted longest-first for unambiguous matching (same as Python)
+const SORTED_PREFIXES = Object.keys(ENTITY_REGISTRY).sort((a, b) => b.length - a.length);
+
+const EXCLUDED_PREFIXES = ['FIN_ASSETS', 'SCM_INV'];
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const LAMBDA_URL = 'https://5ahxjcxhrcopng5hjgc2n6utxq0rwcmm.lambda-url.us-east-1.on.aws/';
 
-const KNOWN_SOURCES = ['PRIFAS', 'HACIENDA', 'FIMAS', 'ASSMCA', 'SIFDE', 'SALUD', 'RETIRO'];
+const KNOWN_SOURCES = [
+  'PRIFAS', 'HACIENDA', 'FIMAS', 'ASSMCA', 'SIFDE', 'SALUD', 'RETIRO',
+  'RHUM', 'KRONOSPOL', 'KRONOSPOL_PHASE2', 'DOE', 'ADPPOLICIA', '911', 'SURI', 'ASG',
+];
 
 const S3_FOLDERS = {
-  input: 'APInvoiceInput/',
-  uploaded: 'UploadedAPInvoices/',
-  failed: 'FailedAPInvoices/',
+  input: 'InputFilesForProcessing/',
+  processed: 'ProcessedFiles/',
+  failed: 'FailedInvoices/',
+  unmatched: 'FailedUnmatchedFilenames/',
 };
 
 type TabId = 'all' | 'pending' | 'uploaded' | 'failed' | 'history';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function parseAPFilename(filename: string): ParsedFileInfo {
+function parseFilename(filename: string): ParsedFileInfo {
   const base: ParsedFileInfo = {
     filename,
-    pillar: '',
-    entityType: '',
-    entityTypeDisplay: '',
+    module: '',
+    entityPrefix: '',
+    entityDisplay: '',
     mockNumber: '',
     source: '',
     dateStr: '',
     timeStr: '',
+    extension: '',
+    isLegacy: false,
     valid: false,
   };
 
@@ -114,62 +192,71 @@ function parseAPFilename(filename: string): ParsedFileInfo {
   const name = filename.split('/').pop() || filename;
   base.filename = name;
 
-  // Skip non-CSV files and hidden files
-  if (!name.toLowerCase().endsWith('.csv') || name.startsWith('_') || name.startsWith('.')) {
-    base.error = 'Not a CSV file';
+  // Check extension
+  const lowerName = name.toLowerCase();
+  if (lowerName.endsWith('.csv')) {
+    base.extension = 'csv';
+  } else if (lowerName.endsWith('.xlsx')) {
+    base.extension = 'xlsx';
+  } else {
+    // Skip non-data files and hidden files
+    if (name.startsWith('_') || name.startsWith('.')) {
+      base.error = 'Hidden or system file';
+    } else {
+      base.error = 'Unsupported file type (expected .csv or .xlsx)';
+    }
     return base;
   }
 
-  // Pattern: FIN_AP_INVOICE_{TYPE}_MOCK{N}_{SOURCE}_{DATE}_{TIME}.csv
-  // Where TYPE = HDR | LINES_DTL1 | LINES
-  // Note: LINES_DTL1 must be checked before LINES since LINES is a prefix of LINES_DTL1
+  // Check excluded entities
+  const nameUpper = name.toUpperCase();
+  for (const excl of EXCLUDED_PREFIXES) {
+    if (nameUpper.includes(excl)) {
+      base.error = `File belongs to an excluded entity: ${excl}`;
+      return base;
+    }
+  }
 
-  const dtl1Match = name.match(
-    /^(FIN)_AP_INVOICE_LINES_DTL1_MOCK(\d+)_([A-Z0-9]+)_(\d{8})_(\d{4})\.csv$/i
+  // Match entity prefix using longest-first matching
+  let matchedPrefix = '';
+  for (const prefix of SORTED_PREFIXES) {
+    if (nameUpper.startsWith(prefix + '_MOCK')) {
+      matchedPrefix = prefix;
+      break;
+    }
+  }
+
+  if (!matchedPrefix) {
+    base.error = 'Filename does not match any known entity pattern';
+    return base;
+  }
+
+  const entityInfo = ENTITY_REGISTRY[matchedPrefix];
+  base.entityPrefix = matchedPrefix;
+  base.module = entityInfo.module;
+  base.entityDisplay = entityInfo.displayName;
+  base.isLegacy = entityInfo.legacy;
+
+  // Extract remainder: _MOCK{N}[PRE]_{SOURCE}_{DATE}_{TIME}.ext
+  const remainder = name.substring(matchedPrefix.length);
+  const ext = base.extension === 'csv' ? '.csv' : '.xlsx';
+  const pattern = new RegExp(
+    `^_(MOCK\\d+(?:PRE)?)_([A-Z0-9_]+)_(\\d{8})_(\\d{4})${ext.replace('.', '\\.')}$`,
+    'i'
   );
-  if (dtl1Match) {
-    base.pillar = dtl1Match[1].toUpperCase();
-    base.entityType = 'LINES_DTL1';
-    base.entityTypeDisplay = 'Lines DTL1';
-    base.mockNumber = `MOCK${dtl1Match[2]}`;
-    base.source = dtl1Match[3].toUpperCase();
-    base.dateStr = dtl1Match[4];
-    base.timeStr = dtl1Match[5];
-    base.valid = true;
+  const m = remainder.match(pattern);
+
+  if (!m) {
+    base.error = `Invalid filename structure after entity prefix '${matchedPrefix}'`;
     return base;
   }
 
-  const linesMatch = name.match(
-    /^(FIN)_AP_INVOICE_LINES_MOCK(\d+)_([A-Z0-9]+)_(\d{8})_(\d{4})\.csv$/i
-  );
-  if (linesMatch) {
-    base.pillar = linesMatch[1].toUpperCase();
-    base.entityType = 'LINES';
-    base.entityTypeDisplay = 'Lines';
-    base.mockNumber = `MOCK${linesMatch[2]}`;
-    base.source = linesMatch[3].toUpperCase();
-    base.dateStr = linesMatch[4];
-    base.timeStr = linesMatch[5];
-    base.valid = true;
-    return base;
-  }
+  base.mockNumber = m[1].toUpperCase();
+  base.source = m[2].toUpperCase();
+  base.dateStr = m[3];
+  base.timeStr = m[4];
+  base.valid = true;
 
-  const hdrMatch = name.match(
-    /^(FIN)_AP_INVOICE_HDR_MOCK(\d+)_([A-Z0-9]+)_(\d{8})_(\d{4})\.csv$/i
-  );
-  if (hdrMatch) {
-    base.pillar = hdrMatch[1].toUpperCase();
-    base.entityType = 'HDR';
-    base.entityTypeDisplay = 'Header';
-    base.mockNumber = `MOCK${hdrMatch[2]}`;
-    base.source = hdrMatch[3].toUpperCase();
-    base.dateStr = hdrMatch[4];
-    base.timeStr = hdrMatch[5];
-    base.valid = true;
-    return base;
-  }
-
-  base.error = 'Filename does not match expected AP Invoice pattern';
   return base;
 }
 
@@ -211,12 +298,14 @@ function formatHistoryDate(isoStr: string | null): string {
 
 // ─── Main Component ──────────────────────────────────────────────────────────
 
-function APInvoiceDashboard() {
+function DataFileDashboard() {
   const [files, setFiles] = useState<APFile[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<TabId>('all');
   const [filterSource, setFilterSource] = useState('all');
-  const [filterType, setFilterType] = useState('all');
+  const [filterModule, setFilterModule] = useState('all');
+  const [filterEntity, setFilterEntity] = useState('all');
+  const [filterMock, setFilterMock] = useState('all');
   const [filterStatus, setFilterStatus] = useState('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [processingStatus, setProcessingStatus] = useState<ProcessingStatus | null>(null);
@@ -229,26 +318,47 @@ function APInvoiceDashboard() {
   const [historyLoaded, setHistoryLoaded] = useState(false);
   const [expandedHistoryRuns, setExpandedHistoryRuns] = useState<Set<number>>(new Set());
 
+  // ─── Derived filter options ──────────────────────────────────────────────
+
+  const entityOptions = useMemo(() => {
+    if (filterModule === 'all') return SORTED_PREFIXES;
+    return SORTED_PREFIXES.filter(p => ENTITY_REGISTRY[p].module === filterModule);
+  }, [filterModule]);
+
+  const mockOptions = useMemo(() => {
+    const mocks = new Set<string>();
+    for (const f of files) {
+      if (f.parsed.mockNumber) mocks.add(f.parsed.mockNumber);
+    }
+    return Array.from(mocks).sort();
+  }, [files]);
+
+  // Reset entity filter when module changes
+  useEffect(() => {
+    setFilterEntity('all');
+  }, [filterModule]);
+
   // ─── Load files from S3 ──────────────────────────────────────────────────
 
   const loadFiles = useCallback(async () => {
     try {
       const allFiles: APFile[] = [];
 
-      // Load from all three folders in parallel
-      const [inputResult, uploadedResult, failedResult] = await Promise.all([
+      // Load from all folders in parallel
+      const [inputResult, processedResult, failedResult, unmatchedResult] = await Promise.all([
         list({ path: S3_FOLDERS.input }).catch(() => ({ items: [] })),
-        list({ path: S3_FOLDERS.uploaded }).catch(() => ({ items: [] })),
+        list({ path: S3_FOLDERS.processed }).catch(() => ({ items: [] })),
         list({ path: S3_FOLDERS.failed }).catch(() => ({ items: [] })),
+        list({ path: S3_FOLDERS.unmatched }).catch(() => ({ items: [] })),
       ]);
 
       const processItems = (items: any[], folder: APFile['folder'], status: APFile['status']) => {
         for (const item of items) {
-          if (!item.path || item.path.endsWith('/') || item.path.endsWith('_processing_status.json')) continue;
+          if (!item.path || item.path.endsWith('/') || item.path.includes('_processing_status.json') || item.path.includes('_processing_history/')) continue;
           const name = item.path.split('/').pop() || '';
           if (!name || name.startsWith('_') || name.startsWith('.') || name.endsWith('_error.txt')) continue;
 
-          const parsed = parseAPFilename(name);
+          const parsed = parseFilename(name);
 
           allFiles.push({
             key: item.path,
@@ -263,8 +373,9 @@ function APInvoiceDashboard() {
       };
 
       processItems(inputResult.items || [], 'input', 'pending');
-      processItems(uploadedResult.items || [], 'uploaded', 'success');
+      processItems(processedResult.items || [], 'processed', 'success');
       processItems(failedResult.items || [], 'failed', 'failed');
+      processItems(unmatchedResult.items || [], 'unmatched', 'failed');
 
       // Load last processing status to get row counts
       try {
@@ -403,18 +514,27 @@ function APInvoiceDashboard() {
     }
   }, [activeTab, loadHistory]);
 
-  // ─── Run AP Invoices ─────────────────────────────────────────────────────
+  // ─── Run Data File Processing ─────────────────────────────────────────────
 
-  const handleRunAPInvoices = useCallback(async () => {
+  const handleRunProcessing = useCallback(async () => {
     if (isProcessing) return;
 
     const inputFiles = files.filter(f => f.folder === 'input');
     if (inputFiles.length === 0) {
-      alert('No files in the AP Invoice Input folder to process.');
+      alert('No files in the InputFilesForProcessing folder to process.');
       return;
     }
 
-    if (!confirm(`Process ${inputFiles.length} file(s) in the AP Invoice Input folder?\n\nThis will:\n- Validate each file\n- Load data into Hacienda_ERP_Test database\n- Move files to Uploaded or Failed folders\n\nTarget tables will be truncated before loading.`)) {
+    // Build filter description for confirmation
+    const filterParts: string[] = [];
+    if (filterModule !== 'all') filterParts.push(`Module: ${filterModule}`);
+    if (filterEntity !== 'all') filterParts.push(`Entity: ${filterEntity}`);
+    if (filterMock !== 'all') filterParts.push(`Mock: ${filterMock}`);
+    const filterDesc = filterParts.length > 0
+      ? `\n\nFilters applied:\n${filterParts.join('\n')}`
+      : '';
+
+    if (!confirm(`Process ${inputFiles.length} file(s) in InputFilesForProcessing?\n\nThis will:\n- Validate each file\n- Load data into Hacienda_ERP_Test database\n- Move files to ProcessedFiles or FailedInvoices folders\n\nTarget tables will be truncated before loading.${filterDesc}`)) {
       return;
     }
 
@@ -430,7 +550,10 @@ function APInvoiceDashboard() {
       files: inputFiles.map(f => ({
         filename: f.name,
         source: f.parsed.source,
-        type: f.parsed.entityTypeDisplay,
+        module: f.parsed.module,
+        entity: f.parsed.entityPrefix,
+        entityDisplay: f.parsed.entityDisplay,
+        type: f.parsed.entityDisplay,
         mockNumber: f.parsed.mockNumber,
         status: 'pending',
         rowCount: 0,
@@ -441,36 +564,28 @@ function APInvoiceDashboard() {
     });
 
     try {
-      if (!LAMBDA_URL) {
-        // If Lambda URL not yet configured, show a message
-        alert('Lambda Function URL not yet configured. Set the LAMBDA_URL constant in ap-invoices/page.tsx after deploying the Lambda.');
-        setIsProcessing(false);
-        return;
-      }
+      // Build query params with filters
+      const params = new URLSearchParams({ action: 'process' });
+      if (filterModule !== 'all') params.set('module', filterModule);
+      if (filterEntity !== 'all') params.set('entity', filterEntity);
+      if (filterMock !== 'all') params.set('mock', filterMock);
 
-      const response = await fetch(`${LAMBDA_URL}?action=process`, {
+      const response = await fetch(`${LAMBDA_URL}?${params.toString()}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          bucket: 'hacienda-erp-dev',
-          inputFolder: S3_FOLDERS.input,
-          uploadedFolder: S3_FOLDERS.uploaded,
-          failedFolder: S3_FOLDERS.failed,
-        }),
+        body: JSON.stringify({ bucket: 'hacienda-erp-dev' }),
       });
 
       if (!response.ok) {
         throw new Error(`Lambda returned ${response.status}: ${response.statusText}`);
       }
-
-      // Response is immediate, polling will track progress
     } catch (err: any) {
       console.error('Error invoking Lambda:', err);
       setProcessingStatus(prev => prev ? { ...prev, status: 'error' } : null);
       setIsProcessing(false);
       alert(`Error starting processing: ${err.message}`);
     }
-  }, [isProcessing, files]);
+  }, [isProcessing, files, filterModule, filterEntity, filterMock]);
 
   // ─── File actions ────────────────────────────────────────────────────────
 
@@ -525,17 +640,27 @@ function APInvoiceDashboard() {
 
     // Tab filter
     if (activeTab === 'pending') result = result.filter(f => f.folder === 'input');
-    else if (activeTab === 'uploaded') result = result.filter(f => f.folder === 'uploaded');
-    else if (activeTab === 'failed') result = result.filter(f => f.folder === 'failed');
+    else if (activeTab === 'uploaded') result = result.filter(f => f.folder === 'processed');
+    else if (activeTab === 'failed') result = result.filter(f => f.folder === 'failed' || f.folder === 'unmatched');
+
+    // Module filter
+    if (filterModule !== 'all') {
+      result = result.filter(f => f.parsed.module === filterModule);
+    }
+
+    // Entity filter
+    if (filterEntity !== 'all') {
+      result = result.filter(f => f.parsed.entityPrefix === filterEntity);
+    }
 
     // Source filter
     if (filterSource !== 'all') {
       result = result.filter(f => f.parsed.source === filterSource);
     }
 
-    // Type filter
-    if (filterType !== 'all') {
-      result = result.filter(f => f.parsed.entityType === filterType);
+    // Mock filter
+    if (filterMock !== 'all') {
+      result = result.filter(f => f.parsed.mockNumber === filterMock);
     }
 
     // Status filter
@@ -557,15 +682,15 @@ function APInvoiceDashboard() {
     });
 
     return result;
-  }, [files, activeTab, filterSource, filterType, filterStatus, searchQuery]);
+  }, [files, activeTab, filterModule, filterEntity, filterSource, filterMock, filterStatus, searchQuery]);
 
   // ─── Stats ───────────────────────────────────────────────────────────────
 
   const stats = useMemo(() => ({
     total: files.length,
     pending: files.filter(f => f.folder === 'input').length,
-    uploaded: files.filter(f => f.folder === 'uploaded').length,
-    failed: files.filter(f => f.folder === 'failed').length,
+    processed: files.filter(f => f.folder === 'processed').length,
+    failed: files.filter(f => f.folder === 'failed' || f.folder === 'unmatched').length,
     processing: files.filter(f => f.status === 'processing').length,
   }), [files]);
 
@@ -576,7 +701,7 @@ function APInvoiceDashboard() {
       <div className="ap-dashboard">
         <div className="ap-loading">
           <span className="ap-spinner"></span>
-          Loading AP Invoice Dashboard...
+          Loading File Processing Dashboard...
         </div>
       </div>
     );
@@ -591,9 +716,9 @@ function APInvoiceDashboard() {
             &larr; File Browser
           </Link>
           <div className="ap-header-title">
-            <h1>AP Invoice Processing Dashboard</h1>
+            <h1>File Processing Dashboard</h1>
             <p className="ap-header-subtitle">
-              Track AP invoice file uploads and processing lifecycle
+              Process FIN, HCM, and SCM data files into Hacienda ERP staging tables
             </p>
           </div>
         </div>
@@ -603,7 +728,7 @@ function APInvoiceDashboard() {
           </button>
           <button
             className={`ap-run-btn ${isProcessing ? 'processing' : ''}`}
-            onClick={handleRunAPInvoices}
+            onClick={handleRunProcessing}
             disabled={isProcessing || stats.pending === 0}
           >
             {isProcessing ? (
@@ -613,7 +738,7 @@ function APInvoiceDashboard() {
               </>
             ) : (
               <>
-                &#9654; Run AP Invoices
+                &#9654; Run File Processing
               </>
             )}
           </button>
@@ -631,10 +756,10 @@ function APInvoiceDashboard() {
             </div>
           </div>
           <div className="ap-stat-card">
-            <div className="ap-stat-icon uploaded">&#9989;</div>
+            <div className="ap-stat-icon processed">&#9989;</div>
             <div className="ap-stat-info">
-              <h3>{stats.uploaded}</h3>
-              <p>Uploaded</p>
+              <h3>{stats.processed}</h3>
+              <p>Processed</p>
             </div>
           </div>
           <div className="ap-stat-card">
@@ -695,6 +820,7 @@ function APInvoiceDashboard() {
                     {f.status === 'success' && <span>&#10003;</span>}
                     {f.status === 'failed' && <span>&#10007;</span>}
                     {f.status === 'pending' && <span className="ap-status-dot pending"></span>}
+                    {f.module && <span className={`ap-module-badge ${f.module.toLowerCase()}`}>{f.module}</span>}
                     <span>{f.filename}</span>
                     {f.rowCount > 0 && <span className="ap-row-count">({formatNumber(f.rowCount)} rows)</span>}
                     {f.error && <span style={{ color: '#dc2626', fontSize: '12px' }}> - {f.error}</span>}
@@ -709,6 +835,30 @@ function APInvoiceDashboard() {
         {activeTab !== 'history' && <div className="ap-filters">
           <select
             className="ap-filter-select"
+            value={filterModule}
+            onChange={e => setFilterModule(e.target.value)}
+          >
+            <option value="all">All Modules</option>
+            <option value="FIN">FIN - Finance</option>
+            <option value="HCM">HCM - Human Capital</option>
+            <option value="SCM">SCM - Supply Chain</option>
+          </select>
+
+          <select
+            className="ap-filter-select"
+            value={filterEntity}
+            onChange={e => setFilterEntity(e.target.value)}
+          >
+            <option value="all">All Entities</option>
+            {entityOptions.map(prefix => (
+              <option key={prefix} value={prefix}>
+                {ENTITY_REGISTRY[prefix].displayName}
+              </option>
+            ))}
+          </select>
+
+          <select
+            className="ap-filter-select"
             value={filterSource}
             onChange={e => setFilterSource(e.target.value)}
           >
@@ -720,13 +870,13 @@ function APInvoiceDashboard() {
 
           <select
             className="ap-filter-select"
-            value={filterType}
-            onChange={e => setFilterType(e.target.value)}
+            value={filterMock}
+            onChange={e => setFilterMock(e.target.value)}
           >
-            <option value="all">All Types</option>
-            <option value="HDR">Header</option>
-            <option value="LINES">Lines</option>
-            <option value="LINES_DTL1">Lines DTL1</option>
+            <option value="all">All Mocks</option>
+            {mockOptions.map(m => (
+              <option key={m} value={m}>{m}</option>
+            ))}
           </select>
 
           <select
@@ -759,7 +909,7 @@ function APInvoiceDashboard() {
             {([
               { id: 'all' as TabId, label: 'All Files', count: stats.total },
               { id: 'pending' as TabId, label: 'Pending', count: stats.pending },
-              { id: 'uploaded' as TabId, label: 'Uploaded', count: stats.uploaded },
+              { id: 'uploaded' as TabId, label: 'Processed', count: stats.processed },
               { id: 'failed' as TabId, label: 'Failed', count: stats.failed },
               { id: 'history' as TabId, label: 'History', count: historyRuns.length },
             ]).map(tab => (
@@ -786,7 +936,7 @@ function APInvoiceDashboard() {
                 <div className="ap-empty-state">
                   <div className="ap-empty-icon">&#128218;</div>
                   <h3>No processing history</h3>
-                  <p>Processing runs will appear here after invoices are processed.</p>
+                  <p>Processing runs will appear here after files are processed.</p>
                 </div>
               ) : (
                 <div className="ap-history-list">
@@ -837,8 +987,9 @@ function APInvoiceDashboard() {
                             <thead>
                               <tr>
                                 <th>File Name</th>
+                                <th>Module</th>
+                                <th>Entity</th>
                                 <th>Source</th>
-                                <th>Type</th>
                                 <th>Status</th>
                                 <th>Rows</th>
                                 <th>Error</th>
@@ -849,11 +1000,18 @@ function APInvoiceDashboard() {
                                 <tr key={fi} className={f.status === 'failed' ? 'ap-history-file-failed' : ''}>
                                   <td><span className="ap-file-name">{f.filename}</span></td>
                                   <td>
+                                    {f.module ? (
+                                      <span className={`ap-module-badge ${f.module.toLowerCase()}`}>{f.module}</span>
+                                    ) : <span style={{ color: '#999' }}>-</span>}
+                                  </td>
+                                  <td>
+                                    <span className="ap-type-badge">{f.entityDisplay || f.entity || f.type || 'Unknown'}</span>
+                                  </td>
+                                  <td>
                                     {f.source ? (
                                       <span className={`ap-source-badge ${f.source.toLowerCase()}`}>{f.source}</span>
                                     ) : <span style={{ color: '#999' }}>-</span>}
                                   </td>
-                                  <td><span className="ap-type-badge">{f.type || 'Unknown'}</span></td>
                                   <td>
                                     <span className={`ap-status-badge ${f.status}`}>
                                       <span className={`ap-status-dot ${f.status}`}></span>
@@ -887,7 +1045,7 @@ function APInvoiceDashboard() {
               <h3>No files found</h3>
               <p>
                 {activeTab === 'pending'
-                  ? 'Upload AP Invoice CSV files to the APInvoiceInput folder to get started.'
+                  ? 'Upload data files (CSV/XLSX) to the InputFilesForProcessing folder to get started.'
                   : 'No files match the current filters.'}
               </p>
             </div>
@@ -897,8 +1055,9 @@ function APInvoiceDashboard() {
                 <tr>
                   <th style={{ width: '30px' }}></th>
                   <th>File Name</th>
+                  <th>Module</th>
+                  <th>Entity</th>
                   <th>Source</th>
-                  <th>Type</th>
                   <th>Mock</th>
                   <th>Status</th>
                   <th>Rows</th>
@@ -932,9 +1091,9 @@ function APInvoiceDashboard() {
                         </div>
                       </td>
                       <td>
-                        {file.parsed.source ? (
-                          <span className={`ap-source-badge ${file.parsed.source.toLowerCase()}`}>
-                            {file.parsed.source}
+                        {file.parsed.module ? (
+                          <span className={`ap-module-badge ${file.parsed.module.toLowerCase()}`}>
+                            {file.parsed.module}
                           </span>
                         ) : (
                           <span style={{ color: '#999' }}>-</span>
@@ -942,8 +1101,17 @@ function APInvoiceDashboard() {
                       </td>
                       <td>
                         <span className="ap-type-badge">
-                          {file.parsed.entityTypeDisplay || 'Unknown'}
+                          {file.parsed.entityDisplay || 'Unknown'}
                         </span>
+                      </td>
+                      <td>
+                        {file.parsed.source ? (
+                          <span className={`ap-source-badge ${file.parsed.source.toLowerCase()}`}>
+                            {file.parsed.source}
+                          </span>
+                        ) : (
+                          <span style={{ color: '#999' }}>-</span>
+                        )}
                       </td>
                       <td>
                         <span style={{ fontSize: '12px', fontWeight: 500 }}>
@@ -976,7 +1144,7 @@ function APInvoiceDashboard() {
                     </tr>
                     {expandedRows.has(file.key) && file.errorMessage && (
                       <tr key={`${file.key}-error`} className="ap-error-row">
-                        <td colSpan={9}>
+                        <td colSpan={10}>
                           <div className="ap-error-details">
                             <strong>Error Details:</strong>
                             {file.errorMessage}
@@ -1002,4 +1170,4 @@ function APInvoiceDashboard() {
   );
 }
 
-export default withAuthenticator(APInvoiceDashboard);
+export default withAuthenticator(DataFileDashboard);
