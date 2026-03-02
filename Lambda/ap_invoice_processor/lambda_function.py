@@ -163,7 +163,12 @@ def read_file_from_s3(bucket, key, extension):
             raise ValueError("openpyxl is required for XLSX files but not installed")
         df = pd.read_excel(io.BytesIO(content), dtype=str, engine="openpyxl")
     else:
-        df = pd.read_csv(io.BytesIO(content), dtype=str, encoding="utf-8")
+        # Try UTF-8 first, fall back to latin-1 for Spanish/accented characters
+        try:
+            df = pd.read_csv(io.BytesIO(content), dtype=str, encoding="utf-8")
+        except UnicodeDecodeError:
+            print("  UTF-8 failed, falling back to latin-1 encoding")
+            df = pd.read_csv(io.BytesIO(content), dtype=str, encoding="latin-1")
 
     df = df.fillna("")
     return df
@@ -201,6 +206,7 @@ def ensure_table_exists_dynamic(cursor, table_name, sql_columns):
     """
     Check if a table exists; create it dynamically from SQL column names.
     All columns are NVARCHAR(500) to match the existing pattern.
+    If the table exists but has a different schema, drop and recreate it.
     """
     cursor.execute(
         "SELECT COUNT(*) FROM sys.tables WHERE name = ?",
@@ -209,8 +215,23 @@ def ensure_table_exists_dynamic(cursor, table_name, sql_columns):
     exists = cursor.fetchone()[0] > 0
 
     if exists:
-        print(f"  Table {table_name} exists")
-        return False
+        # Verify schema matches — get existing column names
+        cursor.execute(
+            "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+            "WHERE TABLE_NAME = ? ORDER BY ORDINAL_POSITION",
+            (table_name,)
+        )
+        existing_cols = {row[0].upper() for row in cursor.fetchall()}
+        expected_cols = {col.upper() for col in sql_columns}
+
+        if expected_cols.issubset(existing_cols):
+            print(f"  Table {table_name} exists (schema compatible)")
+            return False
+
+        # Schema mismatch — drop and recreate
+        print(f"  Table {table_name} exists but schema differs, recreating...")
+        cursor.execute(f"DROP TABLE [{table_name}]")
+        cursor.connection.commit()
 
     # Build CREATE TABLE with all NVARCHAR(500) columns
     col_defs = ",\n    ".join(f"[{col}] NVARCHAR(500)" for col in sql_columns)
@@ -251,6 +272,16 @@ def process_single_file(bucket, file_info, connection_str):
     }
 
     try:
+        # Step 0: Check file size — reject files that would OOM the Lambda
+        MAX_FILE_SIZE = 200 * 1024 * 1024  # 200 MB
+        file_size = file_info.get("size", 0)
+        if file_size > MAX_FILE_SIZE:
+            raise ValueError(
+                f"File too large ({file_size / (1024*1024):.0f} MB, "
+                f"max {MAX_FILE_SIZE // (1024*1024)} MB). "
+                f"Process this file manually or increase Lambda memory."
+            )
+
         # Step 1: Parse filename
         parsed = parse_filename(filename)
         if not parsed["valid"]:
@@ -326,56 +357,45 @@ def process_single_file(bucket, file_info, connection_str):
         else:
             # New multi-module processing path
             mapping = get_column_mapping(entity_prefix, source)
+            use_mapped = False
 
             if mapping:
-                # Mapping found — validate headers and use mapped columns
+                # Mapping found — validate headers
                 csv_columns = mapping["csv_columns"]
                 sql_columns = mapping["sql_columns"]
 
                 actual_headers = list(df.columns)
                 is_valid, header_error = validate_csv_headers(actual_headers, csv_columns)
-                if not is_valid:
-                    raise ValueError(f"Header validation failed: {header_error}")
+                if is_valid:
+                    use_mapped = True
+                else:
+                    print(f"  WARNING: Header mismatch ({header_error}), "
+                          f"falling back to dynamic processing")
 
-                table_name = registry_get_table_name(entity_prefix, mock_number, source)
-                print(f"  Target table (mapped): {table_name}")
-
-                with pyodbc.connect(connection_str) as conn:
-                    cursor = conn.cursor()
-                    was_created = ensure_table_exists_dynamic(cursor, table_name, sql_columns)
-
-                    if not was_created:
-                        print(f"  Truncating table: {table_name}")
-                        cursor.execute(f"DELETE FROM [{table_name}]")
-                        conn.commit()
-
-                    rows = _build_rows(df, csv_columns)
-                    _batch_insert(cursor, conn, table_name, sql_columns, rows)
-                    result["rowCount"] = len(rows)
-
-            else:
-                # No mapping — dynamic fallback: sanitize CSV headers
-                print(f"  WARNING: No column mapping for {entity_prefix}/{source}, "
-                      f"using dynamic fallback")
+            if not use_mapped:
+                # No mapping or header mismatch — dynamic fallback
+                if not mapping:
+                    print(f"  WARNING: No column mapping for {entity_prefix}/{source}, "
+                          f"using dynamic fallback")
                 actual_headers = list(df.columns)
                 sql_columns = [sanitize_column_name(h) for h in actual_headers]
                 csv_columns = actual_headers
 
-                table_name = registry_get_table_name(entity_prefix, mock_number, source)
-                print(f"  Target table (dynamic): {table_name}")
+            table_name = registry_get_table_name(entity_prefix, mock_number, source)
+            print(f"  Target table ({'mapped' if use_mapped else 'dynamic'}): {table_name}")
 
-                with pyodbc.connect(connection_str) as conn:
-                    cursor = conn.cursor()
-                    was_created = ensure_table_exists_dynamic(cursor, table_name, sql_columns)
+            with pyodbc.connect(connection_str) as conn:
+                cursor = conn.cursor()
+                was_created = ensure_table_exists_dynamic(cursor, table_name, sql_columns)
 
-                    if not was_created:
-                        print(f"  Truncating table: {table_name}")
-                        cursor.execute(f"DELETE FROM [{table_name}]")
-                        conn.commit()
+                if not was_created:
+                    print(f"  Truncating table: {table_name}")
+                    cursor.execute(f"DELETE FROM [{table_name}]")
+                    conn.commit()
 
-                    rows = _build_rows(df, csv_columns)
-                    _batch_insert(cursor, conn, table_name, sql_columns, rows)
-                    result["rowCount"] = len(rows)
+                rows = _build_rows(df, csv_columns)
+                _batch_insert(cursor, conn, table_name, sql_columns, rows)
+                result["rowCount"] = len(rows)
 
         # Step 5: Move to processed folder (organized by MODULE/MOCK/SOURCE/ENTITY)
         dest_key = f"{PROCESSED_FOLDER}{parsed['module']}/{mock_number}/{source}/{entity_prefix}/{filename}"
@@ -650,8 +670,20 @@ def lambda_handler(event, context):
             # Get SQL connection string
             connection_str = get_connection_string()
 
-            # Process each file
+            # Process each file (with timeout awareness)
+            TIME_RESERVE_MS = 60000  # Reserve 60s for cleanup
+            timed_out = False
+
             for i, file_info in enumerate(input_files):
+                # Check remaining Lambda execution time
+                if context and hasattr(context, "get_remaining_time_in_millis"):
+                    remaining_ms = context.get_remaining_time_in_millis()
+                    if remaining_ms < TIME_RESERVE_MS:
+                        print(f"  Timeout approaching ({remaining_ms}ms left), "
+                              f"stopping after {i} files")
+                        timed_out = True
+                        break
+
                 status["files"][i]["status"] = "processing"
                 status["files"][i]["startedAt"] = datetime.utcnow().isoformat()
                 write_status(bucket, status)
@@ -668,9 +700,14 @@ def lambda_handler(event, context):
 
                 write_status(bucket, status)
 
-            # Mark as complete
+            # Mark as complete (even if timed out — remaining files stay pending)
             status["status"] = "complete"
             status["completedAt"] = datetime.utcnow().isoformat()
+            if timed_out:
+                pending_count = len(input_files) - status["processedFiles"]
+                status["timedOut"] = True
+                status["pendingFiles"] = pending_count
+                print(f"  Timed out with {pending_count} files still pending")
             write_status(bucket, status)
 
             # Archive to history

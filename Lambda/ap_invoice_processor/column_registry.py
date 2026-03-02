@@ -2389,7 +2389,6 @@ COLUMN_REGISTRY = {
         "MONETARY_AMOUNT",
         "APPL_JRNL_ID",
         "BUDGET_LINE_STATUS",
-        "BILL_TO_CUST_ID",
         ],
         "sql_columns": [
         "ACCOUNT_CLASS",
@@ -2414,7 +2413,6 @@ COLUMN_REGISTRY = {
         "MONETARY_AMOUNT",
         "APPL_JRNL_ID",
         "BUDGET_LINE_STATUS",
-        "BILL_TO_CUST_ID",
         ],
     },
     "FIN_AR_INVOICE_DISTRIBUTION|HACIENDA": {
@@ -2571,10 +2569,10 @@ COLUMN_REGISTRY = {
         "LineTransactionsFlexField1",
         "LineTransactionsFlexfield2",
         "NotesfromSource",
+        "BILL_STATUS",
         "INVOICE_AMOUNT",
         "BALANCE_AMT",
         "INVOICE_TYPE",
-        "BILL_STATUS",
         ],
         "sql_columns": [
         "BUSINESS_UNIT_NAME",
@@ -2591,10 +2589,10 @@ COLUMN_REGISTRY = {
         "LINE_TRANSACTIONS_FLEXFIELD_SEGMENT1_LEG_INVOICE_NUMBER",
         "LINE_TRANSACTIONS_FLEXFIELD_SEGMENT2_LEG_LINE_NUMBER",
         "NOTES_FROM_SOURCE",
+        "BILL_STATUS",
         "INVOICE_AMOUNT",
         "BALANCE_AMT",
         "INVOICE_TYPE",
-        "BILL_STATUS",
         ],
     },
 
