@@ -100,7 +100,7 @@ function FileBrowser() {
   const [searchScope, setSearchScope] = useState<SearchScope>('current');
 
   // Hooks
-  const { toasts, removeToast, success, error: showError, info } = useToast();
+  const { toasts, removeToast, success, error: showError, info, warning } = useToast();
   const {
     notifications,
     addNotification,
@@ -598,6 +598,9 @@ function FileBrowser() {
 
     setUploads(prev => [...prev, ...newUploads]);
 
+    let successCount = 0;
+    let errorCount = 0;
+
     for (let i = 0; i < fileList.length; i++) {
       const file = fileList[i];
       const uploadId = newUploads[i].id;
@@ -625,8 +628,7 @@ function FileBrowser() {
           prev.map(u => (u.id === uploadId ? { ...u, status: 'completed' as const, progress: 100 } : u))
         );
 
-        addNotification('File Uploaded', `${file.name} has been uploaded`, 'upload', path);
-        success(`Uploaded ${file.name}`);
+        successCount++;
       } catch (err) {
         console.error('Upload error:', err);
         setUploads(prev =>
@@ -636,7 +638,27 @@ function FileBrowser() {
               : u
           )
         );
-        showError(`Failed to upload ${file.name}`);
+        errorCount++;
+      }
+    }
+
+    // Single batch notification instead of per-file spam
+    const totalCount = fileList.length;
+    if (totalCount === 1) {
+      if (successCount === 1) {
+        addNotification('File Uploaded', `${fileList[0].name} has been uploaded`, 'upload', uploadPath + fileList[0].name);
+        success(`Uploaded ${fileList[0].name}`);
+      } else {
+        showError(`Failed to upload ${fileList[0].name}`);
+      }
+    } else {
+      const folderName = uploadPath.replace(/\/$/, '').split('/').pop() || uploadPath;
+      if (errorCount === 0) {
+        addNotification('Batch Upload Complete', `${successCount} files uploaded to ${folderName}`, 'upload', uploadPath);
+        success(`Uploaded ${successCount} files`);
+      } else {
+        addNotification('Batch Upload Complete', `${successCount} uploaded, ${errorCount} failed in ${folderName}`, 'upload', uploadPath);
+        warning(`Uploaded ${successCount} of ${totalCount} files (${errorCount} failed)`);
       }
     }
 

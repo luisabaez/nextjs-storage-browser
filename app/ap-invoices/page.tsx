@@ -1,7 +1,7 @@
 'use client';
 
 import { Amplify } from 'aws-amplify';
-import { list, getUrl, remove, copy } from 'aws-amplify/storage';
+import { list, getUrl, remove, copy, uploadData } from 'aws-amplify/storage';
 import { withAuthenticator } from '@aws-amplify/ui-react';
 import { fetchUserAttributes } from 'aws-amplify/auth';
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
@@ -393,6 +393,10 @@ function DataFileDashboard() {
   const [historyLoaded, setHistoryLoaded] = useState(false);
   const [expandedHistoryRuns, setExpandedHistoryRuns] = useState<Set<number>>(new Set());
   const [userEmail, setUserEmail] = useState<string>('');
+  const [showUploadZone, setShowUploadZone] = useState(false);
+  const [uploadFiles, setUploadFiles] = useState<{id: string; name: string; size: number; progress: number; status: 'pending' | 'uploading' | 'completed' | 'error'}[]>([]);
+  const [isDragOver, setIsDragOver] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Fetch current user email for "triggered by" tracking
   useEffect(() => {
@@ -635,8 +639,8 @@ function DataFileDashboard() {
             setIsProcessing(false);
             processingStartRef.current = null;  // Clear stale-check ref
             processingLockedRef.current = false; // Unlock file list
-            // Reload files to get updated folder locations
-            setTimeout(() => loadFiles(), 2000);
+            // Reload input folder files only (not all 4 folders)
+            setTimeout(() => loadFiles(true), 2000);
             // Reset history so next visit to History tab fetches the new run
             setHistoryLoaded(false);
           }
@@ -729,6 +733,111 @@ function DataFileDashboard() {
       loadHistory();
     }
   }, [activeTab, loadHistory]);
+
+  // ─── Upload Files ────────────────────────────────────────────────────────
+
+  const handleUploadFiles = useCallback(async (fileList: FileList | File[]) => {
+    const filesArray = Array.from(fileList);
+    if (filesArray.length === 0) return;
+
+    const newUploads = filesArray.map((file, idx) => ({
+      id: `upload-${Date.now()}-${idx}`,
+      name: file.name,
+      size: file.size,
+      progress: 0,
+      status: 'pending' as const,
+    }));
+
+    setUploadFiles(prev => [...prev, ...newUploads]);
+    setShowUploadZone(true);
+
+    let successCount = 0;
+    let errorCount = 0;
+
+    for (let i = 0; i < filesArray.length; i++) {
+      const file = filesArray[i];
+      const uploadId = newUploads[i].id;
+      const path = S3_FOLDERS.input + file.name;
+
+      try {
+        setUploadFiles(prev =>
+          prev.map(u => u.id === uploadId ? { ...u, status: 'uploading' as const } : u)
+        );
+
+        await uploadData({
+          path,
+          data: file,
+          options: {
+            onProgress: ({ transferredBytes, totalBytes }) => {
+              const progress = totalBytes ? Math.round((transferredBytes / totalBytes) * 100) : 0;
+              setUploadFiles(prev =>
+                prev.map(u => u.id === uploadId ? { ...u, progress } : u)
+              );
+            },
+          },
+        }).result;
+
+        setUploadFiles(prev =>
+          prev.map(u => u.id === uploadId ? { ...u, status: 'completed' as const, progress: 100 } : u)
+        );
+        successCount++;
+      } catch (err) {
+        console.error('Upload error:', err);
+        setUploadFiles(prev =>
+          prev.map(u => u.id === uploadId ? { ...u, status: 'error' as const } : u)
+        );
+        errorCount++;
+      }
+    }
+
+    // Refresh file list after all uploads complete
+    setTimeout(() => loadFiles(true), 1000);
+  }, [loadFiles]);
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(true);
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(false);
+  }, []);
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(false);
+    if (e.dataTransfer.files.length > 0) {
+      handleUploadFiles(e.dataTransfer.files);
+    }
+  }, [handleUploadFiles]);
+
+  const handleFileInputChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      handleUploadFiles(e.target.files);
+      e.target.value = '';
+    }
+  }, [handleUploadFiles]);
+
+  const uploadStats = useMemo(() => {
+    const total = uploadFiles.length;
+    const completed = uploadFiles.filter(u => u.status === 'completed').length;
+    const errors = uploadFiles.filter(u => u.status === 'error').length;
+    const uploading = uploadFiles.filter(u => u.status === 'uploading' || u.status === 'pending').length;
+    const totalBytes = uploadFiles.reduce((sum, u) => sum + u.size, 0);
+    return { total, completed, errors, uploading, totalBytes, allDone: uploading === 0 && total > 0 };
+  }, [uploadFiles]);
+
+  const formatFileSize = (bytes: number) => {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+  };
 
   // ─── Run Data File Processing ─────────────────────────────────────────────
 
@@ -971,6 +1080,9 @@ function DataFileDashboard() {
           <button className="ap-refresh-btn ap-load-all-btn" onClick={() => { loadFiles(false); if (activeTab === 'history') { setHistoryLoaded(false); } }} title="Load all files from all folders">
             &#128193; Load All
           </button>
+          <button className="ap-refresh-btn ap-upload-btn" onClick={() => setShowUploadZone(!showUploadZone)} title="Upload files to InputFilesForProcessing">
+            &#128228; Upload
+          </button>
           <button
             className={`ap-run-btn ${isProcessing ? 'processing' : ''}`}
             onClick={handleRunProcessing}
@@ -989,6 +1101,70 @@ function DataFileDashboard() {
           </button>
         </div>
       </header>
+
+      {/* ── Upload Zone ── */}
+      {showUploadZone && (
+        <div className="ap-upload-zone-wrapper">
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            accept=".csv,.xlsx,.xls,.txt"
+            style={{ display: 'none' }}
+            onChange={handleFileInputChange}
+          />
+          <div
+            className={`ap-upload-dropzone ${isDragOver ? 'drag-over' : ''}`}
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+            onClick={() => fileInputRef.current?.click()}
+          >
+            <div className="ap-upload-dropzone-content">
+              <span className="ap-upload-icon">&#128449;</span>
+              <p><strong>Drag &amp; drop files here</strong> or click to browse</p>
+              <p className="ap-upload-hint">CSV, XLSX, TXT files for InputFilesForProcessing</p>
+            </div>
+          </div>
+
+          {/* ── Upload Progress Panel ── */}
+          {uploadFiles.length > 0 && (
+            <div className="ap-upload-progress">
+              <div className="ap-upload-progress-header">
+                <span className="ap-upload-progress-title">
+                  {uploadStats.allDone ? (
+                    <>Upload Complete: {uploadStats.completed} of {uploadStats.total} files{uploadStats.errors > 0 && `, ${uploadStats.errors} failed`}</>
+                  ) : (
+                    <>Uploading {uploadStats.completed + uploadStats.errors} of {uploadStats.total} files...</>
+                  )}
+                </span>
+                <span className="ap-upload-progress-size">{formatFileSize(uploadStats.totalBytes)}</span>
+                {uploadStats.allDone && (
+                  <button className="ap-upload-dismiss-btn" onClick={() => { setUploadFiles([]); setShowUploadZone(false); }}>
+                    Dismiss
+                  </button>
+                )}
+              </div>
+              <div className="ap-upload-progress-bar-wrapper">
+                <div
+                  className={`ap-upload-progress-bar ${uploadStats.allDone ? (uploadStats.errors > 0 ? 'has-errors' : 'complete') : 'active'}`}
+                  style={{ width: `${uploadStats.total > 0 ? Math.round(((uploadStats.completed + uploadStats.errors) / uploadStats.total) * 100) : 0}%` }}
+                ></div>
+              </div>
+              <div className="ap-upload-file-list">
+                {uploadFiles.map(uf => (
+                  <div key={uf.id} className={`ap-upload-file-item ${uf.status}`}>
+                    <span className={`ap-status-dot ${uf.status === 'completed' ? 'success' : uf.status === 'error' ? 'failed' : uf.status === 'uploading' ? 'processing' : 'pending'}`}></span>
+                    <span className="ap-upload-file-name">{uf.name}</span>
+                    <span className="ap-upload-file-size">{formatFileSize(uf.size)}</span>
+                    {uf.status === 'uploading' && <span className="ap-upload-file-pct">{uf.progress}%</span>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="ap-content">
         {/* Stat Cards */}
@@ -1080,10 +1256,10 @@ function DataFileDashboard() {
               </h3>
               <span className="ap-progress-text">
                 {completedCount} of {total} files
-                {successFiles.length > 0 && <span className="ap-stat success">{` \u2713 ${successFiles.length}`}</span>}
-                {failedFiles.length > 0 && <span className="ap-stat failed">{` \u2717 ${failedFiles.length}`}</span>}
-                {pendingFiles.length > 0 && <span className="ap-stat pending">{` \u23F3 ${pendingFiles.length}`}</span>}
-                {elapsedStr && <span className="ap-stat elapsed">{` \u23F1 ${elapsedStr}`}</span>}
+                {successFiles.length > 0 && <span className="ap-stat success"><span className="ap-status-dot success"></span> {successFiles.length}</span>}
+                {failedFiles.length > 0 && <span className="ap-stat failed"><span className="ap-status-dot failed"></span> {failedFiles.length}</span>}
+                {pendingFiles.length > 0 && <span className="ap-stat pending"><span className="ap-status-dot pending"></span> {pendingFiles.length}</span>}
+                {elapsedStr && <span className="ap-stat elapsed">{elapsedStr}</span>}
               </span>
             </div>
 
@@ -1107,17 +1283,17 @@ function DataFileDashboard() {
             {failedFiles.length > 0 && (
               <div className="ap-file-section">
                 <div className="ap-file-section-header error">
-                  <span>\u2717 Failed ({failedFiles.length})</span>
+                  <span><span className="ap-status-dot failed"></span> Failed ({failedFiles.length})</span>
                 </div>
                 <ul className="ap-processing-files">
                   {failedFiles.map((f, i) => (
                     <li key={`fail-${i}`} className="ap-processing-file error">
-                      <span className="ap-file-icon">\u2717</span>
+                      <span className="ap-status-dot failed"></span>
                       {f.module && <span className={`ap-module-badge ${f.module.toLowerCase()}`}>{f.module}</span>}
                       <span className="ap-file-name">{f.filename}</span>
                       {f.error && (
                         <span className="ap-file-error" title={f.error}>
-                          {f.error.length > 80 ? f.error.substring(0, 80) + '\u2026' : f.error}
+                          {f.error.length > 80 ? f.error.substring(0, 80) + '...' : f.error}
                         </span>
                       )}
                     </li>
@@ -1130,12 +1306,12 @@ function DataFileDashboard() {
             {successFiles.length > 0 && (
               <div className="ap-file-section">
                 <div className="ap-file-section-header success">
-                  <span>\u2713 Succeeded ({successFiles.length})</span>
+                  <span><span className="ap-status-dot success"></span> Succeeded ({successFiles.length})</span>
                 </div>
                 <ul className="ap-processing-files">
                   {successFiles.map((f, i) => (
                     <li key={`ok-${i}`} className="ap-processing-file done">
-                      <span className="ap-file-icon">\u2713</span>
+                      <span className="ap-status-dot success"></span>
                       {f.module && <span className={`ap-module-badge ${f.module.toLowerCase()}`}>{f.module}</span>}
                       <span className="ap-file-name">{f.filename}</span>
                       {f.rowCount > 0 && <span className="ap-row-count">{formatNumber(f.rowCount)} rows</span>}
@@ -1149,7 +1325,7 @@ function DataFileDashboard() {
             {pendingFiles.length > 0 && (
               <div className="ap-file-section">
                 <div className="ap-file-section-header pending">
-                  <span>\u23F3 Pending ({pendingFiles.length})</span>
+                  <span><span className="ap-status-dot pending"></span> Pending ({pendingFiles.length})</span>
                 </div>
                 <ul className="ap-processing-files">
                   {pendingFiles.map((f, i) => (
