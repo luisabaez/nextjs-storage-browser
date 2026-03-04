@@ -538,7 +538,7 @@ function DataFileDashboard() {
   }, []);
 
   useEffect(() => {
-    loadFiles();
+    loadFiles(true);  // Initial load: input folder only for fast startup
   }, [loadFiles]);
 
   // ─── Check for active processing status ──────────────────────────────────
