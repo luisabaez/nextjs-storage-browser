@@ -111,6 +111,15 @@
   background: #f5f5f5;
 }
 
+.ap-load-all-btn {
+  color: #4a90d9;
+  border-color: #b3d4fc;
+}
+
+.ap-load-all-btn:hover {
+  background: #f0f4ff;
+}
+
 /* Main content */
 .ap-content {
   max-width: 1400px;
@@ -497,7 +506,7 @@
   margin: 0;
 }
 
-/* Processing overlay */
+/* Processing panel */
 .ap-processing-panel {
   background: white;
   border-radius: 12px;
@@ -511,6 +520,8 @@
   align-items: center;
   justify-content: space-between;
   margin-bottom: 16px;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .ap-processing-header h3 {
@@ -523,12 +534,28 @@
   gap: 8px;
 }
 
+.ap-progress-text {
+  font-size: 13px;
+  color: #666;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-wrap: wrap;
+}
+
+.ap-stat { margin-left: 6px; }
+.ap-stat.success { color: #16a34a; }
+.ap-stat.failed { color: #dc2626; }
+.ap-stat.pending { color: #999; }
+.ap-stat.elapsed { color: #888; font-variant-numeric: tabular-nums; }
+
+/* Progress bar */
 .ap-progress-bar-wrapper {
   background: #e8e8e8;
   border-radius: 8px;
-  height: 8px;
+  height: 10px;
   overflow: hidden;
-  margin-bottom: 12px;
+  margin-bottom: 16px;
 }
 
 .ap-progress-bar {
@@ -536,31 +563,106 @@
   border-radius: 8px;
   background: linear-gradient(90deg, #4a90d9, #3a7bc8);
   transition: width 0.5s ease;
+  min-width: 0;
+}
+
+.ap-progress-bar.active {
+  background: linear-gradient(90deg, #4a90d9, #3a7bc8);
+  background-size: 200% 100%;
+  animation: progress-pulse 1.5s ease-in-out infinite;
 }
 
 .ap-progress-bar.has-errors {
   background: linear-gradient(90deg, #4a90d9, #e67e22);
 }
 
-.ap-progress-text {
-  font-size: 13px;
-  color: #666;
+.ap-progress-bar.timed-out {
+  background: linear-gradient(90deg, #e67e22, #d35400);
 }
 
+@keyframes progress-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+/* Currently processing callout */
+.ap-current-file {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: #e0edff;
+  border: 1px solid #b3d4fc;
+  margin-bottom: 16px;
+  font-size: 13px;
+  color: #1a1a2e;
+}
+
+.ap-current-label {
+  color: #666;
+  white-space: nowrap;
+}
+
+.ap-current-meta {
+  background: #d0e3f7;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #2563eb;
+}
+
+.ap-current-filename {
+  color: #888;
+  font-size: 11px;
+  margin-left: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 300px;
+}
+
+/* File sections (failed / succeeded / pending groups) */
+.ap-file-section {
+  margin-bottom: 12px;
+}
+
+.ap-file-section:last-child {
+  margin-bottom: 0;
+}
+
+.ap-file-section-header {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 4px 0;
+  margin-bottom: 4px;
+  border-bottom: 1px solid #eee;
+}
+
+.ap-file-section-header.error { color: #dc2626; }
+.ap-file-section-header.success { color: #16a34a; }
+.ap-file-section-header.pending { color: #999; }
+
+/* File list */
 .ap-processing-files {
   list-style: none;
   padding: 0;
-  margin: 12px 0 0 0;
+  margin: 4px 0 0 0;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
+  max-height: 300px;
+  overflow-y: auto;
 }
 
 .ap-processing-file {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 8px 12px;
+  gap: 8px;
+  padding: 6px 12px;
   border-radius: 6px;
   font-size: 13px;
   background: #f8fafc;
@@ -571,13 +673,42 @@
 }
 
 .ap-processing-file.done {
-  background: #e6f4ea;
+  background: #f0faf0;
 }
 
 .ap-processing-file.error {
-  background: #fce8e6;
+  background: #fef2f2;
 }
 
+.ap-file-icon {
+  flex-shrink: 0;
+  font-size: 13px;
+  width: 16px;
+  text-align: center;
+}
+
+.ap-file-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.ap-file-error {
+  color: #dc2626;
+  font-size: 12px;
+  margin-left: auto;
+  flex-shrink: 0;
+  max-width: 400px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: #fde8e8;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+/* Spinner */
 .ap-spinner {
   display: inline-block;
   width: 14px;
@@ -586,6 +717,7 @@
   border-top-color: #4a90d9;
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
+  flex-shrink: 0;
 }
 
 @keyframes spin {
@@ -825,6 +957,15 @@
   font-weight: 600;
   color: #1a1a2e;
   min-width: 220px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ap-history-run-user {
+  font-size: 12px;
+  font-weight: 400;
+  color: #888;
 }
 
 .ap-history-run-stats {

@@ -3,7 +3,8 @@
 import { Amplify } from 'aws-amplify';
 import { list, getUrl, remove, copy } from 'aws-amplify/storage';
 import { withAuthenticator } from '@aws-amplify/ui-react';
-import { useEffect, useState, useCallback, useMemo } from 'react';
+import { fetchUserAttributes } from 'aws-amplify/auth';
+import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import Link from 'next/link';
 import { FilePreviewModal } from '../components/FilePreviewModal';
 import outputs from '../../amplify_outputs.json';
@@ -63,6 +64,10 @@ interface ProcessingStatus {
   processedFiles: number;
   successCount: number;
   failCount: number;
+  timedOut?: boolean;
+  continuing?: boolean;
+  continuationRun?: number;
+  pendingFiles?: number;
   files: ProcessingFileStatus[];
 }
 
@@ -75,6 +80,7 @@ interface HistoryRun {
   successCount: number;
   failCount: number;
   durationSeconds?: number;
+  triggeredBy?: string;
   files: ProcessingFileStatus[];
 }
 
@@ -107,25 +113,42 @@ const ENTITY_REGISTRY: Record<string, EntityInfo> = {
   FIN_REQ_DISTRIBUTION: { module: 'FIN', displayName: 'Requisition Distribution', legacy: false },
   FIN_REQ_HDR: { module: 'FIN', displayName: 'Requisition Header', legacy: false },
   FIN_REQ_LINE: { module: 'FIN', displayName: 'Requisition Line', legacy: false },
-  // HCM (18)
+  // HCM (35)
+  HCM_ACCRUAL_DETAIL: { module: 'HCM', displayName: 'Accrual Detail', legacy: false },
   HCM_ASSIGNMENT_EIT_KRONOS: { module: 'HCM', displayName: 'Assignment EIT Kronos', legacy: false },
   HCM_CONTRACT_SUPERVISOR: { module: 'HCM', displayName: 'Contract Supervisor', legacy: false },
   HCM_COST_ALLOCATION: { module: 'HCM', displayName: 'Cost Allocation', legacy: false },
+  HCM_COURSES: { module: 'HCM', displayName: 'Courses', legacy: false },
   HCM_DEPARTMENT: { module: 'HCM', displayName: 'Department', legacy: false },
   HCM_ELEMENT_ENTRY_COSTING: { module: 'HCM', displayName: 'Element Entry Costing', legacy: false },
   HCM_ELEMENT_ENTRY: { module: 'HCM', displayName: 'Element Entry', legacy: false },
   HCM_EXTERNAL_BANK_ACCOUNT: { module: 'HCM', displayName: 'External Bank Account', legacy: false },
+  HCM_FEDERAL_TAX: { module: 'HCM', displayName: 'Federal Tax', legacy: false },
+  HCM_GRADE_RATE_VALUE: { module: 'HCM', displayName: 'Grade Rate Value', legacy: false },
+  HCM_GRADE: { module: 'HCM', displayName: 'Grade', legacy: false },
+  HCM_INVOLUNTARY_DEDUCTIONS: { module: 'HCM', displayName: 'Involuntary Deductions', legacy: false },
+  HCM_JOB_GRADE: { module: 'HCM', displayName: 'Job Grade', legacy: false },
   HCM_JOBS: { module: 'HCM', displayName: 'Jobs', legacy: false },
+  HCM_LEARNING_RECORD: { module: 'HCM', displayName: 'Learning Record', legacy: false },
   HCM_LOCATION: { module: 'HCM', displayName: 'Location', legacy: false },
+  HCM_PAYROLL_RELATIONSHIP: { module: 'HCM', displayName: 'Payroll Relationship', legacy: false },
   HCM_PERSONAL_PAYMENT_METHOD: { module: 'HCM', displayName: 'Personal Payment Method', legacy: false },
   HCM_PERSON_ADDRESS: { module: 'HCM', displayName: 'Person Address', legacy: false },
   HCM_PERSON_ASSIGNMENT: { module: 'HCM', displayName: 'Person Assignment', legacy: false },
   HCM_PERSON_EMAIL: { module: 'HCM', displayName: 'Person Email', legacy: false },
+  HCM_PERSON_LEGISLATIVE: { module: 'HCM', displayName: 'Person Legislative', legacy: false },
   HCM_PERSON_NAME: { module: 'HCM', displayName: 'Person Name', legacy: false },
   HCM_PERSON_NID: { module: 'HCM', displayName: 'Person NID', legacy: false },
+  HCM_PERSON_PHONE: { module: 'HCM', displayName: 'Person Phone', legacy: false },
   HCM_PERSON_SUPERVISOR: { module: 'HCM', displayName: 'Person Supervisor', legacy: false },
   HCM_PERSON: { module: 'HCM', displayName: 'Person', legacy: false },
+  HCM_POSITION_GRADE: { module: 'HCM', displayName: 'Position Grade', legacy: false },
+  HCM_POSITION_HIERARCHY: { module: 'HCM', displayName: 'Position Hierarchy', legacy: false },
+  HCM_POSITION: { module: 'HCM', displayName: 'Position', legacy: false },
+  HCM_SALARY: { module: 'HCM', displayName: 'Salary', legacy: false },
   HCM_SENIORITY: { module: 'HCM', displayName: 'Seniority', legacy: false },
+  HCM_STATE_TAX: { module: 'HCM', displayName: 'State Tax', legacy: false },
+  HCM_WORK_SCHEDULE: { module: 'HCM', displayName: 'Work Schedule', legacy: false },
   // SCM (19)
   SCM_BU_RECENT_BILLTO_SHIPTO_LOCATION: { module: 'SCM', displayName: 'BU Recent BillTo/ShipTo Location', legacy: false },
   SCM_CATALOG: { module: 'SCM', displayName: 'Catalog', legacy: false },
@@ -160,6 +183,7 @@ const LAMBDA_URL = 'https://5ahxjcxhrcopng5hjgc2n6utxq0rwcmm.lambda-url.us-east-
 const KNOWN_SOURCES = [
   'PRIFAS', 'HACIENDA', 'FIMAS', 'ASSMCA', 'SIFDE', 'SALUD', 'RETIRO',
   'RHUM', 'KRONOSPOL', 'KRONOSPOL_PHASE2', 'DOE', 'ADPPOLICIA', '911', 'SURI', 'ASG',
+  '034', '015',
 ];
 
 const S3_FOLDERS = {
@@ -237,26 +261,77 @@ function parseFilename(filename: string): ParsedFileInfo {
   base.entityDisplay = entityInfo.displayName;
   base.isLegacy = entityInfo.legacy;
 
-  // Extract remainder: _MOCK{N}[PRE]_{SOURCE}_{DATE}_{TIME}.ext
+  // Extract remainder: _MOCK{N}[PRE]_{SOURCE}[_{DATE}[_{TIME}]].ext
   const remainder = name.substring(matchedPrefix.length);
-  const ext = base.extension === 'csv' ? '.csv' : '.xlsx';
-  const pattern = new RegExp(
-    `^_(MOCK\\d+(?:PRE)?)_([A-Z0-9_]+)_(\\d{8})_(\\d{4})${ext.replace('.', '\\.')}$`,
-    'i'
-  );
-  const m = remainder.match(pattern);
+  const extEsc = (base.extension === 'csv' ? '.csv' : '.xlsx').replace('.', '\\.');
 
-  if (!m) {
-    base.error = `Invalid filename structure after entity prefix '${matchedPrefix}'`;
+  // Pattern 1: Standard — _MOCK{N}_{SOURCE}_{YYYYMMDD}_{HHMM}.ext
+  let m = remainder.match(new RegExp(`^_(MOCK\\d+(?:PRE)?)_([A-Z0-9_]+)_(\\d{8})_(\\d{4})${extEsc}$`, 'i'));
+  if (m) {
+    base.mockNumber = m[1].toUpperCase();
+    base.source = m[2].toUpperCase();
+    base.dateStr = m[3];
+    base.timeStr = m[4];
+    base.valid = true;
     return base;
   }
 
-  base.mockNumber = m[1].toUpperCase();
-  base.source = m[2].toUpperCase();
-  base.dateStr = m[3];
-  base.timeStr = m[4];
-  base.valid = true;
+  // Pattern 2: Dashed date — _MOCK{N}_{SOURCE}_{YYYY-MM-DD}.ext
+  m = remainder.match(new RegExp(`^_(MOCK\\d+(?:PRE)?)_([A-Z0-9_]+)_(\\d{4}-\\d{2}-\\d{2})${extEsc}$`, 'i'));
+  if (m) {
+    base.mockNumber = m[1].toUpperCase();
+    base.source = m[2].toUpperCase();
+    base.dateStr = m[3].replace(/-/g, '');
+    base.timeStr = '0000';
+    base.valid = true;
+    return base;
+  }
 
+  // Pattern 3: YYYYMMDD without time — _MOCK{N}_{SOURCE}_{YYYYMMDD}.ext
+  m = remainder.match(new RegExp(`^_(MOCK\\d+(?:PRE)?)_([A-Z0-9_]+?)_(\\d{8})${extEsc}$`, 'i'));
+  if (m) {
+    base.mockNumber = m[1].toUpperCase();
+    base.source = m[2].toUpperCase();
+    base.dateStr = m[3];
+    base.timeStr = '0000';
+    base.valid = true;
+    return base;
+  }
+
+  // Pattern 4: Underscored YYYY_MM_DD — _MOCK{N}_{SOURCE}_{YYYY}_{MM}_{DD}.ext
+  m = remainder.match(new RegExp(`^_(MOCK\\d+(?:PRE)?)_(.+?)_(\\d{4})_(\\d{2})_(\\d{2})${extEsc}$`, 'i'));
+  if (m) {
+    base.mockNumber = m[1].toUpperCase();
+    base.source = m[2].toUpperCase();
+    base.dateStr = m[3] + m[4] + m[5];
+    base.timeStr = '0000';
+    base.valid = true;
+    return base;
+  }
+
+  // Pattern 5: US date MM_DD_YYYY — _MOCK{N}_{SOURCE}_{MM}_{DD}_{YYYY}.ext
+  m = remainder.match(new RegExp(`^_(MOCK\\d+(?:PRE)?)_(.+?)_(\\d{2})_(\\d{2})_(\\d{4})${extEsc}$`, 'i'));
+  if (m) {
+    base.mockNumber = m[1].toUpperCase();
+    base.source = m[2].toUpperCase();
+    base.dateStr = m[5] + m[3] + m[4]; // → YYYYMMDD
+    base.timeStr = '0000';
+    base.valid = true;
+    return base;
+  }
+
+  // Pattern 6: No date — _MOCK{N}_{SOURCE}.ext
+  m = remainder.match(new RegExp(`^_(MOCK\\d+(?:PRE)?)_([A-Z0-9_]+)${extEsc}$`, 'i'));
+  if (m) {
+    base.mockNumber = m[1].toUpperCase();
+    base.source = m[2].toUpperCase();
+    base.dateStr = '00000000';
+    base.timeStr = '0000';
+    base.valid = true;
+    return base;
+  }
+
+  base.error = `Invalid filename structure after entity prefix '${matchedPrefix}'`;
   return base;
 }
 
@@ -317,6 +392,25 @@ function DataFileDashboard() {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyLoaded, setHistoryLoaded] = useState(false);
   const [expandedHistoryRuns, setExpandedHistoryRuns] = useState<Set<number>>(new Set());
+  const [userEmail, setUserEmail] = useState<string>('');
+
+  // Fetch current user email for "triggered by" tracking
+  useEffect(() => {
+    fetchUserAttributes().then(attrs => {
+      setUserEmail(attrs.email || '');
+    }).catch(() => {});
+  }, []);
+
+  // Track when our current processing run started — used to detect stale S3 status
+  // from a previous Lambda invocation that hasn't been overwritten yet.
+  const processingStartRef = useRef<string | null>(null);
+
+  // Hard grace period: ignore ALL S3 status reads until this timestamp.
+  // Gives the Lambda time to overwrite the old status file with the new run.
+  const statusGraceUntilRef = useRef<number>(0);
+
+  // Prevent loadFiles from overwriting the file list during active processing.
+  const processingLockedRef = useRef<boolean>(false);
 
   // ─── Derived filter options ──────────────────────────────────────────────
 
@@ -340,17 +434,16 @@ function DataFileDashboard() {
 
   // ─── Load files from S3 ──────────────────────────────────────────────────
 
-  const loadFiles = useCallback(async () => {
+  const loadFiles = useCallback(async (inputOnly = false) => {
+    // Don't overwrite the file list while processing is active — we've
+    // intentionally trimmed it to just the current batch.
+    if (processingLockedRef.current) {
+      console.log('loadFiles skipped — processing is locked');
+      return;
+    }
+
     try {
       const allFiles: APFile[] = [];
-
-      // Load from all folders in parallel
-      const [inputResult, processedResult, failedResult, unmatchedResult] = await Promise.all([
-        list({ path: S3_FOLDERS.input }).catch(() => ({ items: [] })),
-        list({ path: S3_FOLDERS.processed }).catch(() => ({ items: [] })),
-        list({ path: S3_FOLDERS.failed }).catch(() => ({ items: [] })),
-        list({ path: S3_FOLDERS.unmatched }).catch(() => ({ items: [] })),
-      ]);
 
       const processItems = (items: any[], folder: APFile['folder'], status: APFile['status']) => {
         for (const item of items) {
@@ -372,52 +465,71 @@ function DataFileDashboard() {
         }
       };
 
-      processItems(inputResult.items || [], 'input', 'pending');
-      processItems(processedResult.items || [], 'processed', 'success');
-      processItems(failedResult.items || [], 'failed', 'failed');
-      processItems(unmatchedResult.items || [], 'unmatched', 'failed');
+      if (inputOnly) {
+        // Refresh/Reset mode: only load input folder files
+        const inputResult = await list({ path: S3_FOLDERS.input }).catch(() => ({ items: [] }));
+        processItems(inputResult.items || [], 'input', 'pending');
+      } else {
+        // Full load: all folders in parallel
+        const [inputResult, processedResult, failedResult, unmatchedResult] = await Promise.all([
+          list({ path: S3_FOLDERS.input }).catch(() => ({ items: [] })),
+          list({ path: S3_FOLDERS.processed }).catch(() => ({ items: [] })),
+          list({ path: S3_FOLDERS.failed }).catch(() => ({ items: [] })),
+          list({ path: S3_FOLDERS.unmatched }).catch(() => ({ items: [] })),
+        ]);
+        processItems(inputResult.items || [], 'input', 'pending');
+        processItems(processedResult.items || [], 'processed', 'success');
+        processItems(failedResult.items || [], 'failed', 'failed');
+        processItems(unmatchedResult.items || [], 'unmatched', 'failed');
+      }
 
-      // Load last processing status to get row counts
-      try {
-        const statusUrl = await getUrl({ path: S3_FOLDERS.input + '_processing_status.json' });
-        if (statusUrl?.url) {
-          const statusResp = await fetch(statusUrl.url.toString());
-          if (statusResp.ok) {
-            const statusData: ProcessingStatus = await statusResp.json();
-            if (statusData.files && statusData.files.length > 0) {
-              for (const file of allFiles) {
-                const match = statusData.files.find(sf => sf.filename === file.name);
-                if (match) {
-                  if (match.rowCount) file.rowCount = match.rowCount;
-                  if (match.error) file.errorMessage = match.error;
+      // Load last processing status to get row counts (only when not input-only)
+      if (!inputOnly) {
+        try {
+          const statusUrl = await getUrl({ path: S3_FOLDERS.input + '_processing_status.json' });
+          if (statusUrl?.url) {
+            const statusResp = await fetch(statusUrl.url.toString());
+            if (statusResp.ok) {
+              const statusData: ProcessingStatus = await statusResp.json();
+              if (statusData.files && statusData.files.length > 0) {
+                for (const file of allFiles) {
+                  const match = statusData.files.find(sf => sf.filename === file.name);
+                  if (match) {
+                    if (match.rowCount) file.rowCount = match.rowCount;
+                    if (match.error) file.errorMessage = match.error;
+                  }
                 }
               }
             }
           }
+        } catch {
+          // No status file, that's ok
         }
-      } catch {
-        // No status file, that's ok
-      }
 
-      // Check for error detail files for failed files without error messages
-      for (const file of allFiles) {
-        if (file.status === 'failed' && !file.errorMessage) {
-          try {
-            const errorKey = file.key + '_error.txt';
-            const errorUrl = await getUrl({ path: errorKey });
-            if (errorUrl?.url) {
-              const resp = await fetch(errorUrl.url.toString());
-              if (resp.ok) {
-                file.errorMessage = await resp.text();
+        // Check for error detail files for failed files without error messages
+        for (const file of allFiles) {
+          if (file.status === 'failed' && !file.errorMessage) {
+            try {
+              const errorKey = file.key + '_error.txt';
+              const errorUrl = await getUrl({ path: errorKey });
+              if (errorUrl?.url) {
+                const resp = await fetch(errorUrl.url.toString());
+                if (resp.ok) {
+                  file.errorMessage = await resp.text();
+                }
               }
+            } catch {
+              // No error file, that's ok
             }
-          } catch {
-            // No error file, that's ok
           }
         }
       }
 
       setFiles(allFiles);
+      // Clear any stale processing status on refresh
+      if (inputOnly) {
+        setProcessingStatus(null);
+      }
     } catch (err) {
       console.error('Error loading files:', err);
     } finally {
@@ -431,6 +543,8 @@ function DataFileDashboard() {
 
   // ─── Check for active processing status ──────────────────────────────────
 
+  const LAMBDA_MAX_RUNTIME_MS = 16 * 60 * 1000; // 16 min (Lambda max is 15 min + buffer)
+
   const checkProcessingStatus = useCallback(async () => {
     try {
       const statusUrl = await getUrl({ path: S3_FOLDERS.input + '_processing_status.json' });
@@ -438,6 +552,67 @@ function DataFileDashboard() {
         const resp = await fetch(statusUrl.url.toString());
         if (resp.ok) {
           const status: ProcessingStatus = await resp.json();
+
+          // Detect stale "processing" status — Lambda hard-timed-out without cleanup
+          if (status.status === 'processing' && status.startedAt) {
+            const elapsed = Date.now() - new Date(status.startedAt).getTime();
+            if (elapsed > LAMBDA_MAX_RUNTIME_MS) {
+              console.warn(
+                `Processing status stale (${Math.round(elapsed / 60000)}min old). ` +
+                `Lambda likely timed out. Marking as complete.`
+              );
+              // Mark any "processing" files as failed (they were mid-flight)
+              status.files = status.files.map(f => {
+                if (f.status === 'processing') {
+                  return { ...f, status: 'failed', error: 'Lambda timed out mid-processing' };
+                }
+                return f;
+              });
+              status.status = 'complete';
+              status.completedAt = new Date().toISOString();
+              status.timedOut = true;
+              status.pendingFiles = status.files.filter(f => f.status === 'pending').length;
+            }
+          }
+
+          // ── Grace period: ignore ALL S3 status during the first N seconds ──
+          // When the user clicks "Run Processing", we set an optimistic local
+          // status.  The Lambda takes a few seconds to overwrite the old S3
+          // status file.  During this window, S3 still has the OLD status
+          // from a previous run.  We hard-skip all reads until the grace
+          // period expires.
+          if (Date.now() < statusGraceUntilRef.current) {
+            console.log('Skipping S3 status — grace period active');
+            return null;
+          }
+
+          // ── Stale timestamp check ──
+          if (processingStartRef.current && status.startedAt) {
+            const ourStart = new Date(processingStartRef.current).getTime();
+            const s3Start = new Date(status.startedAt).getTime();
+            if (s3Start < ourStart - 10000) {
+              console.log(
+                `Skipping stale S3 status (startedAt=${status.startedAt}) — ` +
+                `our run started at ${processingStartRef.current}`
+              );
+              return null;
+            }
+          }
+
+          // ── Premature completion check ──
+          // Don't accept "complete" or "error" within the first 2 min of our
+          // run — the Lambda can't finish 100+ files that fast, so any such
+          // status is leftover from a previous run.
+          if (processingStartRef.current) {
+            const elapsedSinceWeStarted = Date.now() - new Date(processingStartRef.current).getTime();
+            if ((status.status === 'complete' || status.status === 'error') && elapsedSinceWeStarted < 120000) {
+              console.log(
+                `Skipping premature complete/error status (${Math.round(elapsedSinceWeStarted / 1000)}s since we started)`
+              );
+              return null;
+            }
+          }
+
           setProcessingStatus(status);
 
           // Update file statuses from processing status
@@ -458,8 +633,12 @@ function DataFileDashboard() {
 
           if (status.status === 'complete' || status.status === 'error') {
             setIsProcessing(false);
+            processingStartRef.current = null;  // Clear stale-check ref
+            processingLockedRef.current = false; // Unlock file list
             // Reload files to get updated folder locations
             setTimeout(() => loadFiles(), 2000);
+            // Reset history so next visit to History tab fetches the new run
+            setHistoryLoaded(false);
           }
 
           return status;
@@ -495,14 +674,51 @@ function DataFileDashboard() {
     if (historyLoaded) return;
     setHistoryLoading(true);
     try {
-      const response = await fetch(`${LAMBDA_URL}?action=history`);
-      if (response.ok) {
-        const data = await response.json();
-        setHistoryRuns(data.runs || []);
+      // Read history files directly from S3 via Amplify — bypasses the
+      // Lambda URL entirely, avoiding VPC cold-start timeouts.
+      // List the _processing_history/ subfolder directly.
+      const historyPath = S3_FOLDERS.input + '_processing_history/';
+      const historyItems = await list({ path: historyPath });
+      const jsonFiles = (historyItems.items || [])
+        .filter(item => item.path && item.path.endsWith('.json'))
+        .sort((a, b) => b.path.localeCompare(a.path))  // Most recent first
+        .slice(0, 50);
+
+      console.log(`[History] Found ${jsonFiles.length} history files`);
+
+      if (jsonFiles.length === 0) {
+        setHistoryRuns([]);
         setHistoryLoaded(true);
+        return;
       }
+
+      // Fetch all history JSON files in parallel via presigned URLs
+      const results = await Promise.allSettled(
+        jsonFiles.map(async (item) => {
+          const urlResult = await getUrl({ path: item.path });
+          const resp = await fetch(urlResult.url.toString());
+          if (resp.ok) return resp.json();
+          throw new Error(`HTTP ${resp.status}`);
+        })
+      );
+
+      const runs: HistoryRun[] = results
+        .filter((r): r is PromiseFulfilledResult<HistoryRun> => r.status === 'fulfilled')
+        .map(r => r.value);
+
+      // Sort by completedAt or startedAt descending
+      runs.sort((a, b) => {
+        const dateA = a.completedAt || a.startedAt || '';
+        const dateB = b.completedAt || b.startedAt || '';
+        return dateB.localeCompare(dateA);
+      });
+
+      console.log(`[History] Loaded ${runs.length} history runs`);
+      setHistoryRuns(runs);
+      setHistoryLoaded(true);
     } catch (err) {
-      console.error('Error loading processing history:', err);
+      console.warn('[History] Error loading history from S3:', err);
+      // Will retry on next tab switch
     } finally {
       setHistoryLoading(false);
     }
@@ -538,54 +754,80 @@ function DataFileDashboard() {
       return;
     }
 
-    setIsProcessing(true);
-    setProcessingStatus({
-      status: 'processing',
-      startedAt: new Date().toISOString(),
-      completedAt: null,
-      totalFiles: inputFiles.length,
-      processedFiles: 0,
-      successCount: 0,
-      failCount: 0,
-      files: inputFiles.map(f => ({
-        filename: f.name,
-        source: f.parsed.source,
-        module: f.parsed.module,
-        entity: f.parsed.entityPrefix,
-        entityDisplay: f.parsed.entityDisplay,
-        type: f.parsed.entityDisplay,
-        mockNumber: f.parsed.mockNumber,
-        status: 'pending',
-        rowCount: 0,
-        error: null,
-        startedAt: null,
-        completedAt: null,
-      })),
-    });
-
     try {
-      // Build query params with filters
+      setIsProcessing(true);
+      const startTime = new Date().toISOString();
+      processingStartRef.current = startTime;
+
+      // Hard grace period: ignore S3 status reads for 15 seconds so the
+      // Lambda has time to overwrite the old status with the new run.
+      statusGraceUntilRef.current = Date.now() + 15000;
+
+      // Lock file list so loadFiles() can't overwrite during processing.
+      processingLockedRef.current = true;
+
+      // Clear the file list to only show current batch during processing
+      setFiles(inputFiles);
+
+      setProcessingStatus({
+        status: 'processing',
+        startedAt: startTime,
+        completedAt: null,
+        totalFiles: inputFiles.length,
+        processedFiles: 0,
+        successCount: 0,
+        failCount: 0,
+        files: inputFiles.map(f => ({
+          filename: f.name,
+          source: f.parsed.source,
+          module: f.parsed.module,
+          entity: f.parsed.entityPrefix,
+          entityDisplay: f.parsed.entityDisplay,
+          type: f.parsed.entityDisplay,
+          mockNumber: f.parsed.mockNumber,
+          status: 'pending',
+          rowCount: 0,
+          error: null,
+          startedAt: null,
+          completedAt: null,
+        })),
+      });
+
+      // Fire-and-forget: invoke the Lambda but don't await the full response.
+      // The Lambda may run for up to 15 minutes.  We rely on S3 status polling
+      // (not the HTTP response) to track progress, so a network timeout here
+      // should NOT stop polling or mark the run as errored.
       const params = new URLSearchParams({ action: 'process' });
       if (filterModule !== 'all') params.set('module', filterModule);
       if (filterEntity !== 'all') params.set('entity', filterEntity);
       if (filterMock !== 'all') params.set('mock', filterMock);
 
-      const response = await fetch(`${LAMBDA_URL}?${params.toString()}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ bucket: 'hacienda-erp-dev' }),
-      });
+      // Abort the fetch after 30s — we don't need the HTTP response since we
+      // track progress via S3 status polling.  This prevents the browser from
+      // holding the connection open for 15 min and showing "Failed to fetch".
+      const controller = new AbortController();
+      const abortTimeout = setTimeout(() => controller.abort(), 30000);
 
-      if (!response.ok) {
-        throw new Error(`Lambda returned ${response.status}: ${response.statusText}`);
-      }
-    } catch (err: any) {
-      console.error('Error invoking Lambda:', err);
-      setProcessingStatus(prev => prev ? { ...prev, status: 'error' } : null);
-      setIsProcessing(false);
-      alert(`Error starting processing: ${err.message}`);
+      fetch(`${LAMBDA_URL}?${params.toString()}`, {
+        method: 'POST',
+        signal: controller.signal,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bucket: 'hacienda-erp-dev', triggeredBy: userEmail || 'unknown' }),
+      }).then(response => {
+        clearTimeout(abortTimeout);
+        if (!response.ok) {
+          console.warn(`Lambda returned ${response.status} — polling will continue via S3 status`);
+        }
+      }).catch(() => {
+        clearTimeout(abortTimeout);
+        // AbortError or network error — expected. Polling continues via S3.
+      });
+    } catch (err) {
+      // Silently log — processing may still be running in Lambda.
+      // S3 status polling will pick up progress regardless.
+      console.warn('Error starting processing (suppressed):', err);
     }
-  }, [isProcessing, files, filterModule, filterEntity, filterMock]);
+  }, [isProcessing, files, filterModule, filterEntity, filterMock, userEmail]);
 
   // ─── File actions ────────────────────────────────────────────────────────
 
@@ -723,8 +965,11 @@ function DataFileDashboard() {
           </div>
         </div>
         <div className="ap-header-right">
-          <button className="ap-refresh-btn" onClick={() => { loadFiles(); if (activeTab === 'history') { setHistoryLoaded(false); } }} title="Refresh">
+          <button className="ap-refresh-btn" onClick={() => { loadFiles(true); setActiveTab('all'); }} title="Reset dashboard to show only current input files">
             &#x21bb; Refresh
+          </button>
+          <button className="ap-refresh-btn ap-load-all-btn" onClick={() => { loadFiles(false); if (activeTab === 'history') { setHistoryLoaded(false); } }} title="Load all files from all folders">
+            &#128193; Load All
           </button>
           <button
             className={`ap-run-btn ${isProcessing ? 'processing' : ''}`}
@@ -779,57 +1024,147 @@ function DataFileDashboard() {
         </div>
 
         {/* Processing Panel */}
-        {processingStatus && processingStatus.status !== 'idle' && (
+        {processingStatus && processingStatus.status !== 'idle' && (() => {
+          const pFiles = processingStatus.files || [];
+          const currentFile = pFiles.find(f => f.status === 'processing');
+          const successFiles = pFiles.filter(f => f.status === 'success');
+          const failedFiles = pFiles.filter(f => f.status === 'failed');
+          const pendingFiles = pFiles.filter(f => f.status === 'pending');
+          const completedCount = successFiles.length + failedFiles.length;
+          const total = processingStatus.totalFiles || pFiles.length;
+
+          // Progress: completed files + half-credit for currently-processing file
+          const progressPct = total > 0
+            ? Math.min(100, ((completedCount + (currentFile ? 0.5 : 0)) / total) * 100)
+            : 0;
+
+          // Elapsed time
+          let elapsedStr = '';
+          if (processingStatus.startedAt) {
+            const startMs = new Date(processingStatus.startedAt).getTime();
+            const endMs = processingStatus.completedAt
+              ? new Date(processingStatus.completedAt).getTime()
+              : Date.now();
+            const elapsedSec = Math.floor((endMs - startMs) / 1000);
+            const mins = Math.floor(elapsedSec / 60);
+            const secs = elapsedSec % 60;
+            elapsedStr = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+          }
+
+          // Bar class
+          const barClass = processingStatus.timedOut ? 'timed-out'
+            : processingStatus.status === 'complete' && failedFiles.length > 0 ? 'has-errors'
+            : processingStatus.status === 'processing' ? 'active' : '';
+
+          return (
           <div className="ap-processing-panel">
+            {/* ── Header ── */}
             <div className="ap-processing-header">
               <h3>
                 {processingStatus.status === 'processing' && (
-                  <><span className="ap-spinner"></span> Processing Files...</>
+                  <><span className="ap-spinner"></span> Processing Files{processingStatus.continuationRun ? ` (run ${processingStatus.continuationRun + 1})` : ''}</>
                 )}
-                {processingStatus.status === 'complete' && '&#9989; Processing Complete'}
-                {processingStatus.status === 'error' && '&#9888; Processing Ended With Errors'}
+                {processingStatus.status === 'complete' && (() => {
+                  if (processingStatus.timedOut || pendingFiles.length > 0) {
+                    return `Processing Timed Out \u2014 ${pendingFiles.length} file${pendingFiles.length !== 1 ? 's' : ''} not processed`;
+                  }
+                  if (failedFiles.length > 0 && successFiles.length > 0) {
+                    return 'Processing Complete (with errors)';
+                  }
+                  if (failedFiles.length > 0 && successFiles.length === 0) {
+                    return 'Processing Complete \u2014 All files failed';
+                  }
+                  return 'Processing Complete';
+                })()}
+                {processingStatus.status === 'error' && 'Processing Error'}
               </h3>
               <span className="ap-progress-text">
-                {processingStatus.processedFiles} of {processingStatus.totalFiles} files
-                {processingStatus.successCount > 0 && ` | ${processingStatus.successCount} succeeded`}
-                {processingStatus.failCount > 0 && ` | ${processingStatus.failCount} failed`}
+                {completedCount} of {total} files
+                {successFiles.length > 0 && <span className="ap-stat success">{` \u2713 ${successFiles.length}`}</span>}
+                {failedFiles.length > 0 && <span className="ap-stat failed">{` \u2717 ${failedFiles.length}`}</span>}
+                {pendingFiles.length > 0 && <span className="ap-stat pending">{` \u23F3 ${pendingFiles.length}`}</span>}
+                {elapsedStr && <span className="ap-stat elapsed">{` \u23F1 ${elapsedStr}`}</span>}
               </span>
             </div>
+
+            {/* ── Progress bar ── */}
             <div className="ap-progress-bar-wrapper">
-              <div
-                className={`ap-progress-bar ${processingStatus.failCount > 0 ? 'has-errors' : ''}`}
-                style={{
-                  width: processingStatus.totalFiles > 0
-                    ? `${(processingStatus.processedFiles / processingStatus.totalFiles) * 100}%`
-                    : '0%'
-                }}
-              ></div>
+              <div className={`ap-progress-bar ${barClass}`} style={{ width: `${progressPct}%` }}></div>
             </div>
-            {processingStatus.files && processingStatus.files.length > 0 && (
-              <ul className="ap-processing-files">
-                {processingStatus.files.map((f, i) => (
-                  <li
-                    key={i}
-                    className={`ap-processing-file ${
-                      f.status === 'processing' ? 'current' :
-                      f.status === 'success' ? 'done' :
-                      f.status === 'failed' ? 'error' : ''
-                    }`}
-                  >
-                    {f.status === 'processing' && <span className="ap-spinner"></span>}
-                    {f.status === 'success' && <span>&#10003;</span>}
-                    {f.status === 'failed' && <span>&#10007;</span>}
-                    {f.status === 'pending' && <span className="ap-status-dot pending"></span>}
-                    {f.module && <span className={`ap-module-badge ${f.module.toLowerCase()}`}>{f.module}</span>}
-                    <span>{f.filename}</span>
-                    {f.rowCount > 0 && <span className="ap-row-count">({formatNumber(f.rowCount)} rows)</span>}
-                    {f.error && <span style={{ color: '#dc2626', fontSize: '12px' }}> - {f.error}</span>}
-                  </li>
-                ))}
-              </ul>
+
+            {/* ── Currently processing callout ── */}
+            {currentFile && (
+              <div className="ap-current-file">
+                <span className="ap-spinner"></span>
+                <span className="ap-current-label">Now processing:</span>
+                <strong>{currentFile.entityDisplay || currentFile.entity || currentFile.filename}</strong>
+                {currentFile.source && <span className="ap-current-meta">{currentFile.source}</span>}
+                <span className="ap-current-filename">{currentFile.filename}</span>
+              </div>
+            )}
+
+            {/* ── Failed files (shown first if any) ── */}
+            {failedFiles.length > 0 && (
+              <div className="ap-file-section">
+                <div className="ap-file-section-header error">
+                  <span>\u2717 Failed ({failedFiles.length})</span>
+                </div>
+                <ul className="ap-processing-files">
+                  {failedFiles.map((f, i) => (
+                    <li key={`fail-${i}`} className="ap-processing-file error">
+                      <span className="ap-file-icon">\u2717</span>
+                      {f.module && <span className={`ap-module-badge ${f.module.toLowerCase()}`}>{f.module}</span>}
+                      <span className="ap-file-name">{f.filename}</span>
+                      {f.error && (
+                        <span className="ap-file-error" title={f.error}>
+                          {f.error.length > 80 ? f.error.substring(0, 80) + '\u2026' : f.error}
+                        </span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {/* ── Successful files ── */}
+            {successFiles.length > 0 && (
+              <div className="ap-file-section">
+                <div className="ap-file-section-header success">
+                  <span>\u2713 Succeeded ({successFiles.length})</span>
+                </div>
+                <ul className="ap-processing-files">
+                  {successFiles.map((f, i) => (
+                    <li key={`ok-${i}`} className="ap-processing-file done">
+                      <span className="ap-file-icon">\u2713</span>
+                      {f.module && <span className={`ap-module-badge ${f.module.toLowerCase()}`}>{f.module}</span>}
+                      <span className="ap-file-name">{f.filename}</span>
+                      {f.rowCount > 0 && <span className="ap-row-count">{formatNumber(f.rowCount)} rows</span>}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {/* ── Pending files ── */}
+            {pendingFiles.length > 0 && (
+              <div className="ap-file-section">
+                <div className="ap-file-section-header pending">
+                  <span>\u23F3 Pending ({pendingFiles.length})</span>
+                </div>
+                <ul className="ap-processing-files">
+                  {pendingFiles.map((f, i) => (
+                    <li key={`pend-${i}`} className="ap-processing-file">
+                      <span className="ap-status-dot pending"></span>
+                      {f.module && <span className={`ap-module-badge ${f.module.toLowerCase()}`}>{f.module}</span>}
+                      <span className="ap-file-name">{f.filename}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
             )}
           </div>
-        )}
+          );
+        })()}
 
         {/* Filters */}
         {activeTab !== 'history' && <div className="ap-filters">
@@ -953,6 +1288,9 @@ function DataFileDashboard() {
                         </div>
                         <div className="ap-history-run-date">
                           {formatHistoryDate(run.completedAt || run.startedAt)}
+                          {run.triggeredBy && (
+                            <span className="ap-history-run-user">by {run.triggeredBy}</span>
+                          )}
                         </div>
                         <div className="ap-history-run-stats">
                           <span className="ap-history-stat">

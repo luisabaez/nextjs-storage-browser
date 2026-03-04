@@ -57,7 +57,18 @@ FAILED_UNMATCHED_FOLDER = "FailedUnmatchedFilenames/"
 STATUS_FILE_KEY = "InputFilesForProcessing/_processing_status.json"
 HISTORY_FOLDER_KEY = "InputFilesForProcessing/_processing_history/"
 
+# Chunked processing: files larger than this threshold are read in chunks
+# to avoid excessive memory usage when building the pandas DataFrame.
+CHUNK_THRESHOLD = 50 * 1024 * 1024   # 50 MB
+CHUNK_ROWS = 50000                    # 50k rows per chunk
+
+# Auto-continuation: when the Lambda is about to timeout with pending files,
+# it self-invokes to continue processing.  Safety cap prevents infinite loops.
+MAX_CONTINUATION_RUNS = 10
+CONTINUATION_TIMEOUT_RESERVE_MS = 60000  # 1 min before timeout → trigger continuation
+
 s3_client = boto3.client("s3")
+lambda_client = boto3.client("lambda")
 
 
 def get_connection_string():
@@ -151,10 +162,55 @@ def write_error_file(bucket, file_key, error_message):
     )
 
 
+def self_invoke_continuation(context, bucket, filters, continuation_run, triggered_by=""):
+    """
+    Asynchronously invoke this Lambda again to continue processing
+    remaining files.  Returns True if invocation succeeded.
+    """
+    if continuation_run >= MAX_CONTINUATION_RUNS:
+        print(f"  Reached max continuation runs ({MAX_CONTINUATION_RUNS}), stopping.")
+        return False
+
+    # Get our own function name from the context
+    function_name = getattr(context, "function_name", None)
+    if not function_name:
+        print("  Cannot self-invoke: no function_name in context")
+        return False
+
+    payload = {
+        "_continuation": True,
+        "_continuation_run": continuation_run + 1,
+        "bucket": bucket,
+        "module": filters.get("module", ""),
+        "entity": filters.get("entity", ""),
+        "mock": filters.get("mock", ""),
+        "triggeredBy": triggered_by,
+    }
+
+    print(f"  Self-invoking continuation run #{continuation_run + 1} "
+          f"(function: {function_name})")
+
+    try:
+        lambda_client.invoke(
+            FunctionName=function_name,
+            InvocationType="Event",  # Async — fire and forget
+            Payload=json.dumps(payload),
+        )
+        return True
+    except Exception as e:
+        print(f"  Failed to self-invoke: {e}")
+        return False
+
+
+def _download_s3_content(bucket, key):
+    """Download file bytes from S3."""
+    response = s3_client.get_object(Bucket=bucket, Key=key)
+    return response["Body"].read()
+
+
 def read_file_from_s3(bucket, key, extension):
     """Read a CSV or XLSX file from S3 into a pandas DataFrame."""
-    response = s3_client.get_object(Bucket=bucket, Key=key)
-    content = response["Body"].read()
+    content = _download_s3_content(bucket, key)
 
     if extension == "xlsx":
         try:
@@ -172,6 +228,44 @@ def read_file_from_s3(bucket, key, extension):
 
     df = df.fillna("")
     return df
+
+
+def read_file_from_s3_chunked(bucket, key, extension):
+    """
+    Read a large CSV from S3 in chunks.
+
+    Returns (content_bytes, chunk_iterator) where chunk_iterator yields
+    DataFrames of CHUNK_ROWS rows each.  For XLSX files, falls back to
+    reading the whole file and returning it as a single-item list.
+
+    The caller must keep ``content_bytes`` alive while iterating because
+    the pandas TextFileReader holds a reference to the BytesIO wrapper.
+    """
+    content = _download_s3_content(bucket, key)
+
+    if extension == "xlsx":
+        try:
+            import openpyxl  # noqa: F401
+        except ImportError:
+            raise ValueError("openpyxl is required for XLSX files but not installed")
+        df = pd.read_excel(io.BytesIO(content), dtype=str, engine="openpyxl")
+        df = df.fillna("")
+        return content, [df]
+
+    # CSV chunked reading
+    try:
+        reader = pd.read_csv(
+            io.BytesIO(content), dtype=str, encoding="utf-8",
+            chunksize=CHUNK_ROWS,
+        )
+    except UnicodeDecodeError:
+        print("  UTF-8 failed, falling back to latin-1 encoding")
+        reader = pd.read_csv(
+            io.BytesIO(content), dtype=str, encoding="latin-1",
+            chunksize=CHUNK_ROWS,
+        )
+
+    return content, reader
 
 
 # ─── Table Management ─────────────────────────────────────────────────────────
@@ -246,7 +340,7 @@ def ensure_table_exists_dynamic(cursor, table_name, sql_columns):
 
 # ─── Processing Logic ─────────────────────────────────────────────────────────
 
-def process_single_file(bucket, file_info, connection_str):
+def process_single_file(bucket, file_info, connection_str, context=None):
     """
     Process a single data file (CSV or XLSX).
 
@@ -272,15 +366,8 @@ def process_single_file(bucket, file_info, connection_str):
     }
 
     try:
-        # Step 0: Check file size — reject files that would OOM the Lambda
-        MAX_FILE_SIZE = 200 * 1024 * 1024  # 200 MB
         file_size = file_info.get("size", 0)
-        if file_size > MAX_FILE_SIZE:
-            raise ValueError(
-                f"File too large ({file_size / (1024*1024):.0f} MB, "
-                f"max {MAX_FILE_SIZE // (1024*1024)} MB). "
-                f"Process this file manually or increase Lambda memory."
-            )
+        is_large_file = file_size > CHUNK_THRESHOLD
 
         # Step 1: Parse filename
         parsed = parse_filename(filename)
@@ -312,12 +399,30 @@ def process_single_file(bucket, file_info, connection_str):
             print(f"  WARNING: Unknown source agency '{source}', proceeding anyway")
 
         # Step 3: Read file from S3
-        print(f"  Reading {extension.upper()} from S3: {file_key}")
-        df = read_file_from_s3(bucket, file_key, extension)
-        print(f"  File loaded: {len(df)} rows, {len(df.columns)} columns")
+        file_size_mb = file_size / (1024 * 1024)
+        print(f"  Reading {extension.upper()} from S3: {file_key} ({file_size_mb:.1f} MB)")
 
-        if len(df) == 0:
-            raise ValueError("File is empty (header only, no data rows)")
+        if is_large_file:
+            print(f"  Large file — using chunked processing "
+                  f"(threshold={CHUNK_THRESHOLD / (1024*1024):.0f} MB)")
+            content_bytes, chunk_iter = read_file_from_s3_chunked(
+                bucket, file_key, extension
+            )
+            first_chunk = next(chunk_iter)
+            first_chunk = first_chunk.fillna("")
+            print(f"  First chunk loaded: {len(first_chunk)} rows, "
+                  f"{len(first_chunk.columns)} columns")
+            if len(first_chunk) == 0:
+                raise ValueError("File is empty (header only, no data rows)")
+            # Use first chunk for header validation; chunk_iter has remaining
+            df = first_chunk
+        else:
+            df = read_file_from_s3(bucket, file_key, extension)
+            print(f"  File loaded: {len(df)} rows, {len(df.columns)} columns")
+            if len(df) == 0:
+                raise ValueError("File is empty (header only, no data rows)")
+            chunk_iter = None
+            content_bytes = None
 
         # Step 4: Route to legacy or new processing path
         if is_legacy and parsed.get("file_type"):
@@ -350,9 +455,15 @@ def process_single_file(bucket, file_info, connection_str):
                     cursor.execute(f"DELETE FROM [{table_name}]")
                     conn.commit()
 
-                rows = _build_rows(df, csv_columns)
-                _batch_insert(cursor, conn, table_name, sql_columns, rows)
-                result["rowCount"] = len(rows)
+                if is_large_file:
+                    result["rowCount"] = _insert_chunks(
+                        df, chunk_iter, csv_columns, sql_columns,
+                        table_name, cursor, conn, context,
+                    )
+                else:
+                    rows = _build_rows(df, csv_columns)
+                    _batch_insert(cursor, conn, table_name, sql_columns, rows)
+                    result["rowCount"] = len(rows)
 
         else:
             # New multi-module processing path
@@ -393,9 +504,15 @@ def process_single_file(bucket, file_info, connection_str):
                     cursor.execute(f"DELETE FROM [{table_name}]")
                     conn.commit()
 
-                rows = _build_rows(df, csv_columns)
-                _batch_insert(cursor, conn, table_name, sql_columns, rows)
-                result["rowCount"] = len(rows)
+                if is_large_file:
+                    result["rowCount"] = _insert_chunks(
+                        df, chunk_iter, csv_columns, sql_columns,
+                        table_name, cursor, conn, context,
+                    )
+                else:
+                    rows = _build_rows(df, csv_columns)
+                    _batch_insert(cursor, conn, table_name, sql_columns, rows)
+                    result["rowCount"] = len(rows)
 
         # Step 5: Move to processed folder (organized by MODULE/MOCK/SOURCE/ENTITY)
         dest_key = f"{PROCESSED_FOLDER}{parsed['module']}/{mock_number}/{source}/{entity_prefix}/{filename}"
@@ -464,6 +581,48 @@ def _batch_insert(cursor, conn, table_name, sql_columns, rows):
     print(f"  Successfully inserted {len(rows)} rows into {table_name}")
 
 
+def _insert_chunks(first_chunk_df, chunk_iter, csv_columns, sql_columns,
+                   table_name, cursor, conn, context=None):
+    """
+    Insert the first chunk then iterate remaining chunks with timeout awareness.
+
+    ``first_chunk_df`` is the already-loaded first DataFrame chunk (used for
+    header validation above).  ``chunk_iter`` yields the remaining chunks.
+    Returns total row count inserted across all chunks.
+    """
+    TIME_RESERVE_CHUNK_MS = 120000  # 2 min reserve — must leave enough time
+    # for: file move in S3 (slow for large files), status writes, and
+    # self-invocation for continuation runs.
+
+    # Insert first chunk
+    rows = _build_rows(first_chunk_df, csv_columns)
+    _batch_insert(cursor, conn, table_name, sql_columns, rows)
+    total_rows = len(rows)
+    chunk_idx = 0
+
+    # Process remaining chunks
+    for chunk_df in chunk_iter:
+        chunk_idx += 1
+
+        # Check Lambda timeout between chunks
+        if context and hasattr(context, "get_remaining_time_in_millis"):
+            remaining = context.get_remaining_time_in_millis()
+            if remaining < TIME_RESERVE_CHUNK_MS:
+                print(f"  Timeout approaching at chunk {chunk_idx}: "
+                      f"{remaining}ms left, {total_rows} rows inserted so far")
+                break
+
+        chunk_df = chunk_df.fillna("")
+        rows = _build_rows(chunk_df, csv_columns)
+        _batch_insert(cursor, conn, table_name, sql_columns, rows)
+        total_rows += len(rows)
+        print(f"  Chunk {chunk_idx}: +{len(rows)} rows (total: {total_rows})")
+
+    print(f"  Chunked insert complete: {total_rows} rows "
+          f"across {chunk_idx + 1} chunk(s)")
+    return total_rows
+
+
 # ─── Lambda Handler ───────────────────────────────────────────────────────────
 
 def lambda_handler(event, context):
@@ -472,6 +631,7 @@ def lambda_handler(event, context):
 
     Supports actions:
         ?action=process   — Process all files in input folder
+        ?action=continue  — Continue processing remaining files (self-invoked)
         ?action=status    — Return current processing status
         ?action=history   — Return processing run history
         ?action=entities  — Return entity registry for dashboard
@@ -491,14 +651,30 @@ def lambda_handler(event, context):
     filter_entity = params.get("entity", "").upper()
     filter_mock = params.get("mock", "").upper()
 
-    # Parse bucket from body or use default
-    bucket = DEFAULT_BUCKET
-    if "body" in event and event["body"]:
-        try:
-            body = json.loads(event["body"])
-            bucket = body.get("bucket", DEFAULT_BUCKET)
-        except (json.JSONDecodeError, TypeError):
-            pass
+    # Auto-continuation: when invoked via Lambda.invoke() (not Function URL),
+    # the event IS the JSON payload directly — no body wrapper.
+    continuation_run = 0
+    if event.get("_continuation"):
+        action = "continue"
+        continuation_run = event.get("_continuation_run", 1)
+        filter_module = event.get("module", "").upper()
+        filter_entity = event.get("entity", "").upper()
+        filter_mock = event.get("mock", "").upper()
+        bucket = event.get("bucket", DEFAULT_BUCKET)
+
+    # Parse bucket and triggeredBy from body or use defaults
+    triggered_by = ""
+    if not event.get("_continuation"):
+        bucket = DEFAULT_BUCKET
+        if "body" in event and event["body"]:
+            try:
+                body = json.loads(event["body"])
+                bucket = body.get("bucket", DEFAULT_BUCKET)
+                triggered_by = body.get("triggeredBy", "")
+            except (json.JSONDecodeError, TypeError):
+                pass
+    else:
+        triggered_by = event.get("triggeredBy", "")
 
     print(f"Data File Processor: action={action}, bucket={bucket}, "
           f"module={filter_module}, entity={filter_entity}, mock={filter_mock}")
@@ -600,9 +776,13 @@ def lambda_handler(event, context):
                 "body": json.dumps({"error": str(e)}),
             }
 
-    # ── PROCESS ACTION ──
-    if action == "process":
+    # ── PROCESS / CONTINUE ACTION ──
+    if action in ("process", "continue"):
         try:
+            is_continuation = (action == "continue")
+            print(f"{'Continuation' if is_continuation else 'Initial'} run "
+                  f"#{continuation_run}" if is_continuation else "")
+
             input_files = list_input_files(bucket)
 
             # Apply filters
@@ -620,6 +800,26 @@ def lambda_handler(event, context):
                 input_files = filtered
 
             if not input_files:
+                if is_continuation:
+                    # All files have been processed in previous runs — finalize
+                    try:
+                        resp = s3_client.get_object(Bucket=bucket, Key=STATUS_FILE_KEY)
+                        status = json.loads(resp["Body"].read().decode("utf-8"))
+                    except Exception:
+                        status = {}
+                    status["status"] = "complete"
+                    status["completedAt"] = datetime.utcnow().isoformat()
+                    status.pop("timedOut", None)
+                    status.pop("continuing", None)
+                    status["pendingFiles"] = 0
+                    write_status(bucket, status)
+                    write_history(bucket, status)
+                    print("Continuation: no remaining files — all done!")
+                    return {
+                        "statusCode": 200, "headers": headers,
+                        "body": json.dumps(status, default=str),
+                    }
+
                 return {
                     "statusCode": 200,
                     "headers": headers,
@@ -634,36 +834,101 @@ def lambda_handler(event, context):
                     }),
                 }
 
-            print(f"Found {len(input_files)} file(s) to process")
+            # Sort smallest files first so we maximize throughput per run.
+            # Large files that would timeout are pushed to the end.
+            input_files.sort(key=lambda f: f.get("size", 0))
 
-            # Initialize status
-            status = {
-                "status": "processing",
-                "startedAt": datetime.utcnow().isoformat(),
-                "completedAt": None,
-                "totalFiles": len(input_files),
-                "processedFiles": 0,
-                "successCount": 0,
-                "failCount": 0,
-                "files": [],
-            }
+            print(f"Found {len(input_files)} file(s) to process "
+                  f"(sorted by size: {input_files[0]['size']/(1024*1024):.1f} MB "
+                  f"to {input_files[-1]['size']/(1024*1024):.1f} MB)")
 
-            for f in input_files:
-                parsed = parse_filename(f["name"])
-                status["files"].append({
-                    "filename": f["name"],
-                    "source": parsed.get("source", ""),
-                    "module": parsed.get("module", ""),
-                    "entity": parsed.get("entity_prefix", ""),
-                    "entityDisplay": parsed.get("entity_display", ""),
-                    "type": parsed.get("file_type", parsed.get("entity_prefix", "")),
-                    "mockNumber": parsed.get("mock_number", ""),
-                    "status": "pending",
-                    "rowCount": 0,
-                    "error": None,
-                    "startedAt": None,
+            # ── Build or update status ──
+            if is_continuation:
+                # Read existing status from S3 — preserves history of already-
+                # processed files from previous runs in this batch.
+                try:
+                    resp = s3_client.get_object(Bucket=bucket, Key=STATUS_FILE_KEY)
+                    status = json.loads(resp["Body"].read().decode("utf-8"))
+                except Exception:
+                    status = {
+                        "status": "processing",
+                        "startedAt": datetime.utcnow().isoformat(),
+                        "completedAt": None,
+                        "totalFiles": 0,
+                        "processedFiles": 0,
+                        "successCount": 0,
+                        "failCount": 0,
+                        "files": [],
+                    }
+
+                # Reset any leftover "pending" entries for files that were
+                # already moved out of InputFiles in a previous run
+                remaining_names = {f["name"] for f in input_files}
+                status["files"] = [
+                    sf for sf in status.get("files", [])
+                    if sf["status"] != "pending" or sf["filename"] in remaining_names
+                ]
+
+                # Add entries for newly-found files not yet in status
+                existing_names = {sf["filename"] for sf in status["files"]}
+                for f in input_files:
+                    if f["name"] not in existing_names:
+                        parsed = parse_filename(f["name"])
+                        status["files"].append({
+                            "filename": f["name"],
+                            "source": parsed.get("source", ""),
+                            "module": parsed.get("module", ""),
+                            "entity": parsed.get("entity_prefix", ""),
+                            "entityDisplay": parsed.get("entity_display", ""),
+                            "type": parsed.get("file_type", parsed.get("entity_prefix", "")),
+                            "mockNumber": parsed.get("mock_number", ""),
+                            "status": "pending",
+                            "rowCount": 0,
+                            "error": None,
+                            "startedAt": None,
+                            "completedAt": None,
+                        })
+
+                # Update counts and mark as processing again
+                status["status"] = "processing"
+                status["completedAt"] = None
+                status["totalFiles"] = len(status["files"])
+                status["processedFiles"] = sum(
+                    1 for sf in status["files"] if sf["status"] in ("success", "failed")
+                )
+                status.pop("timedOut", None)
+                status.pop("continuing", None)
+                status["continuationRun"] = continuation_run
+            else:
+                # Fresh run — initialize status
+                status = {
+                    "status": "processing",
+                    "startedAt": datetime.utcnow().isoformat(),
                     "completedAt": None,
-                })
+                    "totalFiles": len(input_files),
+                    "processedFiles": 0,
+                    "successCount": 0,
+                    "failCount": 0,
+                    "triggeredBy": triggered_by,
+                    "files": [],
+                }
+
+                for f in input_files:
+                    parsed = parse_filename(f["name"])
+                    status["files"].append({
+                        "filename": f["name"],
+                        "source": parsed.get("source", ""),
+                        "module": parsed.get("module", ""),
+                        "entity": parsed.get("entity_prefix", ""),
+                        "entityDisplay": parsed.get("entity_display", ""),
+                        "type": parsed.get("file_type", parsed.get("entity_prefix", "")),
+                        "mockNumber": parsed.get("mock_number", ""),
+                        "status": "pending",
+                        "rowCount": 0,
+                        "error": None,
+                        "startedAt": None,
+                        "completedAt": None,
+                    })
 
             write_status(bucket, status)
 
@@ -671,50 +936,141 @@ def lambda_handler(event, context):
             connection_str = get_connection_string()
 
             # Process each file (with timeout awareness)
-            TIME_RESERVE_MS = 60000  # Reserve 60s for cleanup
+            TIME_RESERVE_MS = 120000        # 2 min reserved for cleanup / status write
+            FILE_TIME_PER_MB_MS = 2500      # ~2.5 s/MB for small files
+            FILE_TIME_PER_MB_CHUNKED_MS = 200  # ~0.2 s/MB for large files (S3 download only)
+            MIN_FILE_TIME_MS = 15000        # Minimum 15 s per file
+            MIN_FILE_TIME_CHUNKED_MS = 60000  # Minimum 60 s for a chunked file start
             timed_out = False
 
-            for i, file_info in enumerate(input_files):
-                # Check remaining Lambda execution time
-                if context and hasattr(context, "get_remaining_time_in_millis"):
-                    remaining_ms = context.get_remaining_time_in_millis()
-                    if remaining_ms < TIME_RESERVE_MS:
-                        print(f"  Timeout approaching ({remaining_ms}ms left), "
-                              f"stopping after {i} files")
-                        timed_out = True
-                        break
+            # Build index mapping from input_files to their status["files"] entries
+            status_index = {}
+            for idx, sf in enumerate(status["files"]):
+                if sf["status"] == "pending":
+                    status_index[sf["filename"]] = idx
 
-                status["files"][i]["status"] = "processing"
-                status["files"][i]["startedAt"] = datetime.utcnow().isoformat()
-                write_status(bucket, status)
+            try:
+                for file_info in input_files:
+                    si = status_index.get(file_info["name"])
+                    if si is None:
+                        continue  # Already processed in a previous run
 
-                result = process_single_file(bucket, file_info, connection_str)
+                    # Check remaining Lambda execution time
+                    if context and hasattr(context, "get_remaining_time_in_millis"):
+                        remaining_ms = context.get_remaining_time_in_millis()
 
-                status["files"][i] = result
-                status["processedFiles"] = i + 1
+                        file_size = file_info.get("size", 0)
+                        file_size_mb = file_size / (1024 * 1024)
+                        is_chunked = file_size > CHUNK_THRESHOLD
 
-                if result["status"] == "success":
-                    status["successCount"] += 1
+                        if is_chunked:
+                            estimated_ms = max(
+                                MIN_FILE_TIME_CHUNKED_MS,
+                                int(file_size_mb * FILE_TIME_PER_MB_CHUNKED_MS)
+                            )
+                        else:
+                            estimated_ms = max(
+                                MIN_FILE_TIME_MS,
+                                int(file_size_mb * FILE_TIME_PER_MB_MS)
+                            )
+                        needed_ms = estimated_ms + TIME_RESERVE_MS
+
+                        if remaining_ms < needed_ms:
+                            print(
+                                f"  Timeout approaching: {remaining_ms}ms left, "
+                                f"file needs ~{estimated_ms}ms "
+                                f"({file_size_mb:.1f} MB, "
+                                f"{'chunked' if is_chunked else 'full'}) "
+                                f"+ {TIME_RESERVE_MS}ms reserve. "
+                                f"Stopping."
+                            )
+                            timed_out = True
+                            break
+
+                    status["files"][si]["status"] = "processing"
+                    status["files"][si]["startedAt"] = datetime.utcnow().isoformat()
+                    write_status(bucket, status)
+
+                    result = process_single_file(bucket, file_info, connection_str, context)
+
+                    status["files"][si] = result
+                    status["processedFiles"] = sum(
+                        1 for sf in status["files"] if sf["status"] in ("success", "failed")
+                    )
+
+                    if result["status"] == "success":
+                        status["successCount"] = sum(
+                            1 for sf in status["files"] if sf["status"] == "success"
+                        )
+                    else:
+                        status["failCount"] = sum(
+                            1 for sf in status["files"] if sf["status"] == "failed"
+                        )
+
+                    write_status(bucket, status)
+
+            except Exception as loop_err:
+                # Catch errors mid-loop so we can still finalize status
+                tb_inner = traceback.format_exc()
+                print(f"  ERROR in processing loop: {loop_err}\n{tb_inner}")
+                for fi in status["files"]:
+                    if fi["status"] == "processing":
+                        fi["status"] = "failed"
+                        fi["error"] = f"Lambda error: {loop_err}"
+                        fi["completedAt"] = datetime.utcnow().isoformat()
+                        status["failCount"] = sum(
+                            1 for sf in status["files"] if sf["status"] == "failed"
+                        )
+                        status["processedFiles"] = sum(
+                            1 for sf in status["files"]
+                            if sf["status"] in ("success", "failed")
+                        )
+
+            finally:
+                pending_count = sum(
+                    1 for f in status["files"] if f["status"] == "pending"
+                )
+
+                # ── Auto-continuation: self-invoke if timed out with pending files ──
+                continuing = False
+                if (timed_out or pending_count > 0) and pending_count > 0:
+                    filters = {
+                        "module": filter_module,
+                        "entity": filter_entity,
+                        "mock": filter_mock,
+                    }
+                    continuing = self_invoke_continuation(
+                        context, bucket, filters, continuation_run, triggered_by
+                    )
+
+                if continuing:
+                    # Mark status so dashboard knows another run is coming
+                    status["status"] = "processing"
+                    status["timedOut"] = True
+                    status["continuing"] = True
+                    status["pendingFiles"] = pending_count
+                    status["continuationRun"] = continuation_run
+                    print(f"  Continuing: {pending_count} files pending, "
+                          f"next run #{continuation_run + 1}")
                 else:
-                    status["failCount"] += 1
+                    # Final run — mark as complete
+                    status["status"] = "complete"
+                    status["completedAt"] = datetime.utcnow().isoformat()
+                    status.pop("continuing", None)
+                    if timed_out or pending_count > 0:
+                        status["timedOut"] = True
+                        status["pendingFiles"] = pending_count
+                        print(f"  Finalized with {pending_count} files still pending")
 
                 write_status(bucket, status)
+                # Only write history on the final run (not mid-continuation)
+                if not continuing:
+                    write_history(bucket, status)
 
-            # Mark as complete (even if timed out — remaining files stay pending)
-            status["status"] = "complete"
-            status["completedAt"] = datetime.utcnow().isoformat()
-            if timed_out:
-                pending_count = len(input_files) - status["processedFiles"]
-                status["timedOut"] = True
-                status["pendingFiles"] = pending_count
-                print(f"  Timed out with {pending_count} files still pending")
-            write_status(bucket, status)
-
-            # Archive to history
-            write_history(bucket, status)
-
-            print(f"Processing complete: {status['successCount']} success, "
-                  f"{status['failCount']} failed")
+            print(f"Processing {'continuing' if continuing else 'complete'}: "
+                  f"{status.get('successCount', 0)} success, "
+                  f"{status.get('failCount', 0)} failed, "
+                  f"{pending_count} pending")
 
             return {
                 "statusCode": 200,

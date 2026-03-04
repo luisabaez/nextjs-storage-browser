@@ -111,7 +111,12 @@ ENTITY_REGISTRY = {
         "legacy": False,
     },
 
-    # ── HCM (18 entities) ──
+    # ── HCM (35 entities) ──
+    "HCM_ACCRUAL_DETAIL": {
+        "module": "HCM",
+        "display_name": "Accrual Detail",
+        "legacy": False,
+    },
     "HCM_ASSIGNMENT_EIT_KRONOS": {
         "module": "HCM",
         "display_name": "Assignment EIT Kronos",
@@ -125,6 +130,11 @@ ENTITY_REGISTRY = {
     "HCM_COST_ALLOCATION": {
         "module": "HCM",
         "display_name": "Cost Allocation",
+        "legacy": False,
+    },
+    "HCM_COURSES": {
+        "module": "HCM",
+        "display_name": "Courses",
         "legacy": False,
     },
     "HCM_DEPARTMENT": {
@@ -147,14 +157,49 @@ ENTITY_REGISTRY = {
         "display_name": "External Bank Account",
         "legacy": False,
     },
+    "HCM_FEDERAL_TAX": {
+        "module": "HCM",
+        "display_name": "Federal Tax",
+        "legacy": False,
+    },
+    "HCM_GRADE_RATE_VALUE": {
+        "module": "HCM",
+        "display_name": "Grade Rate Value",
+        "legacy": False,
+    },
+    "HCM_GRADE": {
+        "module": "HCM",
+        "display_name": "Grade",
+        "legacy": False,
+    },
+    "HCM_INVOLUNTARY_DEDUCTIONS": {
+        "module": "HCM",
+        "display_name": "Involuntary Deductions",
+        "legacy": False,
+    },
+    "HCM_JOB_GRADE": {
+        "module": "HCM",
+        "display_name": "Job Grade",
+        "legacy": False,
+    },
     "HCM_JOBS": {
         "module": "HCM",
         "display_name": "Jobs",
         "legacy": False,
     },
+    "HCM_LEARNING_RECORD": {
+        "module": "HCM",
+        "display_name": "Learning Record",
+        "legacy": False,
+    },
     "HCM_LOCATION": {
         "module": "HCM",
         "display_name": "Location",
+        "legacy": False,
+    },
+    "HCM_PAYROLL_RELATIONSHIP": {
+        "module": "HCM",
+        "display_name": "Payroll Relationship",
         "legacy": False,
     },
     "HCM_PERSONAL_PAYMENT_METHOD": {
@@ -177,6 +222,11 @@ ENTITY_REGISTRY = {
         "display_name": "Person Email",
         "legacy": False,
     },
+    "HCM_PERSON_LEGISLATIVE": {
+        "module": "HCM",
+        "display_name": "Person Legislative",
+        "legacy": False,
+    },
     "HCM_PERSON_NAME": {
         "module": "HCM",
         "display_name": "Person Name",
@@ -185,6 +235,11 @@ ENTITY_REGISTRY = {
     "HCM_PERSON_NID": {
         "module": "HCM",
         "display_name": "Person NID",
+        "legacy": False,
+    },
+    "HCM_PERSON_PHONE": {
+        "module": "HCM",
+        "display_name": "Person Phone",
         "legacy": False,
     },
     "HCM_PERSON_SUPERVISOR": {
@@ -197,9 +252,39 @@ ENTITY_REGISTRY = {
         "display_name": "Person",
         "legacy": False,
     },
+    "HCM_POSITION_GRADE": {
+        "module": "HCM",
+        "display_name": "Position Grade",
+        "legacy": False,
+    },
+    "HCM_POSITION_HIERARCHY": {
+        "module": "HCM",
+        "display_name": "Position Hierarchy",
+        "legacy": False,
+    },
+    "HCM_POSITION": {
+        "module": "HCM",
+        "display_name": "Position",
+        "legacy": False,
+    },
+    "HCM_SALARY": {
+        "module": "HCM",
+        "display_name": "Salary",
+        "legacy": False,
+    },
     "HCM_SENIORITY": {
         "module": "HCM",
         "display_name": "Seniority",
+        "legacy": False,
+    },
+    "HCM_STATE_TAX": {
+        "module": "HCM",
+        "display_name": "State Tax",
+        "legacy": False,
+    },
+    "HCM_WORK_SCHEDULE": {
+        "module": "HCM",
+        "display_name": "Work Schedule",
         "legacy": False,
     },
 

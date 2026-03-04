@@ -14,7 +14,7 @@ from entity_registry import (
 KNOWN_SOURCES = {
     "PRIFAS", "HACIENDA", "FIMAS", "ASSMCA", "SIFDE", "SALUD", "RETIRO",
     "RHUM", "KRONOSPOL", "KRONOSPOL_PHASE2", "DOE", "ADPPOLICIA",
-    "911", "SURI", "ASG",
+    "911", "SURI", "ASG", "034", "015",
 }
 
 
@@ -87,36 +87,105 @@ def parse_filename(filename):
     # Backward compat
     result["pillar"] = entity_info["module"]
 
-    # Extract the remainder after entity prefix: _MOCK{N}[PRE]_{SOURCE}_{DATE}_{TIME}.ext
+    # Extract the remainder after entity prefix: _MOCK{N}[PRE]_{SOURCE}[_{DATE}[_{TIME}]].ext
     remainder = name[len(entity_prefix):]
     ext = ".csv" if result["extension"] == "csv" else ".xlsx"
+    ext_re = re.escape(ext)
 
+    # Pattern 1: Standard format — _MOCK{N}_{SOURCE}_{YYYYMMDD}_{HHMM}.ext
     m = re.match(
-        r'^_(MOCK\d+(?:PRE)?)_([A-Z0-9_]+)_(\d{8})_(\d{4})' + re.escape(ext) + r'$',
-        remainder,
-        re.IGNORECASE,
+        r'^_(MOCK\d+(?:PRE)?)_([A-Z0-9_]+)_(\d{8})_(\d{4})' + ext_re + r'$',
+        remainder, re.IGNORECASE,
     )
-    if not m:
-        result["error"] = (
-            f"Filename structure invalid after entity prefix '{entity_prefix}': "
-            f"expected _MOCK{{N}}_{{SOURCE}}_{{DATE}}_{{TIME}}{ext}, got '{remainder}'"
-        )
-        return result
+    if m:
+        result["mock_number"] = m.group(1).upper()
+        result["source"] = m.group(2).upper()
+        result["date"] = m.group(3)
+        result["time"] = m.group(4)
+        result["valid"] = True
+        return _set_legacy_type(result, entity_prefix)
 
-    result["mock_number"] = m.group(1).upper()
-    result["source"] = m.group(2).upper()
-    result["date"] = m.group(3)
-    result["time"] = m.group(4)
-    result["valid"] = True
+    # Pattern 2: Dashed date — _MOCK{N}_{SOURCE}_{YYYY-MM-DD}.ext
+    m = re.match(
+        r'^_(MOCK\d+(?:PRE)?)_([A-Z0-9_]+)_(\d{4}-\d{2}-\d{2})' + ext_re + r'$',
+        remainder, re.IGNORECASE,
+    )
+    if m:
+        result["mock_number"] = m.group(1).upper()
+        result["source"] = m.group(2).upper()
+        result["date"] = m.group(3).replace("-", "")
+        result["time"] = "0000"
+        result["valid"] = True
+        return _set_legacy_type(result, entity_prefix)
 
-    # Set legacy file_type for backward compat with AP Invoice entities
+    # Pattern 3: YYYYMMDD without time — _MOCK{N}_{SOURCE}_{YYYYMMDD}.ext
+    m = re.match(
+        r'^_(MOCK\d+(?:PRE)?)_([A-Z0-9_]+?)_(\d{8})' + ext_re + r'$',
+        remainder, re.IGNORECASE,
+    )
+    if m:
+        result["mock_number"] = m.group(1).upper()
+        result["source"] = m.group(2).upper()
+        result["date"] = m.group(3)
+        result["time"] = "0000"
+        result["valid"] = True
+        return _set_legacy_type(result, entity_prefix)
+
+    # Pattern 4: Underscored YYYY_MM_DD — _MOCK{N}_{SOURCE}_{YYYY}_{MM}_{DD}.ext
+    m = re.match(
+        r'^_(MOCK\d+(?:PRE)?)_(.+?)_(\d{4})_(\d{2})_(\d{2})' + ext_re + r'$',
+        remainder, re.IGNORECASE,
+    )
+    if m:
+        result["mock_number"] = m.group(1).upper()
+        result["source"] = m.group(2).upper()
+        result["date"] = m.group(3) + m.group(4) + m.group(5)
+        result["time"] = "0000"
+        result["valid"] = True
+        return _set_legacy_type(result, entity_prefix)
+
+    # Pattern 5: US date MM_DD_YYYY — _MOCK{N}_{SOURCE}_{MM}_{DD}_{YYYY}.ext
+    m = re.match(
+        r'^_(MOCK\d+(?:PRE)?)_(.+?)_(\d{2})_(\d{2})_(\d{4})' + ext_re + r'$',
+        remainder, re.IGNORECASE,
+    )
+    if m:
+        result["mock_number"] = m.group(1).upper()
+        result["source"] = m.group(2).upper()
+        result["date"] = m.group(5) + m.group(3) + m.group(4)  # → YYYYMMDD
+        result["time"] = "0000"
+        result["valid"] = True
+        return _set_legacy_type(result, entity_prefix)
+
+    # Pattern 6: No date at all — _MOCK{N}_{SOURCE}.ext
+    m = re.match(
+        r'^_(MOCK\d+(?:PRE)?)_([A-Z0-9_]+)' + ext_re + r'$',
+        remainder, re.IGNORECASE,
+    )
+    if m:
+        result["mock_number"] = m.group(1).upper()
+        result["source"] = m.group(2).upper()
+        result["date"] = "00000000"
+        result["time"] = "0000"
+        result["valid"] = True
+        return _set_legacy_type(result, entity_prefix)
+
+    # No pattern matched
+    result["error"] = (
+        f"Filename structure invalid after entity prefix '{entity_prefix}': "
+        f"got '{remainder}'"
+    )
+    return result
+
+
+def _set_legacy_type(result, entity_prefix):
+    """Set backward-compat file_type for legacy AP Invoice entities."""
     if entity_prefix == "FIN_AP_INVOICE_HDR":
         result["file_type"] = "HDR"
     elif entity_prefix == "FIN_AP_INVOICE_LINES_DTL1":
         result["file_type"] = "LINES_DTL1"
     elif entity_prefix == "FIN_AP_INVOICE_LINES":
         result["file_type"] = "LINES"
-
     return result
 
 
