@@ -875,7 +875,7 @@ def lambda_handler(event, context):
                     parsed = parse_filename(f["name"])
                     if filter_module and (parsed.get("module") or "").upper() != filter_module:
                         continue
-                    if filter_entity and filter_entity not in (parsed.get("entity_prefix") or "").upper():
+                    if filter_entity and (parsed.get("entity_prefix") or "").upper() != filter_entity:
                         continue
                     if filter_source and (parsed.get("source") or "").upper() != filter_source:
                         continue
