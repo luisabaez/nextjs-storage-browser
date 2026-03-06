@@ -873,13 +873,13 @@ def lambda_handler(event, context):
                 filtered = []
                 for f in input_files:
                     parsed = parse_filename(f["name"])
-                    if filter_module and parsed.get("module", "").upper() != filter_module:
+                    if filter_module and (parsed.get("module") or "").upper() != filter_module:
                         continue
-                    if filter_entity and filter_entity not in parsed.get("entity_prefix", "").upper():
+                    if filter_entity and filter_entity not in (parsed.get("entity_prefix") or "").upper():
                         continue
-                    if filter_source and parsed.get("source", "").upper() != filter_source:
+                    if filter_source and (parsed.get("source") or "").upper() != filter_source:
                         continue
-                    if filter_mock and parsed.get("mock_number", "").upper() != filter_mock:
+                    if filter_mock and (parsed.get("mock_number") or "").upper() != filter_mock:
                         continue
                     filtered.append(f)
                 input_files = filtered
