@@ -150,6 +150,50 @@ def write_history(bucket, status_data):
     )
     print(f"  Archived processing history to: {history_key}")
 
+    # Also write to SQL Server history table
+    try:
+        total_rows_uploaded = sum(
+            f.get("rowCount", 0) for f in history_data.get("files", [])
+            if f.get("status") == "success"
+        )
+        write_history_to_db(history_data, history_key, total_rows_uploaded)
+    except Exception as db_err:
+        print(f"  WARNING: Failed to write history to DB: {db_err}")
+
+
+def write_history_to_db(status_data, s3_history_key, total_rows_uploaded):
+    """Write a summary row to FileProcessingRuns table in SQL Server."""
+    conn_str = get_connection_string()
+    conn = pyodbc.connect(conn_str)
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO FileProcessingRuns
+                (Status, StartedAt, CompletedAt, DurationSeconds, TriggeredBy,
+                 TotalFiles, ProcessedFiles, SuccessCount, FailCount,
+                 TotalRowsUploaded, ContinuationRuns, PendingFiles, S3HistoryKey)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            status_data.get("status", "unknown"),
+            status_data.get("startedAt"),
+            status_data.get("completedAt"),
+            status_data.get("durationSeconds"),
+            status_data.get("triggeredBy", ""),
+            status_data.get("totalFiles", 0),
+            status_data.get("processedFiles", 0),
+            status_data.get("successCount", 0),
+            status_data.get("failCount", 0),
+            total_rows_uploaded,
+            status_data.get("continuationRun", 0),
+            status_data.get("pendingFiles", 0),
+            s3_history_key,
+        )
+        conn.commit()
+        print(f"  Wrote processing run to FileProcessingRuns table")
+    finally:
+        conn.close()
+
 
 def write_error_file(bucket, file_key, error_message):
     """Write an error detail file next to the failed file."""
@@ -183,6 +227,7 @@ def self_invoke_continuation(context, bucket, filters, continuation_run, trigger
         "bucket": bucket,
         "module": filters.get("module", ""),
         "entity": filters.get("entity", ""),
+        "source": filters.get("source", ""),
         "mock": filters.get("mock", ""),
         "triggeredBy": triggered_by,
     }
@@ -636,6 +681,20 @@ def lambda_handler(event, context):
         ?action=history   — Return processing run history
         ?action=entities  — Return entity registry for dashboard
     """
+    # ── Ignore S3 event triggers ──
+    # If this Lambda is accidentally configured with an S3 event notification,
+    # the event will contain "Records" with "s3" data.  Silently ignore these
+    # to prevent dozens of concurrent processing runs when files are uploaded.
+    if "Records" in event and any(
+        r.get("eventSource") == "aws:s3" for r in event.get("Records", [])
+    ):
+        print("Ignoring S3 event trigger — processing must be started manually")
+        return {
+            "statusCode": 200,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({"status": "ignored", "reason": "S3 event trigger"}),
+        }
+
     # Parse query params
     params = {}
     if "queryStringParameters" in event and event["queryStringParameters"]:
@@ -649,6 +708,7 @@ def lambda_handler(event, context):
     action = params.get("action", "process")
     filter_module = params.get("module", "").upper()
     filter_entity = params.get("entity", "").upper()
+    filter_source = params.get("source", "").upper()
     filter_mock = params.get("mock", "").upper()
 
     # Auto-continuation: when invoked via Lambda.invoke() (not Function URL),
@@ -659,6 +719,7 @@ def lambda_handler(event, context):
         continuation_run = event.get("_continuation_run", 1)
         filter_module = event.get("module", "").upper()
         filter_entity = event.get("entity", "").upper()
+        filter_source = event.get("source", "").upper()
         filter_mock = event.get("mock", "").upper()
         bucket = event.get("bucket", DEFAULT_BUCKET)
 
@@ -677,7 +738,8 @@ def lambda_handler(event, context):
         triggered_by = event.get("triggeredBy", "")
 
     print(f"Data File Processor: action={action}, bucket={bucket}, "
-          f"module={filter_module}, entity={filter_entity}, mock={filter_mock}")
+          f"module={filter_module}, entity={filter_entity}, "
+          f"source={filter_source}, mock={filter_mock}")
 
     # CORS headers
     headers = {
@@ -780,19 +842,42 @@ def lambda_handler(event, context):
     if action in ("process", "continue"):
         try:
             is_continuation = (action == "continue")
+
+            # ── Concurrency guard: prevent parallel processing runs ──
+            if not is_continuation:
+                try:
+                    resp = s3_client.get_object(Bucket=bucket, Key=STATUS_FILE_KEY)
+                    current_status = json.loads(resp["Body"].read().decode("utf-8"))
+                    if current_status.get("status") == "processing":
+                        print("Processing already in progress — aborting duplicate run")
+                        return {
+                            "statusCode": 409,
+                            "headers": headers,
+                            "body": json.dumps({
+                                "status": "already_processing",
+                                "message": "A processing run is already in progress",
+                                "startedAt": current_status.get("startedAt"),
+                                "triggeredBy": current_status.get("triggeredBy", ""),
+                            }),
+                        }
+                except s3_client.exceptions.NoSuchKey:
+                    pass  # No status file yet — OK to proceed
+
             print(f"{'Continuation' if is_continuation else 'Initial'} run "
                   f"#{continuation_run}" if is_continuation else "")
 
             input_files = list_input_files(bucket)
 
             # Apply filters
-            if filter_module or filter_entity or filter_mock:
+            if filter_module or filter_entity or filter_source or filter_mock:
                 filtered = []
                 for f in input_files:
                     parsed = parse_filename(f["name"])
                     if filter_module and parsed.get("module", "").upper() != filter_module:
                         continue
                     if filter_entity and filter_entity not in parsed.get("entity_prefix", "").upper():
+                        continue
+                    if filter_source and parsed.get("source", "").upper() != filter_source:
                         continue
                     if filter_mock and parsed.get("mock_number", "").upper() != filter_mock:
                         continue
@@ -1037,6 +1122,7 @@ def lambda_handler(event, context):
                     filters = {
                         "module": filter_module,
                         "entity": filter_entity,
+                        "source": filter_source,
                         "mock": filter_mock,
                     }
                     continuing = self_invoke_continuation(

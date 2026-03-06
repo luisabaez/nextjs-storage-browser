@@ -181,9 +181,9 @@ const EXCLUDED_PREFIXES = ['FIN_ASSETS', 'SCM_INV'];
 const LAMBDA_URL = 'https://5ahxjcxhrcopng5hjgc2n6utxq0rwcmm.lambda-url.us-east-1.on.aws/';
 
 const KNOWN_SOURCES = [
-  'PRIFAS', 'HACIENDA', 'FIMAS', 'ASSMCA', 'SIFDE', 'SALUD', 'RETIRO',
-  'RHUM', 'KRONOSPOL', 'KRONOSPOL_PHASE2', 'DOE', 'ADPPOLICIA', '911', 'SURI', 'ASG',
-  '034', '015',
+  '015', '034', '911', 'ADPPOLICIA', 'ASG', 'ASSMCA', 'DOE', 'FIMAS',
+  'HACIENDA', 'KRONOSPOL', 'KRONOSPOL_PHASE2', 'PRIFAS', 'RETIRO', 'RHUM',
+  'SALUD', 'SIFDE', 'SURI',
 ];
 
 const S3_FOLDERS = {
@@ -419,8 +419,12 @@ function DataFileDashboard() {
   // ─── Derived filter options ──────────────────────────────────────────────
 
   const entityOptions = useMemo(() => {
-    if (filterModule === 'all') return SORTED_PREFIXES;
-    return SORTED_PREFIXES.filter(p => ENTITY_REGISTRY[p].module === filterModule);
+    const prefixes = filterModule === 'all'
+      ? Object.keys(ENTITY_REGISTRY)
+      : Object.keys(ENTITY_REGISTRY).filter(p => ENTITY_REGISTRY[p].module === filterModule);
+    return prefixes.sort((a, b) =>
+      ENTITY_REGISTRY[a].displayName.localeCompare(ENTITY_REGISTRY[b].displayName)
+    );
   }, [filterModule]);
 
   const mockOptions = useMemo(() => {
@@ -844,9 +848,18 @@ function DataFileDashboard() {
   const handleRunProcessing = useCallback(async () => {
     if (isProcessing) return;
 
-    const inputFiles = files.filter(f => f.folder === 'input');
+    // Apply active filters to determine which input files to process
+    const hasFilters = filterModule !== 'all' || filterEntity !== 'all' || filterSource !== 'all' || filterMock !== 'all';
+    let inputFiles = files.filter(f => f.folder === 'input');
+    if (hasFilters) {
+      if (filterModule !== 'all') inputFiles = inputFiles.filter(f => f.parsed.module === filterModule);
+      if (filterEntity !== 'all') inputFiles = inputFiles.filter(f => f.parsed.entityPrefix === filterEntity);
+      if (filterSource !== 'all') inputFiles = inputFiles.filter(f => f.parsed.source === filterSource);
+      if (filterMock !== 'all') inputFiles = inputFiles.filter(f => f.parsed.mockNumber === filterMock);
+    }
+
     if (inputFiles.length === 0) {
-      alert('No files in the InputFilesForProcessing folder to process.');
+      alert('No files match the current filters to process.');
       return;
     }
 
@@ -854,10 +867,11 @@ function DataFileDashboard() {
     const filterParts: string[] = [];
     if (filterModule !== 'all') filterParts.push(`Module: ${filterModule}`);
     if (filterEntity !== 'all') filterParts.push(`Entity: ${filterEntity}`);
+    if (filterSource !== 'all') filterParts.push(`Source: ${filterSource}`);
     if (filterMock !== 'all') filterParts.push(`Mock: ${filterMock}`);
     const filterDesc = filterParts.length > 0
       ? `\n\nFilters applied:\n${filterParts.join('\n')}`
-      : '';
+      : '\n\nNo filters — processing ALL input files.';
 
     if (!confirm(`Process ${inputFiles.length} file(s) in InputFilesForProcessing?\n\nThis will:\n- Validate each file\n- Load data into Hacienda_ERP_Test database\n- Move files to ProcessedFiles or FailedInvoices folders\n\nTarget tables will be truncated before loading.${filterDesc}`)) {
       return;
@@ -909,6 +923,7 @@ function DataFileDashboard() {
       const params = new URLSearchParams({ action: 'process' });
       if (filterModule !== 'all') params.set('module', filterModule);
       if (filterEntity !== 'all') params.set('entity', filterEntity);
+      if (filterSource !== 'all') params.set('source', filterSource);
       if (filterMock !== 'all') params.set('mock', filterMock);
 
       // Abort the fetch after 30s — we don't need the HTTP response since we
@@ -936,7 +951,7 @@ function DataFileDashboard() {
       // S3 status polling will pick up progress regardless.
       console.warn('Error starting processing (suppressed):', err);
     }
-  }, [isProcessing, files, filterModule, filterEntity, filterMock, userEmail]);
+  }, [isProcessing, files, filterModule, filterEntity, filterSource, filterMock, userEmail]);
 
   // ─── File actions ────────────────────────────────────────────────────────
 
