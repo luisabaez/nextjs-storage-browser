@@ -790,15 +790,25 @@ function DataFileDashboard() {
     if (conversionPlanLoaded && !force) return;
     setConversionPlanLoading(true);
 
-    // Retry with increasing timeout to handle Lambda VPC cold starts
-    const attempts = [60000, 90000];  // 60s, then 90s
-    for (let i = 0; i < attempts.length; i++) {
+    // Retry with delays to handle Lambda VPC cold starts and 503 (busy)
+    const maxAttempts = 4;
+    const delays = [0, 5000, 10000, 15000];  // wait before each attempt
+    for (let i = 0; i < maxAttempts; i++) {
       try {
+        if (delays[i] > 0) {
+          console.log(`[ConversionPlan] Waiting ${delays[i] / 1000}s before retry...`);
+          await new Promise(resolve => setTimeout(resolve, delays[i]));
+        }
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), attempts[i]);
-        console.log(`[ConversionPlan] Fetching (attempt ${i + 1}, timeout ${attempts[i] / 1000}s)...`);
+        const timeoutId = setTimeout(() => controller.abort(), 90000);
+        console.log(`[ConversionPlan] Fetching (attempt ${i + 1}/${maxAttempts})...`);
         const resp = await fetch(`${LAMBDA_URL}?action=conversionplan`, { signal: controller.signal });
         clearTimeout(timeoutId);
+        if (resp.status === 503) {
+          console.warn(`[ConversionPlan] Lambda busy (503), will retry...`);
+          if (i < maxAttempts - 1) continue;
+          throw new Error('Lambda busy (503) after all retries');
+        }
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
         setConversionPlanData(data.entries || []);
@@ -807,10 +817,9 @@ function DataFileDashboard() {
         console.log(`[ConversionPlan] Loaded ${(data.entries || []).length} entries across ${(data.mockTables || []).length} mocks`);
         setConversionPlanLoading(false);
         return;
-      } catch (err) {
-        console.warn(`[ConversionPlan] Attempt ${i + 1} failed:`, err);
-        if (i === attempts.length - 1) {
-          // Last attempt failed
+      } catch (err: any) {
+        console.warn(`[ConversionPlan] Attempt ${i + 1} failed:`, err?.message || err);
+        if (i === maxAttempts - 1) {
           setConversionPlanLoading(false);
         }
       }
