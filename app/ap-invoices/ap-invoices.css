@@ -1218,3 +1218,527 @@
   min-width: 32px;
   text-align: right;
 }
+
+/* ─── Gantt View ─────────────────────────────────────────────────────────── */
+
+.ap-gantt-content {
+  padding: 0;
+}
+
+.ap-gantt-table-wrapper {
+  overflow-x: auto;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.ap-gantt-table {
+  width: 100%;
+  min-width: 1100px;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.ap-gantt-table thead th {
+  background: #f8fafc;
+  padding: 14px 16px;
+  text-align: left;
+  font-weight: 600;
+  font-size: 13px;
+  color: #334155;
+  border-bottom: 2px solid #e2e8f0;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+.ap-gantt-entity-col {
+  width: 260px;
+  min-width: 260px;
+}
+
+.ap-gantt-stage-col {
+  width: calc((100% - 260px) / 4);
+}
+
+.ap-gantt-row {
+  border-bottom: 1px solid #e2e8f0;
+  vertical-align: top;
+}
+
+.ap-gantt-row:last-child {
+  border-bottom: none;
+}
+
+.ap-gantt-entity-cell {
+  padding: 16px;
+  background: #fafbfc;
+  border-right: 1px solid #e2e8f0;
+  vertical-align: top;
+  position: sticky;
+  left: 0;
+  z-index: 1;
+}
+
+.ap-gantt-entity-info {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ap-gantt-entity-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.ap-gantt-separator {
+  color: #94a3b8;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.ap-gantt-entity-name {
+  font-weight: 600;
+  font-size: 13px;
+  color: #1e293b;
+}
+
+.ap-gantt-entity-meta {
+  font-size: 12px;
+  color: #64748b;
+}
+
+.ap-gantt-stage-cell {
+  padding: 8px;
+  border-right: 1px solid #e2e8f0;
+  vertical-align: top;
+}
+
+.ap-gantt-stage-cell:last-child {
+  border-right: none;
+}
+
+.ap-gantt-file-card {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ap-gantt-file-card:last-child {
+  margin-bottom: 0;
+}
+
+.ap-gantt-file-card.has-error {
+  border-color: #fca5a5;
+  background: #fef2f2;
+}
+
+.ap-gantt-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 10px;
+  width: fit-content;
+}
+
+.ap-gantt-status-badge.pass {
+  color: #15803d;
+  background: #dcfce7;
+}
+
+.ap-gantt-status-badge.fail {
+  color: #dc2626;
+  background: #fee2e2;
+}
+
+.ap-gantt-status-badge.processing {
+  color: #2563eb;
+  background: #dbeafe;
+}
+
+.ap-gantt-status-badge.pending {
+  color: #64748b;
+  background: #f1f5f9;
+}
+
+.ap-gantt-status-icon {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.ap-gantt-status-icon.pass {
+  background: #22c55e;
+}
+
+.ap-gantt-status-icon.fail {
+  background: #ef4444;
+}
+
+.ap-gantt-status-icon.processing {
+  background: #3b82f6;
+}
+
+.ap-gantt-status-icon.pending {
+  background: #94a3b8;
+}
+
+.ap-gantt-file-name {
+  font-size: 11px;
+  color: #334155;
+  word-break: break-all;
+  line-height: 1.3;
+}
+
+.ap-gantt-file-date {
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+.ap-gantt-view-link {
+  background: none;
+  border: none;
+  color: #3b82f6;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 0;
+  text-align: left;
+  font-weight: 500;
+}
+
+.ap-gantt-view-link:hover {
+  text-decoration: underline;
+  color: #2563eb;
+}
+
+.ap-gantt-error-msg {
+  font-size: 11px;
+  color: #dc2626;
+  line-height: 1.3;
+  margin-top: 2px;
+}
+
+/* ─── File Detail Overlay ────────────────────────────────────────────────── */
+
+.ap-file-detail-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.4);
+  z-index: 1000;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 40px 20px;
+  overflow-y: auto;
+}
+
+.ap-file-detail-panel {
+  background: #f8fafc;
+  border-radius: 12px;
+  max-width: 900px;
+  width: 100%;
+  padding: 32px;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+  animation: ap-slide-up 0.2s ease-out;
+}
+
+@keyframes ap-slide-up {
+  from { transform: translateY(20px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+.ap-file-detail-header {
+  margin-bottom: 24px;
+}
+
+.ap-file-detail-back {
+  background: none;
+  border: none;
+  color: #3b82f6;
+  font-size: 14px;
+  cursor: pointer;
+  padding: 0;
+  margin-bottom: 12px;
+  font-weight: 500;
+}
+
+.ap-file-detail-back:hover {
+  text-decoration: underline;
+}
+
+.ap-file-detail-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+  flex-wrap: wrap;
+}
+
+.ap-file-detail-icon {
+  font-size: 24px;
+}
+
+.ap-file-detail-title {
+  font-size: 18px;
+  font-weight: 700;
+  color: #0f172a;
+  margin: 0;
+  word-break: break-all;
+}
+
+.ap-file-detail-subtitle {
+  font-size: 13px;
+  color: #64748b;
+}
+
+.ap-file-detail-cards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.ap-file-detail-card {
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 20px;
+}
+
+.ap-file-detail-card-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: #0f172a;
+  margin: 0 0 16px 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ap-file-detail-card-icon {
+  font-size: 16px;
+}
+
+.ap-file-detail-field {
+  margin-bottom: 12px;
+}
+
+.ap-file-detail-field:last-child {
+  margin-bottom: 0;
+}
+
+.ap-file-detail-label {
+  display: block;
+  font-size: 12px;
+  color: #64748b;
+  margin-bottom: 2px;
+}
+
+.ap-file-detail-field strong {
+  font-size: 14px;
+  color: #1e293b;
+}
+
+.ap-file-detail-path {
+  display: block;
+  background: #f1f5f9;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: #334155;
+  word-break: break-all;
+  line-height: 1.4;
+  margin-top: 4px;
+}
+
+.ap-file-detail-error-card {
+  border-color: #fca5a5;
+  background: #fef2f2;
+}
+
+.ap-file-detail-error-msg {
+  font-size: 13px;
+  color: #dc2626;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+/* ─── Process Flow ───────────────────────────────────────────────────────── */
+
+.ap-process-flow {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 0;
+  padding: 20px 0;
+}
+
+.ap-process-flow-item {
+  display: flex;
+  align-items: center;
+  gap: 0;
+}
+
+.ap-process-flow-arrow {
+  color: #94a3b8;
+  font-size: 20px;
+  margin: 0 16px;
+  padding-bottom: 30px;
+}
+
+.ap-process-flow-step {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  min-width: 100px;
+}
+
+.ap-process-flow-circle {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  font-weight: 700;
+  color: #fff;
+}
+
+.ap-process-flow-circle.pass {
+  background: #86efac;
+  color: #166534;
+}
+
+.ap-process-flow-circle.fail {
+  background: #fca5a5;
+  color: #991b1b;
+}
+
+.ap-process-flow-circle.processing {
+  background: #93c5fd;
+  color: #1e40af;
+}
+
+.ap-process-flow-circle.pending {
+  background: #e2e8f0;
+  color: #64748b;
+}
+
+.ap-process-flow-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #1e293b;
+  text-align: center;
+}
+
+.ap-process-flow-sub {
+  font-size: 11px;
+  color: #94a3b8;
+  text-align: center;
+}
+
+/* ─── Event Timeline ─────────────────────────────────────────────────────── */
+
+.ap-event-timeline {
+  padding: 12px 0;
+}
+
+.ap-timeline-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  padding: 16px 0;
+  border-bottom: 1px solid #f1f5f9;
+  position: relative;
+}
+
+.ap-timeline-item:last-child {
+  border-bottom: none;
+}
+
+.ap-timeline-item::before {
+  content: '';
+  position: absolute;
+  left: 11px;
+  top: 40px;
+  bottom: -16px;
+  width: 2px;
+  background: #e2e8f0;
+}
+
+.ap-timeline-item:last-child::before {
+  display: none;
+}
+
+.ap-timeline-dot {
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1;
+}
+
+.ap-timeline-dot.pass {
+  background: #dcfce7;
+  border: 2px solid #86efac;
+}
+
+.ap-timeline-dot.fail {
+  background: #fee2e2;
+  border: 2px solid #fca5a5;
+}
+
+.ap-timeline-dot.processing {
+  background: #dbeafe;
+  border: 2px solid #93c5fd;
+}
+
+.ap-timeline-content {
+  flex: 1;
+}
+
+.ap-timeline-content strong {
+  display: block;
+  font-size: 14px;
+  color: #0f172a;
+  margin-bottom: 4px;
+}
+
+.ap-timeline-detail {
+  font-size: 13px;
+  color: #64748b;
+  margin-bottom: 4px;
+}
+
+.ap-timeline-path {
+  display: block;
+  font-size: 11px;
+  color: #94a3b8;
+  margin-top: 4px;
+}
+
+.ap-timeline-time {
+  font-size: 12px;
+  color: #94a3b8;
+  white-space: nowrap;
+  min-width: 120px;
+  text-align: right;
+}

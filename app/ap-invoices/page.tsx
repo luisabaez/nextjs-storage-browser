@@ -193,7 +193,15 @@ const S3_FOLDERS = {
   unmatched: 'FailedUnmatchedFilenames/',
 };
 
-type TabId = 'all' | 'pending' | 'uploaded' | 'failed' | 'history';
+type TabId = 'all' | 'pending' | 'uploaded' | 'failed' | 'history' | 'gantt';
+
+interface GanttEntityGroup {
+  module: string;
+  entityDisplay: string;
+  entityPrefix: string;
+  source: string;
+  files: APFile[];
+}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -396,6 +404,7 @@ function DataFileDashboard() {
   const [showUploadZone, setShowUploadZone] = useState(false);
   const [uploadFiles, setUploadFiles] = useState<{id: string; name: string; size: number; progress: number; status: 'pending' | 'uploading' | 'completed' | 'error'}[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
+  const [selectedGanttFile, setSelectedGanttFile] = useState<APFile | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Fetch current user email for "triggered by" tracking
@@ -1060,6 +1069,96 @@ function DataFileDashboard() {
     processing: files.filter(f => f.status === 'processing').length,
   }), [files]);
 
+  // ─── Gantt grouping ─────────────────────────────────────────────────────
+
+  const ganttGroups = useMemo((): GanttEntityGroup[] => {
+    // Apply same filters as filteredFiles but skip tab filter
+    let result = [...files];
+    if (filterModule !== 'all') result = result.filter(f => f.parsed.module === filterModule);
+    if (filterEntity !== 'all') result = result.filter(f => f.parsed.entityPrefix === filterEntity);
+    if (filterSource !== 'all') result = result.filter(f => f.parsed.source === filterSource);
+    if (filterMock !== 'all') result = result.filter(f => f.parsed.mockNumber === filterMock);
+    if (filterStatus !== 'all') result = result.filter(f => f.status === filterStatus);
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase();
+      result = result.filter(f => f.name.toLowerCase().includes(q));
+    }
+
+    // Group by entity + source
+    const groupMap = new Map<string, GanttEntityGroup>();
+    for (const file of result) {
+      const key = `${file.parsed.entityPrefix}|${file.parsed.source}`;
+      if (!groupMap.has(key)) {
+        groupMap.set(key, {
+          module: file.parsed.module,
+          entityDisplay: file.parsed.entityDisplay || file.parsed.entityPrefix,
+          entityPrefix: file.parsed.entityPrefix,
+          source: file.parsed.source,
+          files: [],
+        });
+      }
+      groupMap.get(key)!.files.push(file);
+    }
+
+    // Sort files within each group by date, oldest first
+    const groups = Array.from(groupMap.values());
+    groups.forEach(group => {
+      group.files.sort((a, b) => a.lastModified.getTime() - b.lastModified.getTime());
+    });
+
+    // Sort groups by module then entity
+    return groups.sort((a, b) => {
+      if (a.module !== b.module) return a.module.localeCompare(b.module);
+      return a.entityDisplay.localeCompare(b.entityDisplay);
+    });
+  }, [files, filterModule, filterEntity, filterSource, filterMock, filterStatus, searchQuery]);
+
+  // Helper: get pillar name from module
+  const getPillarName = (module: string) => {
+    const map: Record<string, string> = { FIN: 'Finance', SCM: 'Supply Chain', HCM: 'Human Capital' };
+    return map[module] || module;
+  };
+
+  // Helper: get lifecycle stage status for a file
+  const getLifecycleStage = (file: APFile) => {
+    // Initial Load: always present once we have the file
+    const stages = {
+      initialLoad: {
+        status: file.status === 'failed' ? 'fail' : file.status === 'processing' ? 'processing' : 'pass',
+        filename: file.name,
+        timestamp: file.lastModified,
+      },
+      prevalidation: {
+        // If file was successfully loaded, prevalidation passed
+        status: file.status === 'success' ? 'pass' : file.status === 'processing' ? 'processing' : file.status === 'failed' ? 'fail' : 'pending',
+        filename: file.name,
+        timestamp: file.lastModified,
+      },
+      conversion: {
+        // If file was loaded to DB, conversion is done
+        status: file.folder === 'processed' ? 'pass' : file.status === 'processing' ? 'processing' : file.status === 'failed' ? 'fail' : 'pending',
+        filename: file.name,
+        timestamp: file.lastModified,
+      },
+      validation: {
+        // Final validation — only pass if fully processed
+        status: file.folder === 'processed' ? 'pass' : file.status === 'failed' ? 'fail' : 'pending',
+        filename: file.name,
+        timestamp: file.lastModified,
+      },
+    };
+    return stages;
+  };
+
+  // Helper: format date for gantt cells
+  const formatGanttDate = (date: Date) => {
+    return date.toLocaleDateString('en-US', {
+      month: '2-digit', day: '2-digit', year: 'numeric',
+    }) + ', ' + date.toLocaleTimeString('en-US', {
+      hour: '2-digit', minute: '2-digit', hour12: true,
+    });
+  };
+
   // ─── Render ──────────────────────────────────────────────────────────────
 
   if (loading) {
@@ -1433,6 +1532,7 @@ function DataFileDashboard() {
         <div className="ap-tabs">
           <div className="ap-tab-list">
             {([
+              { id: 'gantt' as TabId, label: 'Gantt View', count: null },
               { id: 'all' as TabId, label: 'All Files', count: stats.total },
               { id: 'pending' as TabId, label: 'Pending', count: stats.pending },
               { id: 'uploaded' as TabId, label: 'Processed', count: stats.processed },
@@ -1445,13 +1545,140 @@ function DataFileDashboard() {
                 onClick={() => setActiveTab(tab.id)}
               >
                 {tab.label}
-                <span className="ap-tab-count">{tab.count}</span>
+                {tab.count !== null && <span className="ap-tab-count">{tab.count}</span>}
               </button>
             ))}
           </div>
 
           {/* Tab Content */}
-          {activeTab === 'history' ? (
+          {activeTab === 'gantt' ? (
+            <div className="ap-gantt-content">
+              {ganttGroups.length === 0 ? (
+                <div className="ap-empty-state">
+                  <div className="ap-empty-icon">&#128202;</div>
+                  <h3>No files to display</h3>
+                  <p>Upload and process files to see the lifecycle Gantt view.</p>
+                </div>
+              ) : (
+                <div className="ap-gantt-table-wrapper">
+                  <table className="ap-gantt-table">
+                    <thead>
+                      <tr>
+                        <th className="ap-gantt-entity-col">Pillar / Data Entity / Source / Sub-Entity</th>
+                        <th className="ap-gantt-stage-col">Initial Load</th>
+                        <th className="ap-gantt-stage-col">Prevalidation</th>
+                        <th className="ap-gantt-stage-col">Conversion</th>
+                        <th className="ap-gantt-stage-col">Validation</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {ganttGroups.map((group) => {
+                        const stages = group.files.map(f => getLifecycleStage(f));
+                        return (
+                          <tr key={`${group.entityPrefix}|${group.source}`} className="ap-gantt-row">
+                            <td className="ap-gantt-entity-cell">
+                              <div className="ap-gantt-entity-info">
+                                <div className="ap-gantt-entity-breadcrumb">
+                                  <span className={`ap-module-badge ${group.module.toLowerCase()}`}>{group.module}</span>
+                                  <span className="ap-gantt-separator">&rsaquo;</span>
+                                  <span className="ap-gantt-entity-name">{group.entityDisplay}</span>
+                                </div>
+                                <div className="ap-gantt-entity-meta">
+                                  Source: {group.source}
+                                </div>
+                                <div className="ap-gantt-entity-meta">
+                                  {group.files.length} file(s)
+                                </div>
+                              </div>
+                            </td>
+                            {/* Initial Load */}
+                            <td className="ap-gantt-stage-cell">
+                              {group.files.map((file, idx) => {
+                                const stage = stages[idx].initialLoad;
+                                return (
+                                  <div key={file.key} className="ap-gantt-file-card">
+                                    <span className={`ap-gantt-status-badge ${stage.status}`}>
+                                      <span className={`ap-gantt-status-icon ${stage.status}`}></span>
+                                      {stage.status === 'pass' ? 'Pass' : stage.status === 'fail' ? 'Fail' : stage.status === 'processing' ? 'Processing' : 'Pending'}
+                                    </span>
+                                    <div className="ap-gantt-file-name" title={file.name}>{file.name}</div>
+                                    <div className="ap-gantt-file-date">{formatGanttDate(file.lastModified)}</div>
+                                    <button className="ap-gantt-view-link" onClick={() => setSelectedGanttFile(file)}>
+                                      View &#8599;
+                                    </button>
+                                  </div>
+                                );
+                              })}
+                            </td>
+                            {/* Prevalidation */}
+                            <td className="ap-gantt-stage-cell">
+                              {group.files.map((file, idx) => {
+                                const stage = stages[idx].prevalidation;
+                                return (
+                                  <div key={file.key} className="ap-gantt-file-card">
+                                    <span className={`ap-gantt-status-badge ${stage.status}`}>
+                                      <span className={`ap-gantt-status-icon ${stage.status}`}></span>
+                                      {stage.status === 'pass' ? 'Pass' : stage.status === 'fail' ? 'Fail' : stage.status === 'processing' ? 'Processing' : 'Pending'}
+                                    </span>
+                                    <div className="ap-gantt-file-name" title={file.name}>{file.name}</div>
+                                    <div className="ap-gantt-file-date">{formatGanttDate(file.lastModified)}</div>
+                                    <button className="ap-gantt-view-link" onClick={() => setSelectedGanttFile(file)}>
+                                      View &#8599;
+                                    </button>
+                                  </div>
+                                );
+                              })}
+                            </td>
+                            {/* Conversion */}
+                            <td className="ap-gantt-stage-cell">
+                              {group.files.map((file, idx) => {
+                                const stage = stages[idx].conversion;
+                                return (
+                                  <div key={file.key} className="ap-gantt-file-card">
+                                    <span className={`ap-gantt-status-badge ${stage.status}`}>
+                                      <span className={`ap-gantt-status-icon ${stage.status}`}></span>
+                                      {stage.status === 'pass' ? 'Pass' : stage.status === 'fail' ? 'Fail' : stage.status === 'processing' ? 'Processing' : 'Pending'}
+                                    </span>
+                                    <div className="ap-gantt-file-name" title={file.name}>{file.name}</div>
+                                    <div className="ap-gantt-file-date">{formatGanttDate(file.lastModified)}</div>
+                                    <button className="ap-gantt-view-link" onClick={() => setSelectedGanttFile(file)}>
+                                      View &#8599;
+                                    </button>
+                                  </div>
+                                );
+                              })}
+                            </td>
+                            {/* Validation */}
+                            <td className="ap-gantt-stage-cell">
+                              {group.files.map((file, idx) => {
+                                const stage = stages[idx].validation;
+                                return (
+                                  <div key={file.key} className={`ap-gantt-file-card ${stage.status === 'fail' ? 'has-error' : ''}`}>
+                                    <span className={`ap-gantt-status-badge ${stage.status}`}>
+                                      <span className={`ap-gantt-status-icon ${stage.status}`}></span>
+                                      {stage.status === 'pass' ? 'Pass' : stage.status === 'fail' ? 'Fail' : stage.status === 'processing' ? 'Processing' : 'Pending'}
+                                    </span>
+                                    <div className="ap-gantt-file-name" title={file.name}>{file.name}</div>
+                                    <div className="ap-gantt-file-date">{formatGanttDate(file.lastModified)}</div>
+                                    {file.status === 'failed' && file.errorMessage && (
+                                      <div className="ap-gantt-error-msg">{file.errorMessage}</div>
+                                    )}
+                                    <button className="ap-gantt-view-link" onClick={() => setSelectedGanttFile(file)}>
+                                      View &#8599;
+                                    </button>
+                                  </div>
+                                );
+                              })}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          ) : activeTab === 'history' ? (
             <div className="ap-history-content">
               {historyLoading ? (
                 <div className="ap-loading" style={{ padding: '40px' }}>
@@ -1695,6 +1922,183 @@ function DataFileDashboard() {
         file={previewFile}
         onDownload={handleDownloadPreviewFile}
       />
+
+      {/* File Detail Overlay (Gantt View drill-down) */}
+      {selectedGanttFile && (() => {
+        const file = selectedGanttFile;
+        const lifecycle = getLifecycleStage(file);
+        const stageEntries = [
+          { key: 'upload', label: 'Upload', sub: 'File received', status: lifecycle.initialLoad.status },
+          { key: 'validation', label: 'Validation', sub: 'Format & header checks', status: lifecycle.prevalidation.status },
+          { key: 'database', label: 'Database Upload', sub: 'Data insertion', status: lifecycle.conversion.status },
+          { key: 'complete', label: 'Complete', sub: 'Successfully processed', status: lifecycle.validation.status },
+        ];
+        const folderLabel = file.folder === 'processed' ? 'Success' : file.folder === 'input' ? 'Pending' : 'Failed';
+        const stageLabel = file.folder === 'processed' ? '4-Completed' : file.status === 'processing' ? '2-Processing' : file.folder === 'input' ? '1-Uploaded' : '3-Failed';
+        const s3Path = `s3://hacienda-erp-dev/${file.key}`;
+
+        return (
+          <div className="ap-file-detail-overlay" onClick={() => setSelectedGanttFile(null)}>
+            <div className="ap-file-detail-panel" onClick={e => e.stopPropagation()}>
+              {/* Header */}
+              <div className="ap-file-detail-header">
+                <button className="ap-file-detail-back" onClick={() => setSelectedGanttFile(null)}>
+                  &larr; Back to Dashboard
+                </button>
+                <div className="ap-file-detail-title-row">
+                  <span className="ap-file-detail-icon">&#128196;</span>
+                  <h2 className="ap-file-detail-title">{file.name}</h2>
+                  <span className={`ap-gantt-status-badge ${file.status === 'success' ? 'pass' : file.status}`}>
+                    {file.status === 'success' ? 'Uploaded' : file.status.charAt(0).toUpperCase() + file.status.slice(1)}
+                  </span>
+                </div>
+                <div className="ap-file-detail-subtitle">
+                  Uploaded {formatDate(file.lastModified)}
+                  {file.size ? ` \u2022 ${(file.size / (1024 * 1024)).toFixed(2)} MB` : ''}
+                </div>
+              </div>
+
+              {/* Metadata + Location cards */}
+              <div className="ap-file-detail-cards">
+                <div className="ap-file-detail-card">
+                  <h3 className="ap-file-detail-card-title">
+                    <span className="ap-file-detail-card-icon">&#128200;</span>
+                    File Metadata
+                  </h3>
+                  <div className="ap-file-detail-field">
+                    <span className="ap-file-detail-label">Pillar</span>
+                    <span className={`ap-module-badge ${file.parsed.module.toLowerCase()}`}>{file.parsed.module}</span>
+                  </div>
+                  <div className="ap-file-detail-field">
+                    <span className="ap-file-detail-label">Mock Number</span>
+                    <strong>{file.parsed.mockNumber}</strong>
+                  </div>
+                  <div className="ap-file-detail-field">
+                    <span className="ap-file-detail-label">Data Entity</span>
+                    <strong>{file.parsed.entityDisplay || file.parsed.entityPrefix}</strong>
+                  </div>
+                  <div className="ap-file-detail-field">
+                    <span className="ap-file-detail-label">Source</span>
+                    <strong>{file.parsed.source}</strong>
+                  </div>
+                  {file.rowCount ? (
+                    <div className="ap-file-detail-field">
+                      <span className="ap-file-detail-label">Row Count</span>
+                      <strong>{formatNumber(file.rowCount)}</strong>
+                    </div>
+                  ) : null}
+                </div>
+
+                <div className="ap-file-detail-card">
+                  <h3 className="ap-file-detail-card-title">
+                    <span className="ap-file-detail-card-icon">&#128193;</span>
+                    Current Location
+                  </h3>
+                  <div className="ap-file-detail-field">
+                    <span className="ap-file-detail-label">Folder Type</span>
+                    <strong>{folderLabel}</strong>
+                  </div>
+                  <div className="ap-file-detail-field">
+                    <span className="ap-file-detail-label">Stage</span>
+                    <strong>{stageLabel}</strong>
+                  </div>
+                  <div className="ap-file-detail-field">
+                    <span className="ap-file-detail-label">Full Path</span>
+                    <code className="ap-file-detail-path">{s3Path}</code>
+                  </div>
+                </div>
+              </div>
+
+              {/* Process Flow */}
+              <div className="ap-file-detail-card" style={{ marginTop: '16px' }}>
+                <h3 className="ap-file-detail-card-title">Process Flow</h3>
+                <div className="ap-process-flow">
+                  {stageEntries.map((stage, idx) => (
+                    <div key={stage.key} className="ap-process-flow-item">
+                      {idx > 0 && <span className="ap-process-flow-arrow">&rarr;</span>}
+                      <div className={`ap-process-flow-step ${stage.status}`}>
+                        <div className={`ap-process-flow-circle ${stage.status}`}>
+                          {stage.status === 'pass' ? '\u2713' : stage.status === 'fail' ? '\u2717' : stage.status === 'processing' ? '\u23F3' : '\u2022'}
+                        </div>
+                        <div className="ap-process-flow-label">{stage.label}</div>
+                        <div className="ap-process-flow-sub">{stage.sub}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Event Timeline */}
+              <div className="ap-file-detail-card" style={{ marginTop: '16px' }}>
+                <h3 className="ap-file-detail-card-title">
+                  <span className="ap-file-detail-card-icon">&#128336;</span>
+                  Event Timeline
+                </h3>
+                <div className="ap-event-timeline">
+                  <div className="ap-timeline-item">
+                    <div className={`ap-timeline-dot ${lifecycle.initialLoad.status}`}></div>
+                    <div className="ap-timeline-content">
+                      <strong>{lifecycle.initialLoad.status === 'pass' ? 'File uploaded successfully' : lifecycle.initialLoad.status === 'fail' ? 'File upload failed' : 'File uploading...'}</strong>
+                      <div className="ap-timeline-detail">{file.parsed.entityDisplay} file received</div>
+                      <code className="ap-timeline-path">s3://hacienda-erp-dev/InputFilesForProcessing/</code>
+                    </div>
+                    <div className="ap-timeline-time">{formatDate(file.lastModified)}</div>
+                  </div>
+
+                  {lifecycle.prevalidation.status !== 'pending' && (
+                    <div className="ap-timeline-item">
+                      <div className={`ap-timeline-dot ${lifecycle.prevalidation.status}`}></div>
+                      <div className="ap-timeline-content">
+                        <strong>{lifecycle.prevalidation.status === 'pass' ? 'Prevalidation passed' : lifecycle.prevalidation.status === 'fail' ? 'Prevalidation failed' : 'Validating...'}</strong>
+                        <div className="ap-timeline-detail">{file.parsed.entityDisplay} data validated</div>
+                      </div>
+                      <div className="ap-timeline-time">{formatDate(file.lastModified)}</div>
+                    </div>
+                  )}
+
+                  {lifecycle.conversion.status !== 'pending' && (
+                    <div className="ap-timeline-item">
+                      <div className={`ap-timeline-dot ${lifecycle.conversion.status}`}></div>
+                      <div className="ap-timeline-content">
+                        <strong>{lifecycle.conversion.status === 'pass' ? 'Database upload complete' : lifecycle.conversion.status === 'fail' ? 'Database upload failed' : 'Converting...'}</strong>
+                        <div className="ap-timeline-detail">Converting {file.parsed.entityDisplay} records</div>
+                        {file.rowCount ? <div className="ap-timeline-detail">{formatNumber(file.rowCount)} rows inserted</div> : null}
+                      </div>
+                      <div className="ap-timeline-time">{formatDate(file.lastModified)}</div>
+                    </div>
+                  )}
+
+                  {lifecycle.validation.status !== 'pending' && (
+                    <div className="ap-timeline-item">
+                      <div className={`ap-timeline-dot ${lifecycle.validation.status}`}></div>
+                      <div className="ap-timeline-content">
+                        <strong>{lifecycle.validation.status === 'pass' ? 'Validation completed' : 'Validation failed'}</strong>
+                        <div className="ap-timeline-detail">
+                          {lifecycle.validation.status === 'pass'
+                            ? `${file.rowCount ? formatNumber(file.rowCount) + ' ' : ''}records validated successfully`
+                            : file.errorMessage || 'Validation errors detected'}
+                        </div>
+                        {file.folder === 'processed' && (
+                          <code className="ap-timeline-path">s3://hacienda-erp-dev/{file.key}</code>
+                        )}
+                      </div>
+                      <div className="ap-timeline-time">{formatDate(file.lastModified)}</div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Error details if failed */}
+              {file.status === 'failed' && file.errorMessage && (
+                <div className="ap-file-detail-card ap-file-detail-error-card" style={{ marginTop: '16px' }}>
+                  <h3 className="ap-file-detail-card-title">Error Details</h3>
+                  <div className="ap-file-detail-error-msg">{file.errorMessage}</div>
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
