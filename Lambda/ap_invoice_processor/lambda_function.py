@@ -562,19 +562,20 @@ def process_single_file(bucket, file_info, connection_str, context=None, trigger
                     _batch_insert(cursor, conn, table_name, sql_columns, rows)
                     result["rowCount"] = len(rows)
 
-        # Step 5: Track file in SETUP_CONVERSION_PLAN_{MOCK}
+        # Step 5: Move to processed folder (organized by MODULE/MOCK/SOURCE/ENTITY)
+        dest_key = f"{PROCESSED_FOLDER}{parsed['module']}/{mock_number}/{source}/{entity_prefix}/{filename}"
+        move_file(bucket, file_key, dest_key)
+        print(f"  Moved to: {dest_key}")
+
+        # Step 6: Track file in SETUP_CONVERSION_PLAN_{MOCK}
+        # Pass dest_key so the table stores where the file lives now
         track_file_load(
             connection_str, mock_number, parsed, table_name,
             row_count=result["rowCount"], df=df,
             triggered_by=triggered_by,
-            file_key=file_key,
+            file_key=dest_key,
             file_size=file_info.get("size", 0),
         )
-
-        # Step 6: Move to processed folder (organized by MODULE/MOCK/SOURCE/ENTITY)
-        dest_key = f"{PROCESSED_FOLDER}{parsed['module']}/{mock_number}/{source}/{entity_prefix}/{filename}"
-        move_file(bucket, file_key, dest_key)
-        print(f"  Moved to: {dest_key}")
 
         result["status"] = "success"
         result["completedAt"] = datetime.utcnow().isoformat()

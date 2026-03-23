@@ -2144,7 +2144,7 @@ function DataFileDashboard() {
                   )}
                   {entry.S3SourceKey && (
                     <div className="ap-file-detail-field">
-                      <span className="ap-file-detail-label">S3 Source</span>
+                      <span className="ap-file-detail-label">File Location</span>
                       <code className="ap-file-detail-path">s3://hacienda-erp-dev/{entry.S3SourceKey}</code>
                     </div>
                   )}
