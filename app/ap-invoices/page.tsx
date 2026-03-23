@@ -7,6 +7,7 @@ import { fetchUserAttributes } from 'aws-amplify/auth';
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import Link from 'next/link';
 import { FilePreviewModal } from '../components/FilePreviewModal';
+import { getUserPermissions, isAdminUser } from '../admin/types';
 import outputs from '../../amplify_outputs.json';
 import './ap-invoices.css';
 
@@ -1146,6 +1147,34 @@ function DataFileDashboard() {
     });
   }, []);
 
+  // ─── BU Permission Enforcement ──────────────────────────────────────────
+  // Check if the current user can see a file/entry based on its BU values.
+  // Admins see everything. Users with no BU restrictions see everything.
+  // Users with assigned BUs only see files that match OR have no BU data.
+
+  const userBUFilter = useMemo(() => {
+    if (!userEmail) return null; // Not loaded yet — allow all
+    if (isAdminUser(userEmail)) return null; // Admin bypass
+
+    const perms = getUserPermissions(userEmail);
+    if (!perms || perms.allowedBusinessUnits.length === 0) return null; // No BU restrictions
+
+    // Normalize the 5-digit BU codes to plain numbers for comparison
+    // e.g. "00014" → "14", "00025" → "25"
+    const normalizedBUs = new Set(
+      perms.allowedBusinessUnits.map(bu => bu.replace(/^0+/, '') || '0')
+    );
+    return normalizedBUs;
+  }, [userEmail]);
+
+  // Check if a comma-separated BU string contains any of the user's allowed BUs
+  const canAccessBU = useCallback((buField: string | undefined | null): boolean => {
+    if (!userBUFilter) return true; // No filter = allow all
+    if (!buField || !buField.trim()) return true; // No BU on file = visible to all
+    const fileBUs = buField.split(',').map(b => b.trim());
+    return fileBUs.some(bu => userBUFilter.has(bu));
+  }, [userBUFilter]);
+
   // ─── Filtered files ──────────────────────────────────────────────────────
 
   const filteredFiles = useMemo(() => {
@@ -1214,6 +1243,9 @@ function DataFileDashboard() {
   const conversionPlanGroups = useMemo((): ConversionPlanGroup[] => {
     let result = [...conversionPlanData];
 
+    // BU permission enforcement — filter entries by user's allowed BUs
+    result = result.filter(e => canAccessBU(e.BU));
+
     if (filterModule !== 'all') result = result.filter(e => e.Module === filterModule);
     if (filterEntity !== 'all') result = result.filter(e => e.SubEntity === filterEntity);
     if (filterSource !== 'all') result = result.filter(e => e.SOURCE === filterSource);
@@ -1258,16 +1290,17 @@ function DataFileDashboard() {
       if (a.module !== b.module) return a.module.localeCompare(b.module);
       return a.entityDisplay.localeCompare(b.entityDisplay);
     });
-  }, [conversionPlanData, filterModule, filterEntity, filterSource, filterMock, searchQuery]);
+  }, [conversionPlanData, filterModule, filterEntity, filterSource, filterMock, searchQuery, canAccessBU]);
 
-  // Conversion plan stats for stat cards
+  // Conversion plan stats for stat cards (BU-filtered)
   const conversionPlanStats = useMemo(() => {
-    const total = conversionPlanData.length;
-    const loaded = conversionPlanData.filter(e => e.LoadedAt).length;
-    const uniqueMocks = new Set(conversionPlanData.map(e => e.MockNumber)).size;
-    const uniqueEntities = new Set(conversionPlanData.map(e => e.SubEntity)).size;
+    const filtered = conversionPlanData.filter(e => canAccessBU(e.BU));
+    const total = filtered.length;
+    const loaded = filtered.filter(e => e.LoadedAt).length;
+    const uniqueMocks = new Set(filtered.map(e => e.MockNumber)).size;
+    const uniqueEntities = new Set(filtered.map(e => e.SubEntity)).size;
     return { total, loaded, uniqueMocks, uniqueEntities };
-  }, [conversionPlanData]);
+  }, [conversionPlanData, canAccessBU]);
 
   // ─── Hierarchy tree builder ─────────────────────────────────────────────
   const hierarchyTree = useMemo((): HierarchyNode[] => {
@@ -1288,6 +1321,10 @@ function DataFileDashboard() {
 
     // Apply filters
     let data = [...hierarchyData];
+
+    // BU permission enforcement
+    data = data.filter(e => canAccessBU(e.BU));
+
     if (filterModule !== 'all') data = data.filter(e => toPillarForFilter(e.Module || e.Pillar || '') === filterModule);
     if (filterSource !== 'all') data = data.filter(e => e.SOURCE === filterSource);
     if (searchQuery.trim()) {
@@ -1436,7 +1473,7 @@ function DataFileDashboard() {
     }
 
     return moduleNodes;
-  }, [hierarchyData, filterModule, filterSource, searchQuery]);
+  }, [hierarchyData, filterModule, filterSource, searchQuery, canAccessBU]);
 
   const toggleHierarchyNode = useCallback((nodeId: string) => {
     setExpandedHierarchyNodes(prev => {
