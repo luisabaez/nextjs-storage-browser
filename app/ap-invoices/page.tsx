@@ -789,18 +789,31 @@ function DataFileDashboard() {
   const loadConversionPlan = useCallback(async (force = false) => {
     if (conversionPlanLoaded && !force) return;
     setConversionPlanLoading(true);
-    try {
-      const resp = await fetch(`${LAMBDA_URL}?action=conversionplan`);
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      const data = await resp.json();
-      setConversionPlanData(data.entries || []);
-      setConversionPlanMocks(data.mockTables || []);
-      setConversionPlanLoaded(true);
-      console.log(`[ConversionPlan] Loaded ${(data.entries || []).length} entries across ${(data.mockTables || []).length} mocks`);
-    } catch (err) {
-      console.warn('[ConversionPlan] Error loading:', err);
-    } finally {
-      setConversionPlanLoading(false);
+
+    // Retry with increasing timeout to handle Lambda VPC cold starts
+    const attempts = [60000, 90000];  // 60s, then 90s
+    for (let i = 0; i < attempts.length; i++) {
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), attempts[i]);
+        console.log(`[ConversionPlan] Fetching (attempt ${i + 1}, timeout ${attempts[i] / 1000}s)...`);
+        const resp = await fetch(`${LAMBDA_URL}?action=conversionplan`, { signal: controller.signal });
+        clearTimeout(timeoutId);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        setConversionPlanData(data.entries || []);
+        setConversionPlanMocks(data.mockTables || []);
+        setConversionPlanLoaded(true);
+        console.log(`[ConversionPlan] Loaded ${(data.entries || []).length} entries across ${(data.mockTables || []).length} mocks`);
+        setConversionPlanLoading(false);
+        return;
+      } catch (err) {
+        console.warn(`[ConversionPlan] Attempt ${i + 1} failed:`, err);
+        if (i === attempts.length - 1) {
+          // Last attempt failed
+          setConversionPlanLoading(false);
+        }
+      }
     }
   }, [conversionPlanLoaded]);
 
