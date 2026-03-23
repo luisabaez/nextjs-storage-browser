@@ -67,6 +67,21 @@ def parse_filename(filename):
         result["error"] = f"Unsupported file type (expected .csv or .xlsx): {name}"
         return result
 
+    # Strip version suffix (e.g. _V2, _v3, _V10) before pattern matching.
+    # Submitters append these to indicate corrected re-uploads.
+    # We preserve the original filename but parse against the base name.
+    ext = ".csv" if result["extension"] == "csv" else ".xlsx"
+    base_no_ext = name[: -len(ext)]
+    version_suffix = None
+    version_match = re.search(r'[_\-][Vv](\d+)$', base_no_ext)
+    if version_match:
+        version_suffix = version_match.group(0)          # e.g. "_V2"
+        result["file_version"] = int(version_match.group(1))
+        # Rebuild name without version suffix for pattern matching
+        name = base_no_ext[: version_match.start()] + ext
+    else:
+        result["file_version"] = 1
+
     # Check for excluded entities first
     if is_excluded(name.upper()):
         result["is_excluded"] = True
