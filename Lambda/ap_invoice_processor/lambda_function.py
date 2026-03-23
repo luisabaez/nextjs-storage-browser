@@ -753,15 +753,14 @@ def lambda_handler(event, context):
           f"module={filter_module}, entity={filter_entity}, "
           f"source={filter_source}, mock={filter_mock}")
 
-    # CORS headers
+    # Response headers — CORS is handled by Lambda Function URL config,
+    # so we only set Content-Type here. Adding duplicate CORS headers
+    # causes browsers to reject the response.
     headers = {
         "Content-Type": "application/json",
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type",
     }
 
-    # Handle OPTIONS (CORS preflight)
+    # Handle OPTIONS (CORS preflight) — handled by Function URL, but keep as fallback
     if event.get("requestContext", {}).get("http", {}).get("method") == "OPTIONS":
         return {"statusCode": 200, "headers": headers, "body": ""}
 
