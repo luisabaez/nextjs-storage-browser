@@ -886,6 +886,111 @@ def lambda_handler(event, context):
                 "body": json.dumps({"error": str(e)}),
             }
 
+    # ── HIERARCHY ACTION ──
+    # Returns ALL rows (loaded + expected-not-loaded) for the hierarchy view
+    if action == "hierarchy":
+        try:
+            conn_str = get_connection_string()
+            with pyodbc.connect(conn_str) as conn:
+                cursor = conn.cursor()
+
+                cursor.execute(
+                    "SELECT name FROM sys.tables "
+                    "WHERE name LIKE 'SETUP_CONVERSION_PLAN_MOCK%' "
+                    "ORDER BY name"
+                )
+                table_names = [row[0] for row in cursor.fetchall()]
+
+                select_cols = [
+                    "Pillar", "Module", "Entity", "SubEntity", "Data_Sources",
+                    "Table_Name", "SOURCE", "FileName", "BU", "LoadedAt",
+                    "LoadedBy", "FileTimestamp", "RowCount", "LoadVersion",
+                    "S3SourceKey", "FileSize", "LOAD_REQUIRED",
+                    "CONVERSION_TABLE_BU", "File_Expected",
+                ]
+
+                entries = []
+                mock_tables = []
+
+                for tbl in table_names:
+                    mock = tbl.replace("SETUP_CONVERSION_PLAN_", "")
+                    mock_tables.append(mock)
+
+                    if filter_mock and filter_mock != mock.upper():
+                        continue
+
+                    # Check which columns exist in this table
+                    cursor.execute(
+                        "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                        "WHERE TABLE_NAME = ?",
+                        (tbl,)
+                    )
+                    existing_cols = {row[0].upper(): row[0] for row in cursor.fetchall()}
+
+                    available_cols = [c for c in select_cols if c.upper() in existing_cols]
+                    avail_col_list = ", ".join(f"[{c}]" for c in available_cols)
+
+                    # Return ALL rows — loaded files OR expected files
+                    where_clauses = []
+                    params = []
+
+                    # Include rows that are expected OR have been loaded
+                    has_file_expected = "FILE_EXPECTED" in existing_cols
+                    has_loaded_at = "LOADEDAT" in existing_cols
+
+                    if has_file_expected and has_loaded_at:
+                        where_clauses.append(
+                            "([File_Expected] IN ('Yes', 'Y', 'YES') "
+                            "OR ([LoadedAt] IS NOT NULL AND [LoadedAt] != ''))"
+                        )
+                    elif has_file_expected:
+                        where_clauses.append("[File_Expected] IN ('Yes', 'Y', 'YES')")
+                    elif has_loaded_at:
+                        where_clauses.append(
+                            "[LoadedAt] IS NOT NULL AND [LoadedAt] != ''"
+                        )
+                    else:
+                        # Table has neither column — include all rows
+                        pass
+
+                    if filter_module and "MODULE" in existing_cols:
+                        where_clauses.append("[Module] = ?")
+                        params.append(filter_module)
+                    if filter_source and "SOURCE" in existing_cols:
+                        where_clauses.append("[SOURCE] = ?")
+                        params.append(filter_source)
+
+                    where_sql = (" AND ".join(where_clauses)) if where_clauses else "1=1"
+                    query = f"SELECT {avail_col_list} FROM [{tbl}] WHERE {where_sql}"
+                    cursor.execute(query, params)
+
+                    for row in cursor.fetchall():
+                        entry = {}
+                        for i, col in enumerate(available_cols):
+                            entry[col] = row[i] if row[i] is not None else ""
+                        for col in select_cols:
+                            if col not in entry:
+                                entry[col] = ""
+                        entry["MockNumber"] = mock
+                        entries.append(entry)
+
+            return {
+                "statusCode": 200,
+                "headers": headers,
+                "body": json.dumps({
+                    "entries": entries,
+                    "mockTables": mock_tables,
+                }, default=str),
+            }
+        except Exception as e:
+            tb = traceback.format_exc()
+            print(f"ERROR in hierarchy action: {e}\n{tb}")
+            return {
+                "statusCode": 500,
+                "headers": headers,
+                "body": json.dumps({"error": str(e)}),
+            }
+
     # ── STATUS ACTION ──
     if action == "status":
         try:

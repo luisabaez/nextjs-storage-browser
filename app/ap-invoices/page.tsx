@@ -104,6 +104,7 @@ interface ConversionPlanEntry {
   FileSize: string;
   LOAD_REQUIRED: string;
   CONVERSION_TABLE_BU: string;
+  File_Expected: string;
   MockNumber: string;
 }
 
@@ -225,7 +226,19 @@ const S3_FOLDERS = {
   unmatched: 'FailedUnmatchedFilenames/',
 };
 
-type TabId = 'all' | 'pending' | 'uploaded' | 'failed' | 'history' | 'gantt';
+type TabId = 'all' | 'pending' | 'uploaded' | 'failed' | 'history' | 'gantt' | 'hierarchy';
+
+interface HierarchyNode {
+  id: string;
+  level: 'module' | 'entity' | 'source' | 'subEntity' | 'file';
+  label: string;
+  pass: boolean;
+  progress: number;
+  totalExpected: number;
+  totalLoaded: number;
+  children: HierarchyNode[];
+  entry?: ConversionPlanEntry; // only for file-level nodes
+}
 
 interface GanttEntityGroup {
   module: string;
@@ -442,6 +455,10 @@ function DataFileDashboard() {
   const [conversionPlanLoaded, setConversionPlanLoaded] = useState(false);
   const [conversionPlanMocks, setConversionPlanMocks] = useState<string[]>([]);
   const [selectedConversionEntry, setSelectedConversionEntry] = useState<ConversionPlanEntry | null>(null);
+  const [hierarchyData, setHierarchyData] = useState<ConversionPlanEntry[]>([]);
+  const [hierarchyLoading, setHierarchyLoading] = useState(false);
+  const [hierarchyLoaded, setHierarchyLoaded] = useState(false);
+  const [expandedHierarchyNodes, setExpandedHierarchyNodes] = useState<Set<string>>(new Set());
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Fetch current user email for "triggered by" tracking
@@ -832,6 +849,42 @@ function DataFileDashboard() {
     }
   }, [activeTab, loadConversionPlan]);
 
+  // ─── Hierarchy Data (all expected + loaded files from SQL) ─────────────
+
+  const loadHierarchy = useCallback(async (force = false) => {
+    if (hierarchyLoaded && !force) return;
+    setHierarchyLoading(true);
+    const mockParam = filterMock !== 'all' ? `&mock=${filterMock}` : '';
+    const maxAttempts = 3;
+    const delays = [0, 5000, 10000];
+    for (let i = 0; i < maxAttempts; i++) {
+      try {
+        if (delays[i] > 0) await new Promise(r => setTimeout(r, delays[i]));
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 90000);
+        const resp = await fetch(`${LAMBDA_URL}?action=hierarchy${mockParam}`, { signal: controller.signal });
+        clearTimeout(timeoutId);
+        if (resp.status === 503) { if (i < maxAttempts - 1) continue; throw new Error('Lambda busy'); }
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        setHierarchyData(data.entries || []);
+        setHierarchyLoaded(true);
+        console.log(`[Hierarchy] Loaded ${(data.entries || []).length} entries`);
+        setHierarchyLoading(false);
+        return;
+      } catch (err: any) {
+        console.warn(`[Hierarchy] Attempt ${i + 1} failed:`, err?.message || err);
+        if (i === maxAttempts - 1) setHierarchyLoading(false);
+      }
+    }
+  }, [hierarchyLoaded, filterMock]);
+
+  useEffect(() => {
+    if (activeTab === 'hierarchy') {
+      loadHierarchy();
+    }
+  }, [activeTab, loadHierarchy]);
+
   // ─── Upload Files ────────────────────────────────────────────────────────
 
   const handleUploadFiles = useCallback(async (fileList: FileList | File[]) => {
@@ -1215,6 +1268,153 @@ function DataFileDashboard() {
     const uniqueEntities = new Set(conversionPlanData.map(e => e.SubEntity)).size;
     return { total, loaded, uniqueMocks, uniqueEntities };
   }, [conversionPlanData]);
+
+  // ─── Hierarchy tree builder ─────────────────────────────────────────────
+  const hierarchyTree = useMemo((): HierarchyNode[] => {
+    if (hierarchyData.length === 0) return [];
+
+    // Apply filters
+    let data = [...hierarchyData];
+    if (filterModule !== 'all') data = data.filter(e => e.Module === filterModule);
+    if (filterSource !== 'all') data = data.filter(e => e.SOURCE === filterSource);
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase();
+      data = data.filter(e =>
+        (e.Entity || '').toLowerCase().includes(q) ||
+        (e.SubEntity || '').toLowerCase().includes(q) ||
+        (e.FileName || '').toLowerCase().includes(q) ||
+        (e.Table_Name || '').toLowerCase().includes(q)
+      );
+    }
+
+    const isLoaded = (e: ConversionPlanEntry) => !!(e.LoadedAt && e.LoadedAt.trim());
+
+    // Build: Module → Entity → Source → SubEntity → Files
+    const moduleMap = new Map<string, ConversionPlanEntry[]>();
+    for (const entry of data) {
+      const mod = entry.Module || entry.Pillar || 'Unknown';
+      if (!moduleMap.has(mod)) moduleMap.set(mod, []);
+      moduleMap.get(mod)!.push(entry);
+    }
+
+    const moduleNodes: HierarchyNode[] = [];
+    for (const [mod, modEntries] of Array.from(moduleMap.entries()).sort((a, b) => a[0].localeCompare(b[0]))) {
+      const modLoaded = modEntries.filter(isLoaded).length;
+      const modTotal = modEntries.length;
+
+      // Group by Entity
+      const entityMap = new Map<string, ConversionPlanEntry[]>();
+      for (const e of modEntries) {
+        const ent = e.Entity || e.SubEntity || 'Unknown';
+        if (!entityMap.has(ent)) entityMap.set(ent, []);
+        entityMap.get(ent)!.push(e);
+      }
+
+      const entityNodes: HierarchyNode[] = [];
+      for (const [ent, entEntries] of Array.from(entityMap.entries()).sort((a, b) => a[0].localeCompare(b[0]))) {
+        const entLoaded = entEntries.filter(isLoaded).length;
+        const entTotal = entEntries.length;
+
+        // Group by Source
+        const sourceMap = new Map<string, ConversionPlanEntry[]>();
+        for (const e of entEntries) {
+          const src = e.SOURCE || e.Data_Sources || 'Unknown';
+          if (!sourceMap.has(src)) sourceMap.set(src, []);
+          sourceMap.get(src)!.push(e);
+        }
+
+        const sourceNodes: HierarchyNode[] = [];
+        for (const [src, srcEntries] of Array.from(sourceMap.entries()).sort((a, b) => a[0].localeCompare(b[0]))) {
+          const srcLoaded = srcEntries.filter(isLoaded).length;
+          const srcTotal = srcEntries.length;
+
+          // Group by SubEntity within source
+          const subMap = new Map<string, ConversionPlanEntry[]>();
+          for (const e of srcEntries) {
+            const sub = e.SubEntity || e.Table_Name || 'Files';
+            if (!subMap.has(sub)) subMap.set(sub, []);
+            subMap.get(sub)!.push(e);
+          }
+
+          const subNodes: HierarchyNode[] = [];
+          for (const [sub, subEntries] of Array.from(subMap.entries()).sort((a, b) => a[0].localeCompare(b[0]))) {
+            const subLoaded = subEntries.filter(isLoaded).length;
+            const subTotal = subEntries.length;
+
+            const fileNodes: HierarchyNode[] = subEntries.map((e, idx) => ({
+              id: `file-${mod}-${ent}-${src}-${sub}-${idx}`,
+              level: 'file' as const,
+              label: e.FileName || e.Table_Name || 'Unknown',
+              pass: isLoaded(e),
+              progress: isLoaded(e) ? 100 : 0,
+              totalExpected: 1,
+              totalLoaded: isLoaded(e) ? 1 : 0,
+              children: [],
+              entry: e,
+            }));
+
+            subNodes.push({
+              id: `sub-${mod}-${ent}-${src}-${sub}`,
+              level: 'subEntity',
+              label: sub,
+              pass: subLoaded === subTotal && subTotal > 0,
+              progress: subTotal > 0 ? Math.round(subLoaded / subTotal * 100) : 0,
+              totalExpected: subTotal,
+              totalLoaded: subLoaded,
+              children: fileNodes,
+            });
+          }
+
+          // If only one subEntity that matches the entity, skip the sub level
+          const children = subNodes.length === 1 && subNodes[0].label === ent ? subNodes[0].children : subNodes;
+
+          sourceNodes.push({
+            id: `src-${mod}-${ent}-${src}`,
+            level: 'source',
+            label: src,
+            pass: srcLoaded === srcTotal && srcTotal > 0,
+            progress: srcTotal > 0 ? Math.round(srcLoaded / srcTotal * 100) : 0,
+            totalExpected: srcTotal,
+            totalLoaded: srcLoaded,
+            children,
+          });
+        }
+
+        entityNodes.push({
+          id: `ent-${mod}-${ent}`,
+          level: 'entity',
+          label: ent,
+          pass: entLoaded === entTotal && entTotal > 0,
+          progress: entTotal > 0 ? Math.round(entLoaded / entTotal * 100) : 0,
+          totalExpected: entTotal,
+          totalLoaded: entLoaded,
+          children: sourceNodes,
+        });
+      }
+
+      moduleNodes.push({
+        id: `mod-${mod}`,
+        level: 'module',
+        label: mod,
+        pass: modLoaded === modTotal && modTotal > 0,
+        progress: modTotal > 0 ? Math.round(modLoaded / modTotal * 100) : 0,
+        totalExpected: modTotal,
+        totalLoaded: modLoaded,
+        children: entityNodes,
+      });
+    }
+
+    return moduleNodes;
+  }, [hierarchyData, filterModule, filterSource, searchQuery]);
+
+  const toggleHierarchyNode = useCallback((nodeId: string) => {
+    setExpandedHierarchyNodes(prev => {
+      const next = new Set(prev);
+      if (next.has(nodeId)) next.delete(nodeId);
+      else next.add(nodeId);
+      return next;
+    });
+  }, []);
 
   // Legacy gantt grouping (kept for backward compat with other tabs)
   const ganttGroups = useMemo((): GanttEntityGroup[] => {
@@ -1655,6 +1855,7 @@ function DataFileDashboard() {
           <div className="ap-tab-list">
             {([
               { id: 'gantt' as TabId, label: 'Gantt View', count: null },
+              { id: 'hierarchy' as TabId, label: 'Hierarchy View', count: null },
               { id: 'all' as TabId, label: 'All Files', count: stats.total },
               { id: 'pending' as TabId, label: 'Pending', count: stats.pending },
               { id: 'uploaded' as TabId, label: 'Processed', count: stats.processed },
@@ -1802,6 +2003,117 @@ function DataFileDashboard() {
                     </tbody>
                   </table>
                 </div>
+              )}
+            </div>
+          ) : activeTab === 'hierarchy' ? (
+            <div className="ap-hierarchy-content">
+              {hierarchyLoading ? (
+                <div className="ap-loading" style={{ padding: '40px 0' }}>
+                  <span className="ap-spinner"></span>
+                  Loading hierarchy data...
+                </div>
+              ) : hierarchyTree.length === 0 ? (
+                <div className="ap-empty-state">
+                  <div className="ap-empty-icon">&#128202;</div>
+                  <h3>No hierarchy data</h3>
+                  <p>Select a mock number to view the file hierarchy.</p>
+                </div>
+              ) : (
+                <>
+                  <div className="ap-hierarchy-header">
+                    <div className="ap-hierarchy-col-name">Pillar &gt; Data Entity &gt; Source &gt; Sub-Data Entity</div>
+                    <div className="ap-hierarchy-col-status">Pass/Fail</div>
+                    <div className="ap-hierarchy-col-progress">Progress</div>
+                  </div>
+                  <div className="ap-hierarchy-tree">
+                    {(() => {
+                      const renderNode = (node: HierarchyNode, depth: number = 0): React.ReactNode => {
+                        const isExpanded = expandedHierarchyNodes.has(node.id);
+                        const hasChildren = node.children.length > 0;
+                        const isFile = node.level === 'file';
+                        const indent = depth * 24;
+
+                        if (isFile && node.entry) {
+                          const e = node.entry;
+                          const sizeMB = e.FileSize ? (parseInt(e.FileSize) / (1024 * 1024)).toFixed(2) : null;
+                          return (
+                            <div key={node.id} className="ap-hierarchy-row ap-hierarchy-file-row" style={{ paddingLeft: `${indent + 32}px` }}>
+                              <div className="ap-hierarchy-col-name">
+                                <span className="ap-hierarchy-file-icon">&#128196;</span>
+                                <button className="ap-hierarchy-file-link" onClick={() => setSelectedConversionEntry(e)}>
+                                  {e.FileName || e.Table_Name}
+                                </button>
+                                <span className="ap-hierarchy-file-meta">
+                                  {sizeMB ? `${sizeMB} MB` : ''}{sizeMB && e.LoadedAt ? ' \u2022 ' : ''}{e.LoadedAt ? formatConversionDate(e.LoadedAt) : ''}
+                                </span>
+                              </div>
+                              <div className="ap-hierarchy-col-status">
+                                {node.pass ? (
+                                  <span className="ap-hierarchy-badge-pass">&#10003; Pass</span>
+                                ) : (
+                                  <span className="ap-hierarchy-badge-fail">Pending</span>
+                                )}
+                              </div>
+                              <div className="ap-hierarchy-col-progress">
+                                <span className="ap-hierarchy-progress-text">{node.progress}%</span>
+                              </div>
+                            </div>
+                          );
+                        }
+
+                        const levelClass = node.level === 'module' ? 'ap-hierarchy-module-row' : '';
+
+                        return (
+                          <div key={node.id}>
+                            <div
+                              className={`ap-hierarchy-row ${levelClass}`}
+                              style={{ paddingLeft: `${indent}px` }}
+                              onClick={() => hasChildren && toggleHierarchyNode(node.id)}
+                            >
+                              <div className="ap-hierarchy-col-name">
+                                {node.level === 'module' && (
+                                  <span className={`ap-module-badge ${node.label.toLowerCase()}`}>{node.label.length <= 3 ? node.label : node.label.substring(0, 3).toUpperCase()}</span>
+                                )}
+                                <span className="ap-hierarchy-label">
+                                  {node.level === 'module' ? `Pillar: ${node.label}` :
+                                   node.level === 'entity' ? `Data Entity: ${node.label}` :
+                                   node.level === 'source' ? `Source: ${node.label}` :
+                                   node.label}
+                                </span>
+                              </div>
+                              <div className="ap-hierarchy-col-status">
+                                {node.pass ? (
+                                  <span className="ap-hierarchy-badge-pass">Pass</span>
+                                ) : (
+                                  <span className="ap-hierarchy-badge-fail">Fail</span>
+                                )}
+                              </div>
+                              <div className="ap-hierarchy-col-progress">
+                                {(node.level === 'module' || node.level === 'entity') && (
+                                  <div className="ap-hierarchy-progress-bar-wrap">
+                                    <div className="ap-hierarchy-progress-bar" style={{ width: `${node.progress}%` }}></div>
+                                  </div>
+                                )}
+                                <span className="ap-hierarchy-progress-text">{node.progress}%</span>
+                                {hasChildren && (
+                                  <button className="ap-hierarchy-expand" aria-label="Expand">
+                                    {isExpanded ? '\u2303' : '\u2304'}
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                            {isExpanded && hasChildren && (
+                              <div className="ap-hierarchy-children">
+                                {node.children.map(child => renderNode(child, depth + 1))}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      };
+                      return hierarchyTree.map(node => renderNode(node, 0));
+                    })()}
+                  </div>
+                </>
               )}
             </div>
           ) : activeTab === 'history' ? (
