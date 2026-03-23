@@ -208,8 +208,9 @@ def upsert_conversion_plan_row(cursor, mock_number, parsed, table_name,
     """
     Insert or update a row in SETUP_CONVERSION_PLAN_{MOCK} for a loaded file.
 
-    If a row with the same Table_Name already exists, update it with new
-    version info. Otherwise insert a new row.
+    Keyed on FileName so each distinct file version (original, _V2, _V3)
+    gets its own row.  If the exact same filename is uploaded again
+    (duplicate upload), the existing row is updated instead of duplicated.
 
     Args:
         cursor: pyodbc cursor
@@ -219,37 +220,39 @@ def upsert_conversion_plan_row(cursor, mock_number, parsed, table_name,
         row_count: number of rows loaded
         df: pandas DataFrame of the file data (for BU extraction)
         triggered_by: who triggered the load
-        file_key: S3 source key
+        file_key: S3 destination key (processed folder)
         file_size: file size in bytes
     """
     setup_table = _get_setup_table_name(mock_number)
     now = datetime.utcnow().isoformat()
+    original_filename = parsed.get("filename", "")
 
     # Extract BU from file data if available
     bu_value = None
     if df is not None:
         bu_value = _extract_bu_from_dataframe(df)
 
-    # Check if this table_name already has a row
-    cursor.execute(
-        f"SELECT [LoadedAt], [LoadVersion] FROM [{setup_table}] "
-        f"WHERE [Table_Name] = ?",
-        (table_name,)
-    )
-    existing = cursor.fetchone()
-
     entity_prefix = parsed.get("entity_prefix", "")
     source = parsed.get("source", "")
     module = parsed.get("module", "")
     entity_display = parsed.get("entity_display", "")
+    file_version = parsed.get("file_version", 1)
     file_timestamp = ""
     if parsed.get("date"):
         file_timestamp = parsed["date"]
         if parsed.get("time"):
             file_timestamp += f" {parsed['time']}"
 
+    # Check if this exact filename already has a row (duplicate upload detection)
+    cursor.execute(
+        f"SELECT [LoadedAt], [LoadVersion] FROM [{setup_table}] "
+        f"WHERE [FileName] = ?",
+        (original_filename,)
+    )
+    existing = cursor.fetchone()
+
     if existing:
-        # Update existing row — increment version, preserve previous load time
+        # Same file uploaded again — update in place, increment LoadVersion
         previous_loaded_at = existing[0] or ""
         current_version = int(existing[1] or "0")
         new_version = current_version + 1
@@ -271,20 +274,19 @@ def upsert_conversion_plan_row(cursor, mock_number, parsed, table_name,
             file_key, str(file_size),
         ]
 
-        # Also update BU if we extracted one
         if bu_value:
             update_sql += ", [BU] = ?"
             params.append(bu_value)
 
-        update_sql += " WHERE [Table_Name] = ?"
-        params.append(table_name)
+        update_sql += " WHERE [FileName] = ?"
+        params.append(original_filename)
 
         cursor.execute(update_sql, params)
         cursor.connection.commit()
-        print(f"  Updated {setup_table}: {table_name} (version {new_version})")
+        print(f"  Updated {setup_table}: {original_filename} (re-upload #{new_version})")
 
     else:
-        # Insert new row
+        # New file (or new version like _V2, _V3) — insert a new row
         values = {
             "Pillar": _get_pillar_from_module(module),
             "Module": module,
@@ -294,7 +296,7 @@ def upsert_conversion_plan_row(cursor, mock_number, parsed, table_name,
             "LOAD_REQUIRED": "YES",
             "SubEntity": entity_prefix,
             "SOURCE": source,
-            "FileName": parsed.get("filename", ""),
+            "FileName": original_filename,
             "BU": bu_value or "",
             "LoadedAt": now,
             "LoadedBy": triggered_by,
@@ -306,7 +308,6 @@ def upsert_conversion_plan_row(cursor, mock_number, parsed, table_name,
             "FileSize": str(file_size),
         }
 
-        # Build INSERT statement with only the columns we have values for
         cols = list(values.keys())
         col_list = ", ".join(f"[{c}]" for c in cols)
         placeholders = ", ".join(["?"] * len(cols))
@@ -318,7 +319,8 @@ def upsert_conversion_plan_row(cursor, mock_number, parsed, table_name,
         )
         cursor.execute(insert_sql, vals)
         cursor.connection.commit()
-        print(f"  Inserted into {setup_table}: {table_name} (version 1)")
+        print(f"  Inserted into {setup_table}: {original_filename} "
+              f"(file version {file_version}, table: {table_name})")
 
 
 def track_file_load(connection_str, mock_number, parsed, table_name,

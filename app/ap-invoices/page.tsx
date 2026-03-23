@@ -1192,7 +1192,13 @@ function DataFileDashboard() {
 
     const groups = Array.from(groupMap.values());
     groups.forEach(group => {
-      group.entries.sort((a, b) => parseInt(a.LoadVersion || '1') - parseInt(b.LoadVersion || '1'));
+      // Sort by file timestamp (chronological), then by filename for ties
+      group.entries.sort((a, b) => {
+        const tsA = a.FileTimestamp || a.LoadedAt || '';
+        const tsB = b.FileTimestamp || b.LoadedAt || '';
+        if (tsA !== tsB) return tsA.localeCompare(tsB);
+        return (a.FileName || '').localeCompare(b.FileName || '');
+      });
     });
 
     return groups.sort((a, b) => {
