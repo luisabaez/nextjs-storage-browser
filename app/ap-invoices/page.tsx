@@ -1273,9 +1273,22 @@ function DataFileDashboard() {
   const hierarchyTree = useMemo((): HierarchyNode[] => {
     if (hierarchyData.length === 0) return [];
 
+    // Map module to pillar for filtering
+    const toPillarForFilter = (mod: string): string => {
+      const m = (mod || '').toUpperCase().trim();
+      if (['FIN', 'AP', 'AR', 'GL', 'FA', 'PPM'].includes(m)) return 'FIN';
+      if (['HCM', 'ABSENCE', 'BENEFITS', 'COMPENSATION', 'CORE HR', 'LEARN',
+           'PAYROLL', 'PERFORMANCE', 'TIME AND LABOR'].includes(m)) return 'HCM';
+      if (['SCM', 'PO', 'INV', 'ITEMS', 'PROCUREMENT CONTRACT', 'SETUP'].includes(m)) return 'SCM';
+      if (m.startsWith('FIN')) return 'FIN';
+      if (m.startsWith('HCM')) return 'HCM';
+      if (m.startsWith('SCM')) return 'SCM';
+      return 'FIN';
+    };
+
     // Apply filters
     let data = [...hierarchyData];
-    if (filterModule !== 'all') data = data.filter(e => e.Module === filterModule);
+    if (filterModule !== 'all') data = data.filter(e => toPillarForFilter(e.Module || e.Pillar || '') === filterModule);
     if (filterSource !== 'all') data = data.filter(e => e.SOURCE === filterSource);
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
@@ -1289,12 +1302,30 @@ function DataFileDashboard() {
 
     const isLoaded = (e: ConversionPlanEntry) => !!(e.LoadedAt && e.LoadedAt.trim());
 
-    // Build: Module → Entity → Source → SubEntity → Files
+    // Map all module/pillar values to the three standard pillars
+    const toPillar = (mod: string): string => {
+      const m = (mod || '').toUpperCase().trim();
+      // FIN pillar
+      if (['FIN', 'AP', 'AR', 'GL', 'FA', 'PPM'].includes(m)) return 'FIN';
+      // HCM pillar
+      if (['HCM', 'ABSENCE', 'BENEFITS', 'COMPENSATION', 'CORE HR', 'LEARN',
+           'PAYROLL', 'PERFORMANCE', 'TIME AND LABOR'].includes(m)) return 'HCM';
+      // SCM pillar
+      if (['SCM', 'PO', 'INV', 'ITEMS', 'PROCUREMENT CONTRACT', 'SETUP'].includes(m)) return 'SCM';
+      // Fallback: check Pillar field or guess from first chars
+      if (m.startsWith('FIN')) return 'FIN';
+      if (m.startsWith('HCM')) return 'HCM';
+      if (m.startsWith('SCM')) return 'SCM';
+      return 'FIN'; // default
+    };
+
+    // Build: Pillar (FIN/HCM/SCM) → Entity → Source → SubEntity → Files
     const moduleMap = new Map<string, ConversionPlanEntry[]>();
     for (const entry of data) {
-      const mod = entry.Module || entry.Pillar || 'Unknown';
-      if (!moduleMap.has(mod)) moduleMap.set(mod, []);
-      moduleMap.get(mod)!.push(entry);
+      const rawMod = entry.Module || entry.Pillar || 'Unknown';
+      const pillar = toPillar(rawMod);
+      if (!moduleMap.has(pillar)) moduleMap.set(pillar, []);
+      moduleMap.get(pillar)!.push(entry);
     }
 
     const moduleNodes: HierarchyNode[] = [];
