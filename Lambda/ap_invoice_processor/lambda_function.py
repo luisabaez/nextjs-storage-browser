@@ -47,6 +47,9 @@ from table_definitions import get_create_table_sql as legacy_get_create_table_sq
 # New column registry for non-legacy entities
 from column_registry import get_column_mapping
 
+# Conversion plan tracking — auto-populates SETUP_CONVERSION_PLAN_{MOCK}
+from conversion_plan_tracker import track_file_load
+
 # ─── Configuration ────────────────────────────────────────────────────────────
 
 DEFAULT_BUCKET = "hacienda-erp-dev"
@@ -385,7 +388,7 @@ def ensure_table_exists_dynamic(cursor, table_name, sql_columns):
 
 # ─── Processing Logic ─────────────────────────────────────────────────────────
 
-def process_single_file(bucket, file_info, connection_str, context=None):
+def process_single_file(bucket, file_info, connection_str, context=None, triggered_by=""):
     """
     Process a single data file (CSV or XLSX).
 
@@ -559,7 +562,16 @@ def process_single_file(bucket, file_info, connection_str, context=None):
                     _batch_insert(cursor, conn, table_name, sql_columns, rows)
                     result["rowCount"] = len(rows)
 
-        # Step 5: Move to processed folder (organized by MODULE/MOCK/SOURCE/ENTITY)
+        # Step 5: Track file in SETUP_CONVERSION_PLAN_{MOCK}
+        track_file_load(
+            connection_str, mock_number, parsed, table_name,
+            row_count=result["rowCount"], df=df,
+            triggered_by=triggered_by,
+            file_key=file_key,
+            file_size=file_info.get("size", 0),
+        )
+
+        # Step 6: Move to processed folder (organized by MODULE/MOCK/SOURCE/ENTITY)
         dest_key = f"{PROCESSED_FOLDER}{parsed['module']}/{mock_number}/{source}/{entity_prefix}/{filename}"
         move_file(bucket, file_key, dest_key)
         print(f"  Moved to: {dest_key}")
@@ -772,6 +784,102 @@ def lambda_handler(event, context):
                 }),
             }
         except Exception as e:
+            return {
+                "statusCode": 500,
+                "headers": headers,
+                "body": json.dumps({"error": str(e)}),
+            }
+
+    # ── CONVERSION PLAN ACTION ──
+    if action == "conversionplan":
+        try:
+            conn_str = get_connection_string()
+            with pyodbc.connect(conn_str) as conn:
+                cursor = conn.cursor()
+
+                # Discover all SETUP_CONVERSION_PLAN_MOCK* tables
+                cursor.execute(
+                    "SELECT name FROM sys.tables "
+                    "WHERE name LIKE 'SETUP_CONVERSION_PLAN_MOCK%' "
+                    "ORDER BY name"
+                )
+                table_names = [row[0] for row in cursor.fetchall()]
+
+                select_cols = [
+                    "Pillar", "Module", "Entity", "SubEntity", "Data_Sources",
+                    "Table_Name", "SOURCE", "FileName", "BU", "LoadedAt",
+                    "LoadedBy", "FileTimestamp", "RowCount", "LoadVersion",
+                    "PreviousLoadedAt", "S3SourceKey", "FileSize",
+                    "LOAD_REQUIRED", "CONVERSION_TABLE_BU",
+                ]
+                col_list = ", ".join(f"[{c}]" for c in select_cols)
+
+                entries = []
+                mock_tables = []
+
+                for tbl in table_names:
+                    # Extract mock number from table name
+                    mock = tbl.replace("SETUP_CONVERSION_PLAN_", "")
+                    mock_tables.append(mock)
+
+                    if filter_mock and filter_mock != mock.upper():
+                        continue  # Skip this table entirely if mock filter doesn't match
+
+                    # Check which of our desired columns actually exist in this table
+                    cursor.execute(
+                        "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                        "WHERE TABLE_NAME = ?",
+                        (tbl,)
+                    )
+                    existing_cols = {row[0].upper(): row[0] for row in cursor.fetchall()}
+
+                    # Only query columns that exist — skip tables without LoadedAt
+                    if "LOADEDAT" not in existing_cols:
+                        continue
+
+                    available_cols = [c for c in select_cols if c.upper() in existing_cols]
+                    avail_col_list = ", ".join(f"[{c}]" for c in available_cols)
+
+                    # Apply optional server-side filters
+                    where_clauses = ["[LoadedAt] IS NOT NULL", "[LoadedAt] != ''"]
+                    params = []
+
+                    if filter_module and "MODULE" in existing_cols:
+                        where_clauses.append("[Module] = ?")
+                        params.append(filter_module)
+                    if filter_entity and "SUBENTITY" in existing_cols:
+                        where_clauses.append("[SubEntity] = ?")
+                        params.append(filter_entity)
+                    if filter_source and "SOURCE" in existing_cols:
+                        where_clauses.append("[SOURCE] = ?")
+                        params.append(filter_source)
+
+                    where_sql = " AND ".join(where_clauses)
+                    query = f"SELECT {avail_col_list} FROM [{tbl}] WHERE {where_sql}"
+                    cursor.execute(query, params)
+
+                    for row in cursor.fetchall():
+                        entry = {}
+                        for i, col in enumerate(available_cols):
+                            entry[col] = row[i] if row[i] is not None else ""
+                        # Fill missing columns with empty string
+                        for col in select_cols:
+                            if col not in entry:
+                                entry[col] = ""
+                        entry["MockNumber"] = mock
+                        entries.append(entry)
+
+            return {
+                "statusCode": 200,
+                "headers": headers,
+                "body": json.dumps({
+                    "entries": entries,
+                    "mockTables": mock_tables,
+                }, default=str),
+            }
+        except Exception as e:
+            tb = traceback.format_exc()
+            print(f"ERROR in conversionplan action: {e}\n{tb}")
             return {
                 "statusCode": 500,
                 "headers": headers,
@@ -1076,7 +1184,7 @@ def lambda_handler(event, context):
                     status["files"][si]["startedAt"] = datetime.utcnow().isoformat()
                     write_status(bucket, status)
 
-                    result = process_single_file(bucket, file_info, connection_str, context)
+                    result = process_single_file(bucket, file_info, connection_str, context, triggered_by=triggered_by)
 
                     status["files"][si] = result
                     status["processedFiles"] = sum(

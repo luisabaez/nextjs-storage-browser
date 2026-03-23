@@ -84,6 +84,38 @@ interface HistoryRun {
   files: ProcessingFileStatus[];
 }
 
+interface ConversionPlanEntry {
+  Pillar: string;
+  Module: string;
+  Entity: string;
+  SubEntity: string;
+  Data_Sources: string;
+  Table_Name: string;
+  SOURCE: string;
+  FileName: string;
+  BU: string;
+  LoadedAt: string;
+  LoadedBy: string;
+  FileTimestamp: string;
+  RowCount: string;
+  LoadVersion: string;
+  PreviousLoadedAt: string;
+  S3SourceKey: string;
+  FileSize: string;
+  LOAD_REQUIRED: string;
+  CONVERSION_TABLE_BU: string;
+  MockNumber: string;
+}
+
+interface ConversionPlanGroup {
+  module: string;
+  pillar: string;
+  entityDisplay: string;
+  subEntity: string;
+  source: string;
+  entries: ConversionPlanEntry[];
+}
+
 // ─── Entity Registry (mirrors Python entity_registry.py) ────────────────────
 
 interface EntityInfo {
@@ -405,6 +437,11 @@ function DataFileDashboard() {
   const [uploadFiles, setUploadFiles] = useState<{id: string; name: string; size: number; progress: number; status: 'pending' | 'uploading' | 'completed' | 'error'}[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
   const [selectedGanttFile, setSelectedGanttFile] = useState<APFile | null>(null);
+  const [conversionPlanData, setConversionPlanData] = useState<ConversionPlanEntry[]>([]);
+  const [conversionPlanLoading, setConversionPlanLoading] = useState(false);
+  const [conversionPlanLoaded, setConversionPlanLoaded] = useState(false);
+  const [conversionPlanMocks, setConversionPlanMocks] = useState<string[]>([]);
+  const [selectedConversionEntry, setSelectedConversionEntry] = useState<ConversionPlanEntry | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Fetch current user email for "triggered by" tracking
@@ -747,6 +784,32 @@ function DataFileDashboard() {
     }
   }, [activeTab, loadHistory]);
 
+  // ─── Conversion Plan (Gantt data from SQL) ──────────────────────────────
+
+  const loadConversionPlan = useCallback(async (force = false) => {
+    if (conversionPlanLoaded && !force) return;
+    setConversionPlanLoading(true);
+    try {
+      const resp = await fetch(`${LAMBDA_URL}?action=conversionplan`);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = await resp.json();
+      setConversionPlanData(data.entries || []);
+      setConversionPlanMocks(data.mockTables || []);
+      setConversionPlanLoaded(true);
+      console.log(`[ConversionPlan] Loaded ${(data.entries || []).length} entries across ${(data.mockTables || []).length} mocks`);
+    } catch (err) {
+      console.warn('[ConversionPlan] Error loading:', err);
+    } finally {
+      setConversionPlanLoading(false);
+    }
+  }, [conversionPlanLoaded]);
+
+  useEffect(() => {
+    if (activeTab === 'gantt') {
+      loadConversionPlan();
+    }
+  }, [activeTab, loadConversionPlan]);
+
   // ─── Upload Files ────────────────────────────────────────────────────────
 
   const handleUploadFiles = useCallback(async (fileList: FileList | File[]) => {
@@ -1071,8 +1134,62 @@ function DataFileDashboard() {
 
   // ─── Gantt grouping ─────────────────────────────────────────────────────
 
+  // ─── Conversion Plan Gantt grouping ─────────────────────────────────────
+
+  const conversionPlanGroups = useMemo((): ConversionPlanGroup[] => {
+    let result = [...conversionPlanData];
+
+    if (filterModule !== 'all') result = result.filter(e => e.Module === filterModule);
+    if (filterEntity !== 'all') result = result.filter(e => e.SubEntity === filterEntity);
+    if (filterSource !== 'all') result = result.filter(e => e.SOURCE === filterSource);
+    if (filterMock !== 'all') result = result.filter(e => e.MockNumber === filterMock);
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase();
+      result = result.filter(e =>
+        (e.Table_Name || '').toLowerCase().includes(q) ||
+        (e.FileName || '').toLowerCase().includes(q) ||
+        (e.Entity || '').toLowerCase().includes(q)
+      );
+    }
+
+    const groupMap = new Map<string, ConversionPlanGroup>();
+    for (const entry of result) {
+      const key = `${entry.Module}|${entry.Entity}|${entry.SOURCE}`;
+      if (!groupMap.has(key)) {
+        groupMap.set(key, {
+          module: entry.Module,
+          pillar: entry.Pillar || getPillarName(entry.Module),
+          entityDisplay: entry.Entity || entry.SubEntity,
+          subEntity: entry.SubEntity,
+          source: entry.SOURCE || entry.Data_Sources,
+          entries: [],
+        });
+      }
+      groupMap.get(key)!.entries.push(entry);
+    }
+
+    const groups = Array.from(groupMap.values());
+    groups.forEach(group => {
+      group.entries.sort((a, b) => parseInt(a.LoadVersion || '1') - parseInt(b.LoadVersion || '1'));
+    });
+
+    return groups.sort((a, b) => {
+      if (a.module !== b.module) return a.module.localeCompare(b.module);
+      return a.entityDisplay.localeCompare(b.entityDisplay);
+    });
+  }, [conversionPlanData, filterModule, filterEntity, filterSource, filterMock, searchQuery]);
+
+  // Conversion plan stats for stat cards
+  const conversionPlanStats = useMemo(() => {
+    const total = conversionPlanData.length;
+    const loaded = conversionPlanData.filter(e => e.LoadedAt).length;
+    const uniqueMocks = new Set(conversionPlanData.map(e => e.MockNumber)).size;
+    const uniqueEntities = new Set(conversionPlanData.map(e => e.SubEntity)).size;
+    return { total, loaded, uniqueMocks, uniqueEntities };
+  }, [conversionPlanData]);
+
+  // Legacy gantt grouping (kept for backward compat with other tabs)
   const ganttGroups = useMemo((): GanttEntityGroup[] => {
-    // Apply same filters as filteredFiles but skip tab filter
     let result = [...files];
     if (filterModule !== 'all') result = result.filter(f => f.parsed.module === filterModule);
     if (filterEntity !== 'all') result = result.filter(f => f.parsed.entityPrefix === filterEntity);
@@ -1083,34 +1200,17 @@ function DataFileDashboard() {
       const q = searchQuery.toLowerCase();
       result = result.filter(f => f.name.toLowerCase().includes(q));
     }
-
-    // Group by entity + source
     const groupMap = new Map<string, GanttEntityGroup>();
     for (const file of result) {
       const key = `${file.parsed.entityPrefix}|${file.parsed.source}`;
       if (!groupMap.has(key)) {
-        groupMap.set(key, {
-          module: file.parsed.module,
-          entityDisplay: file.parsed.entityDisplay || file.parsed.entityPrefix,
-          entityPrefix: file.parsed.entityPrefix,
-          source: file.parsed.source,
-          files: [],
-        });
+        groupMap.set(key, { module: file.parsed.module, entityDisplay: file.parsed.entityDisplay || file.parsed.entityPrefix, entityPrefix: file.parsed.entityPrefix, source: file.parsed.source, files: [] });
       }
       groupMap.get(key)!.files.push(file);
     }
-
-    // Sort files within each group by date, oldest first
     const groups = Array.from(groupMap.values());
-    groups.forEach(group => {
-      group.files.sort((a, b) => a.lastModified.getTime() - b.lastModified.getTime());
-    });
-
-    // Sort groups by module then entity
-    return groups.sort((a, b) => {
-      if (a.module !== b.module) return a.module.localeCompare(b.module);
-      return a.entityDisplay.localeCompare(b.entityDisplay);
-    });
+    groups.forEach(g => g.files.sort((a, b) => a.lastModified.getTime() - b.lastModified.getTime()));
+    return groups.sort((a, b) => a.module !== b.module ? a.module.localeCompare(b.module) : a.entityDisplay.localeCompare(b.entityDisplay));
   }, [files, filterModule, filterEntity, filterSource, filterMock, filterStatus, searchQuery]);
 
   // Helper: get pillar name from module
@@ -1119,44 +1219,38 @@ function DataFileDashboard() {
     return map[module] || module;
   };
 
-  // Helper: get lifecycle stage status for a file
+  // Helper: get lifecycle stage status for a file (legacy)
   const getLifecycleStage = (file: APFile) => {
-    // Initial Load: always present once we have the file
-    const stages = {
-      initialLoad: {
-        status: file.status === 'failed' ? 'fail' : file.status === 'processing' ? 'processing' : 'pass',
-        filename: file.name,
-        timestamp: file.lastModified,
-      },
-      prevalidation: {
-        // If file was successfully loaded, prevalidation passed
-        status: file.status === 'success' ? 'pass' : file.status === 'processing' ? 'processing' : file.status === 'failed' ? 'fail' : 'pending',
-        filename: file.name,
-        timestamp: file.lastModified,
-      },
-      conversion: {
-        // If file was loaded to DB, conversion is done
-        status: file.folder === 'processed' ? 'pass' : file.status === 'processing' ? 'processing' : file.status === 'failed' ? 'fail' : 'pending',
-        filename: file.name,
-        timestamp: file.lastModified,
-      },
-      validation: {
-        // Final validation — only pass if fully processed
-        status: file.folder === 'processed' ? 'pass' : file.status === 'failed' ? 'fail' : 'pending',
-        filename: file.name,
-        timestamp: file.lastModified,
-      },
+    return {
+      initialLoad: { status: file.status === 'failed' ? 'fail' : file.status === 'processing' ? 'processing' : 'pass', filename: file.name, timestamp: file.lastModified },
+      prevalidation: { status: file.status === 'success' ? 'pass' : file.status === 'processing' ? 'processing' : file.status === 'failed' ? 'fail' : 'pending', filename: file.name, timestamp: file.lastModified },
+      conversion: { status: file.folder === 'processed' ? 'pass' : file.status === 'processing' ? 'processing' : file.status === 'failed' ? 'fail' : 'pending', filename: file.name, timestamp: file.lastModified },
+      validation: { status: file.folder === 'processed' ? 'pass' : file.status === 'failed' ? 'fail' : 'pending', filename: file.name, timestamp: file.lastModified },
     };
-    return stages;
   };
 
-  // Helper: format date for gantt cells
+  // Helper: format date for gantt cells (Date objects)
   const formatGanttDate = (date: Date) => {
-    return date.toLocaleDateString('en-US', {
-      month: '2-digit', day: '2-digit', year: 'numeric',
-    }) + ', ' + date.toLocaleTimeString('en-US', {
-      hour: '2-digit', minute: '2-digit', hour12: true,
-    });
+    return date.toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' })
+      + ', ' + date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+  };
+
+  // Helper: format ISO date string for conversion plan gantt cells
+  const formatConversionDate = (isoStr: string) => {
+    if (!isoStr) return '';
+    try {
+      const d = new Date(isoStr);
+      return d.toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' })
+        + ', ' + d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+    } catch { return isoStr; }
+  };
+
+  // Helper: get display filename with version suffix
+  const getVersionedFileName = (entry: ConversionPlanEntry) => {
+    const base = entry.FileName || entry.Table_Name;
+    const ver = parseInt(entry.LoadVersion || '1');
+    if (ver <= 1) return base;
+    return `${base}_V${ver}`;
   };
 
   // ─── Render ──────────────────────────────────────────────────────────────
@@ -1553,11 +1647,21 @@ function DataFileDashboard() {
           {/* Tab Content */}
           {activeTab === 'gantt' ? (
             <div className="ap-gantt-content">
-              {ganttGroups.length === 0 ? (
+              {conversionPlanLoading ? (
+                <div className="ap-loading" style={{ padding: '40px 0' }}>
+                  <span className="ap-spinner"></span>
+                  Loading conversion plan data...
+                </div>
+              ) : conversionPlanGroups.length === 0 ? (
                 <div className="ap-empty-state">
                   <div className="ap-empty-icon">&#128202;</div>
-                  <h3>No files to display</h3>
-                  <p>Upload and process files to see the lifecycle Gantt view.</p>
+                  <h3>No conversion plan data</h3>
+                  <p>Process files to populate the conversion plan tables.</p>
+                  {conversionPlanMocks.length > 0 && (
+                    <p style={{ fontSize: '13px', color: '#6b7280' }}>
+                      Found {conversionPlanMocks.length} mock table(s): {conversionPlanMocks.join(', ')}
+                    </p>
+                  )}
                 </div>
               ) : (
                 <div className="ap-gantt-table-wrapper">
@@ -1572,107 +1676,101 @@ function DataFileDashboard() {
                       </tr>
                     </thead>
                     <tbody>
-                      {ganttGroups.map((group) => {
-                        const stages = group.files.map(f => getLifecycleStage(f));
-                        return (
-                          <tr key={`${group.entityPrefix}|${group.source}`} className="ap-gantt-row">
-                            <td className="ap-gantt-entity-cell">
-                              <div className="ap-gantt-entity-info">
-                                <div className="ap-gantt-entity-breadcrumb">
-                                  <span className={`ap-module-badge ${group.module.toLowerCase()}`}>{group.module}</span>
-                                  <span className="ap-gantt-separator">&rsaquo;</span>
-                                  <span className="ap-gantt-entity-name">{group.entityDisplay}</span>
-                                </div>
-                                <div className="ap-gantt-entity-meta">
-                                  Source: {group.source}
-                                </div>
-                                <div className="ap-gantt-entity-meta">
-                                  {group.files.length} file(s)
-                                </div>
+                      {conversionPlanGroups.map((group) => (
+                        <tr key={`${group.subEntity}|${group.source}`} className="ap-gantt-row">
+                          <td className="ap-gantt-entity-cell">
+                            <div className="ap-gantt-entity-info">
+                              <div className="ap-gantt-entity-breadcrumb">
+                                <span className={`ap-module-badge ${group.module.toLowerCase()}`}>{group.module}</span>
+                                <span className="ap-gantt-separator">&rsaquo;</span>
+                                <span className="ap-gantt-entity-name">{group.entityDisplay}</span>
                               </div>
-                            </td>
-                            {/* Initial Load */}
-                            <td className="ap-gantt-stage-cell">
-                              {group.files.map((file, idx) => {
-                                const stage = stages[idx].initialLoad;
-                                return (
-                                  <div key={file.key} className="ap-gantt-file-card">
-                                    <span className={`ap-gantt-status-badge ${stage.status}`}>
-                                      <span className={`ap-gantt-status-icon ${stage.status}`}></span>
-                                      {stage.status === 'pass' ? 'Pass' : stage.status === 'fail' ? 'Fail' : stage.status === 'processing' ? 'Processing' : 'Pending'}
-                                    </span>
-                                    <div className="ap-gantt-file-name" title={file.name}>{file.name}</div>
-                                    <div className="ap-gantt-file-date">{formatGanttDate(file.lastModified)}</div>
-                                    <button className="ap-gantt-view-link" onClick={() => setSelectedGanttFile(file)}>
-                                      View &#8599;
-                                    </button>
-                                  </div>
-                                );
-                              })}
-                            </td>
-                            {/* Prevalidation */}
-                            <td className="ap-gantt-stage-cell">
-                              {group.files.map((file, idx) => {
-                                const stage = stages[idx].prevalidation;
-                                return (
-                                  <div key={file.key} className="ap-gantt-file-card">
-                                    <span className={`ap-gantt-status-badge ${stage.status}`}>
-                                      <span className={`ap-gantt-status-icon ${stage.status}`}></span>
-                                      {stage.status === 'pass' ? 'Pass' : stage.status === 'fail' ? 'Fail' : stage.status === 'processing' ? 'Processing' : 'Pending'}
-                                    </span>
-                                    <div className="ap-gantt-file-name" title={file.name}>{file.name}</div>
-                                    <div className="ap-gantt-file-date">{formatGanttDate(file.lastModified)}</div>
-                                    <button className="ap-gantt-view-link" onClick={() => setSelectedGanttFile(file)}>
-                                      View &#8599;
-                                    </button>
-                                  </div>
-                                );
-                              })}
-                            </td>
-                            {/* Conversion */}
-                            <td className="ap-gantt-stage-cell">
-                              {group.files.map((file, idx) => {
-                                const stage = stages[idx].conversion;
-                                return (
-                                  <div key={file.key} className="ap-gantt-file-card">
-                                    <span className={`ap-gantt-status-badge ${stage.status}`}>
-                                      <span className={`ap-gantt-status-icon ${stage.status}`}></span>
-                                      {stage.status === 'pass' ? 'Pass' : stage.status === 'fail' ? 'Fail' : stage.status === 'processing' ? 'Processing' : 'Pending'}
-                                    </span>
-                                    <div className="ap-gantt-file-name" title={file.name}>{file.name}</div>
-                                    <div className="ap-gantt-file-date">{formatGanttDate(file.lastModified)}</div>
-                                    <button className="ap-gantt-view-link" onClick={() => setSelectedGanttFile(file)}>
-                                      View &#8599;
-                                    </button>
-                                  </div>
-                                );
-                              })}
-                            </td>
-                            {/* Validation */}
-                            <td className="ap-gantt-stage-cell">
-                              {group.files.map((file, idx) => {
-                                const stage = stages[idx].validation;
-                                return (
-                                  <div key={file.key} className={`ap-gantt-file-card ${stage.status === 'fail' ? 'has-error' : ''}`}>
-                                    <span className={`ap-gantt-status-badge ${stage.status}`}>
-                                      <span className={`ap-gantt-status-icon ${stage.status}`}></span>
-                                      {stage.status === 'pass' ? 'Pass' : stage.status === 'fail' ? 'Fail' : stage.status === 'processing' ? 'Processing' : 'Pending'}
-                                    </span>
-                                    <div className="ap-gantt-file-name" title={file.name}>{file.name}</div>
-                                    <div className="ap-gantt-file-date">{formatGanttDate(file.lastModified)}</div>
-                                    {file.status === 'failed' && file.errorMessage && (
-                                      <div className="ap-gantt-error-msg">{file.errorMessage}</div>
-                                    )}
-                                    <button className="ap-gantt-view-link" onClick={() => setSelectedGanttFile(file)}>
-                                      View &#8599;
-                                    </button>
-                                  </div>
-                                );
-                              })}
-                            </td>
-                          </tr>
-                        );
-                      })}
+                              {group.subEntity && group.subEntity !== group.entityDisplay && (
+                                <div className="ap-gantt-entity-meta" style={{ fontSize: '11px', color: '#9ca3af' }}>
+                                  {group.subEntity}
+                                </div>
+                              )}
+                              <div className="ap-gantt-entity-meta">
+                                Source: {group.source}
+                              </div>
+                              <div className="ap-gantt-entity-meta">
+                                {group.entries.length} file(s)
+                              </div>
+                              {group.entries.some(e => e.BU) && (
+                                <div className="ap-gantt-entity-meta">
+                                  <span className="ap-gantt-bu-badge">BU: {Array.from(new Set(group.entries.map(e => e.BU).filter(Boolean))).join(', ')}</span>
+                                </div>
+                              )}
+                            </div>
+                          </td>
+                          {/* Initial Load */}
+                          <td className="ap-gantt-stage-cell">
+                            {group.entries.map((entry, idx) => (
+                              <div key={`${entry.Table_Name}-${idx}`} className="ap-gantt-file-card">
+                                <span className="ap-gantt-status-badge pass">
+                                  <span className="ap-gantt-status-icon pass"></span>
+                                  Pass
+                                </span>
+                                <div className="ap-gantt-file-name" title={entry.FileName || entry.Table_Name}>
+                                  {entry.FileName || entry.Table_Name}
+                                  {parseInt(entry.LoadVersion || '1') > 1 && (
+                                    <span className="ap-gantt-version-badge">V{entry.LoadVersion}</span>
+                                  )}
+                                </div>
+                                <div className="ap-gantt-file-date">{formatConversionDate(entry.LoadedAt)}</div>
+                                <button className="ap-gantt-view-link" onClick={() => setSelectedConversionEntry(entry)}>
+                                  View &#8599;
+                                </button>
+                              </div>
+                            ))}
+                          </td>
+                          {/* Prevalidation */}
+                          <td className="ap-gantt-stage-cell">
+                            {group.entries.map((entry, idx) => (
+                              <div key={`${entry.Table_Name}-${idx}`} className="ap-gantt-file-card">
+                                <span className="ap-gantt-status-badge pending">
+                                  <span className="ap-gantt-status-icon pending"></span>
+                                  Pending
+                                </span>
+                                <div className="ap-gantt-file-name ap-gantt-pending-label">{entry.FileName || entry.Table_Name}</div>
+                                <button className="ap-gantt-view-link" onClick={() => setSelectedConversionEntry(entry)}>
+                                  View &#8599;
+                                </button>
+                              </div>
+                            ))}
+                          </td>
+                          {/* Conversion */}
+                          <td className="ap-gantt-stage-cell">
+                            {group.entries.map((entry, idx) => (
+                              <div key={`${entry.Table_Name}-${idx}`} className="ap-gantt-file-card">
+                                <span className="ap-gantt-status-badge pending">
+                                  <span className="ap-gantt-status-icon pending"></span>
+                                  Pending
+                                </span>
+                                <div className="ap-gantt-file-name ap-gantt-pending-label">{entry.FileName || entry.Table_Name}</div>
+                                <button className="ap-gantt-view-link" onClick={() => setSelectedConversionEntry(entry)}>
+                                  View &#8599;
+                                </button>
+                              </div>
+                            ))}
+                          </td>
+                          {/* Validation */}
+                          <td className="ap-gantt-stage-cell">
+                            {group.entries.map((entry, idx) => (
+                              <div key={`${entry.Table_Name}-${idx}`} className="ap-gantt-file-card">
+                                <span className="ap-gantt-status-badge pending">
+                                  <span className="ap-gantt-status-icon pending"></span>
+                                  Pending
+                                </span>
+                                <div className="ap-gantt-file-name ap-gantt-pending-label">{entry.FileName || entry.Table_Name}</div>
+                                <button className="ap-gantt-view-link" onClick={() => setSelectedConversionEntry(entry)}>
+                                  View &#8599;
+                                </button>
+                              </div>
+                            ))}
+                          </td>
+                        </tr>
+                      ))}
                     </tbody>
                   </table>
                 </div>
@@ -1923,7 +2021,177 @@ function DataFileDashboard() {
         onDownload={handleDownloadPreviewFile}
       />
 
-      {/* File Detail Overlay (Gantt View drill-down) */}
+      {/* Conversion Plan File Detail Overlay (Gantt View drill-down) */}
+      {selectedConversionEntry && (() => {
+        const entry = selectedConversionEntry;
+        const ver = parseInt(entry.LoadVersion || '1');
+        const fileSizeMB = entry.FileSize ? (parseInt(entry.FileSize) / (1024 * 1024)).toFixed(2) : null;
+        const rowCountFormatted = entry.RowCount ? parseInt(entry.RowCount).toLocaleString() : null;
+        const stageEntries = [
+          { key: 'upload', label: 'Upload', sub: 'File received', status: 'pass' },
+          { key: 'validation', label: 'Validation', sub: 'Format & header checks', status: 'pass' },
+          { key: 'database', label: 'Database Upload', sub: 'Data insertion', status: entry.LoadedAt ? 'pass' : 'pending' },
+          { key: 'complete', label: 'Complete', sub: 'Successfully processed', status: 'pending' },
+        ];
+        return (
+          <div className="ap-file-detail-overlay" onClick={() => setSelectedConversionEntry(null)}>
+            <div className="ap-file-detail-panel" onClick={e => e.stopPropagation()}>
+              {/* Header */}
+              <div className="ap-file-detail-header">
+                <button className="ap-file-detail-back" onClick={() => setSelectedConversionEntry(null)}>
+                  &larr; Back to Dashboard
+                </button>
+                <div className="ap-file-detail-title-row">
+                  <span className="ap-file-detail-icon">&#128196;</span>
+                  <h2 className="ap-file-detail-title">{entry.FileName || entry.Table_Name}</h2>
+                  <span className="ap-gantt-status-badge pass">Loaded</span>
+                  {ver > 1 && <span className="ap-gantt-version-badge">V{ver}</span>}
+                </div>
+                <div className="ap-file-detail-subtitle">
+                  Loaded {formatConversionDate(entry.LoadedAt)}
+                  {fileSizeMB ? ` \u2022 ${fileSizeMB} MB` : ''}
+                  {entry.MockNumber ? ` \u2022 ${entry.MockNumber}` : ''}
+                </div>
+              </div>
+
+              {/* Metadata + Location cards */}
+              <div className="ap-file-detail-cards">
+                <div className="ap-file-detail-card">
+                  <h3 className="ap-file-detail-card-title">
+                    <span className="ap-file-detail-card-icon">&#128200;</span>
+                    File Metadata
+                  </h3>
+                  <div className="ap-file-detail-field">
+                    <span className="ap-file-detail-label">Pillar</span>
+                    <span className={`ap-module-badge ${entry.Module.toLowerCase()}`}>{entry.Module}</span>
+                  </div>
+                  <div className="ap-file-detail-field">
+                    <span className="ap-file-detail-label">Mock Number</span>
+                    <strong>{entry.MockNumber}</strong>
+                  </div>
+                  <div className="ap-file-detail-field">
+                    <span className="ap-file-detail-label">Data Entity</span>
+                    <strong>{entry.Entity}</strong>
+                  </div>
+                  {entry.SubEntity && entry.SubEntity !== entry.Entity && (
+                    <div className="ap-file-detail-field">
+                      <span className="ap-file-detail-label">Sub-Entity</span>
+                      <strong>{entry.SubEntity}</strong>
+                    </div>
+                  )}
+                  <div className="ap-file-detail-field">
+                    <span className="ap-file-detail-label">Source</span>
+                    <strong>{entry.SOURCE || entry.Data_Sources}</strong>
+                  </div>
+                  {rowCountFormatted && (
+                    <div className="ap-file-detail-field">
+                      <span className="ap-file-detail-label">Row Count</span>
+                      <strong>{rowCountFormatted}</strong>
+                    </div>
+                  )}
+                  {entry.BU && (
+                    <div className="ap-file-detail-field">
+                      <span className="ap-file-detail-label">Business Unit (BU)</span>
+                      <strong>{entry.BU}</strong>
+                    </div>
+                  )}
+                  <div className="ap-file-detail-field">
+                    <span className="ap-file-detail-label">Load Version</span>
+                    <strong>V{entry.LoadVersion || '1'}</strong>
+                  </div>
+                </div>
+
+                <div className="ap-file-detail-card">
+                  <h3 className="ap-file-detail-card-title">
+                    <span className="ap-file-detail-card-icon">&#128193;</span>
+                    Current Location
+                  </h3>
+                  <div className="ap-file-detail-field">
+                    <span className="ap-file-detail-label">Table Name</span>
+                    <strong>{entry.Table_Name}</strong>
+                  </div>
+                  <div className="ap-file-detail-field">
+                    <span className="ap-file-detail-label">Load Status</span>
+                    <strong>{entry.LoadedAt ? 'Loaded' : 'Pending'}</strong>
+                  </div>
+                  {entry.CONVERSION_TABLE_BU && (
+                    <div className="ap-file-detail-field">
+                      <span className="ap-file-detail-label">Parent Table (BU)</span>
+                      <strong>{entry.CONVERSION_TABLE_BU}</strong>
+                    </div>
+                  )}
+                  {entry.S3SourceKey && (
+                    <div className="ap-file-detail-field">
+                      <span className="ap-file-detail-label">S3 Source</span>
+                      <code className="ap-file-detail-path">s3://hacienda-erp-dev/{entry.S3SourceKey}</code>
+                    </div>
+                  )}
+                  {entry.LoadedBy && (
+                    <div className="ap-file-detail-field">
+                      <span className="ap-file-detail-label">Loaded By</span>
+                      <strong>{entry.LoadedBy}</strong>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Process Flow */}
+              <div className="ap-file-detail-card" style={{ marginTop: '16px' }}>
+                <h3 className="ap-file-detail-card-title">Process Flow</h3>
+                <div className="ap-process-flow">
+                  {stageEntries.map((stage, idx) => (
+                    <div key={stage.key} className="ap-process-flow-item">
+                      {idx > 0 && <span className="ap-process-flow-arrow">&rarr;</span>}
+                      <div className={`ap-process-flow-step ${stage.status}`}>
+                        <div className={`ap-process-flow-circle ${stage.status}`}>
+                          {stage.status === 'pass' ? '\u2713' : stage.status === 'fail' ? '\u2717' : '\u2022'}
+                        </div>
+                        <div className="ap-process-flow-label">{stage.label}</div>
+                        <div className="ap-process-flow-sub">{stage.sub}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Event Timeline */}
+              <div className="ap-file-detail-card" style={{ marginTop: '16px' }}>
+                <h3 className="ap-file-detail-card-title">
+                  <span className="ap-file-detail-card-icon">&#128336;</span>
+                  Event Timeline
+                </h3>
+                <div className="ap-event-timeline">
+                  <div className="ap-timeline-item">
+                    <div className="ap-timeline-dot pass"></div>
+                    <div className="ap-timeline-content">
+                      <strong>File loaded to database</strong>
+                      <div className="ap-timeline-detail">
+                        {rowCountFormatted ? `${rowCountFormatted} rows inserted into ${entry.Table_Name}` : `Data inserted into ${entry.Table_Name}`}
+                      </div>
+                      {entry.LoadedBy && <div className="ap-timeline-detail">Loaded by: {entry.LoadedBy}</div>}
+                      {entry.S3SourceKey && <code className="ap-timeline-path">s3://hacienda-erp-dev/{entry.S3SourceKey}</code>}
+                    </div>
+                    <div className="ap-timeline-time">{formatConversionDate(entry.LoadedAt)}</div>
+                  </div>
+
+                  {ver > 1 && entry.PreviousLoadedAt && (
+                    <div className="ap-timeline-item">
+                      <div className="ap-timeline-dot pass"></div>
+                      <div className="ap-timeline-content">
+                        <strong>Previous version loaded (V{ver - 1})</strong>
+                        <div className="ap-timeline-detail">This file has been loaded {ver} time(s)</div>
+                      </div>
+                      <div className="ap-timeline-time">{formatConversionDate(entry.PreviousLoadedAt)}</div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Legacy File Detail Overlay (for non-Gantt tabs) */}
       {selectedGanttFile && (() => {
         const file = selectedGanttFile;
         const lifecycle = getLifecycleStage(file);
