@@ -1,5 +1,5 @@
 'use client';
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { list, getUrl } from 'aws-amplify/storage';
 import { FileContextMenu, ContextMenuAction } from './FileContextMenu';
 import { SortOption, SearchScope } from './Toolbar';
@@ -76,9 +76,20 @@ export function CustomFileBrowser({
   const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set());
   const [contextMenu, setContextMenu] = useState<{ item: FileItem; x: number; y: number } | null>(null);
 
+  // Use ref for showToast to prevent fetchItems identity from changing on every parent re-render
+  const showToastRef = useRef(showToast);
+  showToastRef.current = showToast;
+
+  // Track whether initial load has completed
+  const hasLoadedOnce = useRef(false);
+
   // Fetch files and folders
   const fetchItems = useCallback(async () => {
-    setLoading(true);
+    // Only show loading spinner on the very first load, not on refetches.
+    // This prevents the file list from disappearing and scroll position from resetting.
+    if (!hasLoadedOnce.current) {
+      setLoading(true);
+    }
     try {
       const result = await list({
         path: currentPath,
@@ -130,13 +141,14 @@ export function CustomFileBrowser({
       }
 
       setItems(fileItems);
+      hasLoadedOnce.current = true;
     } catch (error) {
       console.error('Error fetching items:', error);
-      showToast('Failed to load files', 'error');
+      showToastRef.current('Failed to load files', 'error');
     } finally {
       setLoading(false);
     }
-  }, [currentPath, showToast, userEmail]);
+  }, [currentPath, userEmail]);
 
   // Fetch all items for global search
   const fetchAllItems = useCallback(async () => {
@@ -201,10 +213,11 @@ export function CustomFileBrowser({
     }
   }, [refreshKey, searchScope, searchQuery, fetchAllItems]);
 
-  // Clear selection when path changes
+  // Clear selection and reset loading state when path changes
   useEffect(() => {
     setSelectedItems(new Set());
     onSelectionChange([]);
+    hasLoadedOnce.current = false;
   }, [currentPath, onSelectionChange]);
 
   // Filter items based on search query and scope
