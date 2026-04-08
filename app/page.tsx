@@ -611,15 +611,22 @@ function FileBrowser() {
           prev.map(u => (u.id === uploadId ? { ...u, status: 'uploading' as const } : u))
         );
 
+        // Throttle progress updates to reduce re-renders during batch uploads
+        let lastProgressUpdate = 0;
         await uploadData({
           path,
           data: file,
           options: {
             onProgress: ({ transferredBytes, totalBytes }) => {
+              const now = Date.now();
               const progress = totalBytes ? Math.round((transferredBytes / totalBytes) * 100) : 0;
-              setUploads(prev =>
-                prev.map(u => (u.id === uploadId ? { ...u, progress } : u))
-              );
+              // Only update state every 500ms or at 100% to avoid excessive re-renders
+              if (now - lastProgressUpdate > 500 || progress === 100) {
+                lastProgressUpdate = now;
+                setUploads(prev =>
+                  prev.map(u => (u.id === uploadId ? { ...u, progress } : u))
+                );
+              }
             },
           },
         }).result;

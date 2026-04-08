@@ -249,7 +249,7 @@ export function CustomFileBrowser({
     return sorted;
   }, [filteredItems, sortOption]);
 
-  // Handle selection
+  // Handle selection — use startTransition to avoid scroll jumps from parent re-renders
   const handleSelect = (item: FileItem, checked: boolean) => {
     const newSelection = new Set(selectedItems);
     if (checked) {
@@ -258,7 +258,9 @@ export function CustomFileBrowser({
       newSelection.delete(item.key);
     }
     setSelectedItems(newSelection);
-    onSelectionChange(filteredItems.filter(i => newSelection.has(i.key)));
+    React.startTransition(() => {
+      onSelectionChange(filteredItems.filter(i => newSelection.has(i.key)));
+    });
   };
 
   // Handle select all (only selects filtered/visible items)
@@ -266,10 +268,14 @@ export function CustomFileBrowser({
     if (checked) {
       const allKeys = new Set(filteredItems.map(i => i.key));
       setSelectedItems(allKeys);
-      onSelectionChange(filteredItems);
+      React.startTransition(() => {
+        onSelectionChange(filteredItems);
+      });
     } else {
       setSelectedItems(new Set());
-      onSelectionChange([]);
+      React.startTransition(() => {
+        onSelectionChange([]);
+      });
     }
   };
 
