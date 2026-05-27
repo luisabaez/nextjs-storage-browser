@@ -100,6 +100,13 @@ export function CustomFileBrowser({
       const seenFolders = new Set<string>();
 
       for (const item of result.items) {
+        // Defensive filter: Amplify storage can return items from other access
+        // paths when the requested path isn't in the storage config. Drop
+        // anything whose key doesn't actually start with currentPath.
+        if (currentPath && !item.path.startsWith(currentPath)) {
+          continue;
+        }
+
         const relativePath = item.path.replace(currentPath, '');
         const parts = relativePath.split('/').filter(Boolean);
 

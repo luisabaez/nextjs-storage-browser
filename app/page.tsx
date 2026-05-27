@@ -178,40 +178,37 @@ function FileBrowser() {
   // Fetch available folders for move/copy modal
   useEffect(() => {
     async function fetchFolders() {
-      const folderList: { path: string; name: string; level: number }[] = [];
+      // Discover ALL folders in the bucket — not just the hardcoded list.
+      // One full-bucket listing, then derive every folder path from object keys.
+      const folderPaths = new Set<string>();
+      try {
+        const result = await list({
+          path: '',
+          options: { listAll: true },
+        });
 
-      for (const folder of folders) {
-        folderList.push({ path: folder.path, name: folder.name, level: 0 });
-
-        try {
-          const result = await list({
-            path: folder.path,
-            options: { listAll: true },
-          });
-
-          const subfolders = new Set<string>();
-          for (const item of result.items) {
-            const relativePath = item.path.replace(folder.path, '');
-            const parts = relativePath.split('/').filter(Boolean);
-
-            if (parts.length > 1) {
-              let currentFolderPath = folder.path;
-              for (let i = 0; i < parts.length - 1; i++) {
-                currentFolderPath += parts[i] + '/';
-                if (!subfolders.has(currentFolderPath)) {
-                  subfolders.add(currentFolderPath);
-                  folderList.push({
-                    path: currentFolderPath,
-                    name: parts[i],
-                    level: i + 1,
-                  });
-                }
-              }
-            }
+        for (const item of result.items) {
+          const parts = item.path.split('/').filter(Boolean);
+          // Every parent path of this object is a folder
+          // e.g. "A/B/C/file.csv" → folders "A/", "A/B/", "A/B/C/"
+          for (let i = 1; i < parts.length; i++) {
+            folderPaths.add(parts.slice(0, i).join('/') + '/');
           }
-        } catch (err) {
-          console.error('Error fetching subfolders:', err);
         }
+      } catch (err) {
+        console.error('Error fetching folder list:', err);
+      }
+
+      // Convert to sorted folder entries with nesting level
+      const folderList: { path: string; name: string; level: number }[] = [];
+      const sortedPaths = Array.from(folderPaths).sort();
+      for (const path of sortedPaths) {
+        const parts = path.split('/').filter(Boolean);
+        folderList.push({
+          path,
+          name: parts[parts.length - 1],
+          level: parts.length - 1,
+        });
       }
 
       setAvailableFolders(folderList);
