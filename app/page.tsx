@@ -24,8 +24,35 @@ import { FilePreviewModal } from './components/FilePreviewModal';
 
 // Amplify Storage imports
 import { uploadData, remove, copy, list, getUrl } from 'aws-amplify/storage';
+import { multipartCopyLargeFile, SINGLE_COPY_LIMIT_BYTES } from './lib/largeCopy';
 
 Amplify.configure(config);
+
+// S3 bucket info for direct AWS SDK calls (large-file multipart copy)
+const S3_BUCKET = (config as { storage?: { bucket_name?: string } }).storage?.bucket_name || 'hacienda-erp-dev';
+const S3_REGION = (config as { storage?: { aws_region?: string } }).storage?.aws_region || 'us-east-1';
+
+/**
+ * Copy a single file, automatically choosing between Amplify's single-request
+ * copy (≤4.5 GB) and multipart copy (>4.5 GB). Surfaces the underlying error
+ * if either path fails.
+ */
+async function smartCopy(sourcePath: string, destPath: string, sizeBytes: number): Promise<void> {
+  if (sizeBytes > SINGLE_COPY_LIMIT_BYTES) {
+    await multipartCopyLargeFile({
+      bucket: S3_BUCKET,
+      region: S3_REGION,
+      sourceKey: sourcePath,
+      destKey: destPath,
+      fileSize: sizeBytes,
+    });
+  } else {
+    await copy({
+      source: { path: sourcePath },
+      destination: { path: destPath },
+    });
+  }
+}
 
 // Determine environment from bucket name
 const getEnvironmentName = () => {
@@ -382,19 +409,13 @@ function FileBrowser() {
         const contents = await list({ path: item.path, options: { listAll: true } });
         for (const file of contents.items) {
           const newItemPath = file.path.replace(item.path, newPath);
-          await copy({
-            source: { path: file.path },
-            destination: { path: newItemPath },
-          });
+          await smartCopy(file.path, newItemPath, file.size || 0);
           if (mode === 'move') {
             await remove({ path: file.path });
           }
         }
       } else {
-        await copy({
-          source: { path: item.path },
-          destination: { path: newPath },
-        });
+        await smartCopy(item.path, newPath, item.size || 0);
         if (mode === 'move') {
           await remove({ path: item.path });
         }
@@ -410,8 +431,11 @@ function FileBrowser() {
       setMoveItem(null);
       setRefreshKey(prev => prev + 1);
     } catch (err) {
-      console.error('Move/Copy error:', err);
-      showError(`Failed to ${moveItem.mode}`);
+      const e = err as Error;
+      console.error('Move/Copy error:', e);
+      // Show the actual underlying error so users can see what went wrong
+      const detail = e?.message || String(err);
+      showError(`Failed to ${moveItem.mode}: ${detail.slice(0, 200)}`);
     } finally {
       setIsProcessing(false);
     }
@@ -429,19 +453,13 @@ function FileBrowser() {
           const contents = await list({ path: item.path, options: { listAll: true } });
           for (const file of contents.items) {
             const newItemPath = file.path.replace(item.path, newPath);
-            await copy({
-              source: { path: file.path },
-              destination: { path: newItemPath },
-            });
+            await smartCopy(file.path, newItemPath, file.size || 0);
             if (bulkMoveMode === 'move') {
               await remove({ path: file.path });
             }
           }
         } else {
-          await copy({
-            source: { path: item.path },
-            destination: { path: newPath },
-          });
+          await smartCopy(item.path, newPath, item.size || 0);
           if (bulkMoveMode === 'move') {
             await remove({ path: item.path });
           }
@@ -458,8 +476,10 @@ function FileBrowser() {
       setSelectedItems([]);
       setRefreshKey(prev => prev + 1);
     } catch (err) {
-      console.error('Bulk Move/Copy error:', err);
-      showError(`Failed to ${bulkMoveMode}`);
+      const e = err as Error;
+      console.error('Bulk Move/Copy error:', e);
+      const detail = e?.message || String(err);
+      showError(`Failed to ${bulkMoveMode}: ${detail.slice(0, 200)}`);
     } finally {
       setIsProcessing(false);
     }
