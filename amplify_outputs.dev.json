@@ -36,7 +36,9 @@
           "ConversionFiles/*": {
             "authenticated": [
               "get",
-              "list"
+              "list",
+              "write",
+              "delete"
             ],
             "entityidentity": [
               "get",
@@ -48,7 +50,9 @@
           "ConversionFileErrors/*": {
             "authenticated": [
               "get",
-              "list"
+              "list",
+              "write",
+              "delete"
             ],
             "entityidentity": [
               "get",
@@ -60,7 +64,9 @@
           "InitialUpload/*": {
             "authenticated": [
               "get",
-              "list"
+              "list",
+              "write",
+              "delete"
             ],
             "entityidentity": [
               "get",
@@ -72,7 +78,9 @@
           "InitialUploadErrors/*": {
             "authenticated": [
               "get",
-              "list"
+              "list",
+              "write",
+              "delete"
             ],
             "entityidentity": [
               "get",
@@ -84,7 +92,9 @@
           "TSQLFiles/*": {
             "authenticated": [
               "get",
-              "list"
+              "list",
+              "write",
+              "delete"
             ],
             "entityidentity": [
               "get",
@@ -96,7 +106,9 @@
           "DataValidation/*": {
             "authenticated": [
               "get",
-              "list"
+              "list",
+              "write",
+              "delete"
             ],
             "entityidentity": [
               "get",
@@ -136,7 +148,9 @@
           "ProcessedFiles/*": {
             "authenticated": [
               "get",
-              "list"
+              "list",
+              "write",
+              "delete"
             ],
             "entityidentity": [
               "get",
@@ -148,7 +162,9 @@
           "FailedInvoices/*": {
             "authenticated": [
               "get",
-              "list"
+              "list",
+              "write",
+              "delete"
             ],
             "entityidentity": [
               "get",
@@ -160,7 +176,9 @@
           "FailedUnmatchedFilenames/*": {
             "authenticated": [
               "get",
-              "list"
+              "list",
+              "write",
+              "delete"
             ],
             "entityidentity": [
               "get",
@@ -172,7 +190,9 @@
           "ConversionFileErrors/Mock8/*": {
             "authenticated": [
               "get",
-              "list"
+              "list",
+              "write",
+              "delete"
             ],
             "entityidentity": [
               "get",
@@ -184,7 +204,9 @@
           "APInvoiceInput/*": {
             "authenticated": [
               "get",
-              "list"
+              "list",
+              "write",
+              "delete"
             ],
             "entityidentity": [
               "get",
@@ -196,7 +218,9 @@
           "UploadedAPInvoices/*": {
             "authenticated": [
               "get",
-              "list"
+              "list",
+              "write",
+              "delete"
             ],
             "entityidentity": [
               "get",
@@ -208,7 +232,9 @@
           "FailedAPInvoices/*": {
             "authenticated": [
               "get",
-              "list"
+              "list",
+              "write",
+              "delete"
             ],
             "entityidentity": [
               "get",

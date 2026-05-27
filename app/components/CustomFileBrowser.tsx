@@ -107,6 +107,13 @@ export function CustomFileBrowser({
           continue;
         }
 
+        // Skip S3 directory marker objects (0-byte placeholders with keys
+        // ending in '/'). These show up as phantom "files" with the folder
+        // name when AWS Console "Create folder" was used.
+        if (item.path.endsWith('/')) {
+          continue;
+        }
+
         const relativePath = item.path.replace(currentPath, '');
         const parts = relativePath.split('/').filter(Boolean);
 
@@ -169,8 +176,9 @@ export function CustomFileBrowser({
       const fileItems: FileItem[] = [];
 
       for (const item of result.items) {
-        // Skip placeholder files like .keep
+        // Skip placeholder files like .keep and S3 directory markers
         if (item.path.endsWith('.keep')) continue;
+        if (item.path.endsWith('/')) continue;
 
         // Check source permission for the full path
         if (!canUserAccessFile(userEmail, item.path)) {
