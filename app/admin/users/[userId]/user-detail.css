@@ -420,3 +420,80 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* ─── Admin Toggle Section ─── */
+.admin-toggle-section {
+  margin: 16px 24px 20px;
+  border: 2px solid #e5e7eb;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #f9fafb 0%, #f3f4f6 100%);
+  transition: all 0.2s ease;
+  overflow: hidden;
+}
+
+.admin-toggle-section:hover {
+  border-color: #d1d5db;
+}
+
+.admin-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 16px 18px;
+  cursor: pointer;
+  margin: 0;
+}
+
+.admin-toggle input[type="checkbox"] {
+  width: 22px;
+  height: 22px;
+  margin-top: 3px;
+  cursor: pointer;
+  accent-color: #1f4e79;
+  flex-shrink: 0;
+}
+
+.admin-toggle input[type="checkbox"]:disabled {
+  cursor: not-allowed;
+}
+
+.admin-toggle-content {
+  flex: 1;
+}
+
+.admin-toggle-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: #1f2937;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.admin-toggle-icon {
+  font-size: 18px;
+}
+
+.admin-toggle-description {
+  font-size: 13px;
+  color: #6b7280;
+  line-height: 1.5;
+}
+
+.admin-toggle.is-admin {
+  /* When checkbox is on, give a clear visual */
+}
+
+.admin-toggle.is-admin ~ * {
+  /* placeholder to keep selector */
+}
+
+.admin-toggle-section:has(input:checked) {
+  border-color: #1f4e79;
+  background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%);
+}
+
+.admin-toggle-section:has(input:checked) .admin-toggle-title {
+  color: #1f4e79;
+}

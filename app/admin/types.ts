@@ -180,6 +180,7 @@ export interface AdminUser {
 // Extended permissions interface with all permission types
 export interface UserPermissions {
   email: string;
+  isAdmin?: boolean;          // Grants full admin access (bypasses all checks)
   allowedSources: SourceTag[];
   allowedEntities: string[];  // Dynamic, so string[] instead of type
   allowedMocks: string[];
@@ -234,14 +235,47 @@ export interface ApprovalFilter {
 // ============================================
 // ADMIN HELPERS
 // ============================================
-// List of admin email addresses
+// List of hardcoded admin email addresses (built-in admins, cannot be revoked via UI)
 export const ADMIN_EMAILS = [
   'mrichcreek@elitebco.com',
   'lbaez@elitebco.com',
+  'jvelilla@elitebco.com',
 ];
 
+// Folders that are publicly accessible to all users regardless of permissions.
+// Any file path containing one of these segments bypasses all access checks.
+export const PUBLIC_FOLDERS = [
+  'Dalving Input',
+];
+
+// Check if a path is inside one of the public folders (case-insensitive)
+export function isPublicFolderPath(path: string): boolean {
+  if (!path) return false;
+  const normalized = path.toLowerCase();
+  return PUBLIC_FOLDERS.some(folder => {
+    const f = folder.toLowerCase();
+    return normalized.startsWith(f + '/') ||
+           normalized.includes('/' + f + '/') ||
+           normalized.includes('\\' + f + '\\') ||
+           normalized === f;
+  });
+}
+
 export function isAdminUser(email: string): boolean {
-  return ADMIN_EMAILS.map(e => e.toLowerCase()).includes(email.toLowerCase());
+  if (!email) return false;
+  const lower = email.toLowerCase();
+  // Built-in admin emails
+  if (ADMIN_EMAILS.map(e => e.toLowerCase()).includes(lower)) return true;
+  // Admin flag set via the User Approvals page
+  if (typeof window !== 'undefined') {
+    try {
+      const perms = getUserPermissions(lower);
+      if (perms?.isAdmin) return true;
+    } catch {
+      // localStorage unavailable — fall through
+    }
+  }
+  return false;
 }
 
 // ============================================
@@ -306,6 +340,7 @@ export function getUserPermissions(email: string): UserPermissions | null {
 export function saveUserFullPermissions(
   email: string,
   permissions: {
+    isAdmin?: boolean;
     allowedSources: SourceTag[];
     allowedEntities: string[];
     allowedMocks: string[];
@@ -316,6 +351,7 @@ export function saveUserFullPermissions(
   const all = getAllUserPermissions();
   all[email.toLowerCase()] = {
     email: email.toLowerCase(),
+    isAdmin: !!permissions.isAdmin,
     allowedSources: permissions.allowedSources,
     allowedEntities: permissions.allowedEntities,
     allowedMocks: permissions.allowedMocks,
@@ -465,6 +501,9 @@ export function extractBusinessUnitFromPath(path: string): string | null {
 // Check if user can access a file based on all permission types
 export function canUserAccessPath(email: string, path: string): boolean {
   if (isAdminUser(email)) return true;
+
+  // Files in public folders (e.g. Dalving Input) are visible to all users
+  if (isPublicFolderPath(path)) return true;
 
   const permissions = getUserPermissions(email);
   if (!permissions) return false;

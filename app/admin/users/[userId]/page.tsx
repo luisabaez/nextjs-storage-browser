@@ -44,6 +44,7 @@ function UserDetailPage() {
   const [isApproved, setIsApproved] = useState(false);
 
   // Permission states
+  const [selectedIsAdmin, setSelectedIsAdmin] = useState(false);
   const [selectedSources, setSelectedSources] = useState<SourceTag[]>([]);
   const [selectedEntities, setSelectedEntities] = useState<string[]>([]);
   const [selectedMocks, setSelectedMocks] = useState<string[]>([]);
@@ -108,6 +109,7 @@ function UserDetailPage() {
           // Load existing permissions
           const permissions = getUserPermissions(foundUser.email);
           if (permissions) {
+            setSelectedIsAdmin(!!permissions.isAdmin);
             setSelectedSources(permissions.allowedSources || []);
             setSelectedEntities(permissions.allowedEntities || []);
             setSelectedMocks(permissions.allowedMocks || []);
@@ -229,6 +231,7 @@ function UserDetailPage() {
       saveUserFullPermissions(
         user.email,
         {
+          isAdmin: selectedIsAdmin,
           allowedSources: selectedSources,
           allowedEntities: selectedEntities,
           allowedMocks: selectedMocks,
@@ -236,7 +239,12 @@ function UserDetailPage() {
         },
         adminEmail
       );
-      setSaveMessage({ type: 'success', text: 'All permissions saved successfully!' });
+      setSaveMessage({
+        type: 'success',
+        text: selectedIsAdmin
+          ? 'User saved as admin — they now have full access.'
+          : 'All permissions saved successfully!',
+      });
     } catch (error) {
       console.error('Error saving permissions:', error);
       setSaveMessage({ type: 'error', text: 'Failed to save permissions. Please try again.' });
@@ -383,6 +391,34 @@ function UserDetailPage() {
                 <span>Admin users automatically have access to all permissions.</span>
               </div>
             )}
+          </div>
+
+          {/* Admin Toggle — grants full access, bypasses all other checks */}
+          <div className="admin-toggle-section">
+            <label className={`admin-toggle ${selectedIsAdmin ? 'is-admin' : ''}`}>
+              <input
+                type="checkbox"
+                checked={selectedIsAdmin || isUserAdmin}
+                disabled={isUserAdmin}
+                onChange={(e) => {
+                  setSelectedIsAdmin(e.target.checked);
+                  setSaveMessage(null);
+                }}
+              />
+              <div className="admin-toggle-content">
+                <div className="admin-toggle-title">
+                  <span className="admin-toggle-icon">🛡️</span>
+                  Grant Admin Access
+                </div>
+                <div className="admin-toggle-description">
+                  {isUserAdmin
+                    ? 'This user is a built-in admin and cannot be revoked here.'
+                    : selectedIsAdmin
+                      ? 'User will have full access to all data and the admin dashboard. All other permission settings below are bypassed.'
+                      : 'Check this box to give the user full access to everything in the application (all sources, entities, mocks, business units, and admin dashboard).'}
+                </div>
+              </div>
+            </label>
           </div>
 
           {/* Permission Tabs */}
