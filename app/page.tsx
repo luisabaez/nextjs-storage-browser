@@ -19,12 +19,13 @@ import { ConfirmDialog } from './components/ConfirmDialog';
 import { CreateFolderModal } from './components/CreateFolderModal';
 import { ToastContainer, useToast } from './components/Toast';
 import { NotificationCenter, useNotifications } from './components/NotificationCenter';
-import { UploadProgress, UploadItem } from './components/UploadProgress';
+import { UploadProgress, UploadItem, OperationType } from './components/UploadProgress';
 import { FilePreviewModal } from './components/FilePreviewModal';
 
 // Amplify Storage imports
 import { uploadData, remove, copy, list, getUrl } from 'aws-amplify/storage';
 import { multipartCopyLargeFile, SINGLE_COPY_LIMIT_BYTES } from './lib/largeCopy';
+import { multipartUploadLargeFile, MULTIPART_UPLOAD_THRESHOLD_BYTES } from './lib/largeUpload';
 
 Amplify.configure(config);
 
@@ -51,6 +52,44 @@ async function smartCopy(sourcePath: string, destPath: string, sizeBytes: number
       source: { path: sourcePath },
       destination: { path: destPath },
     });
+  }
+}
+
+/**
+ * Upload a single file, automatically choosing between Amplify uploadData()
+ * (small files, <100 MB) and direct S3 multipart upload (larger files,
+ * including batches of multi-GB files).
+ *
+ * Amplify's uploadData() is fine for small/medium files but becomes
+ * unreliable for batches of multi-GB files — it holds connection/memory
+ * state between calls and can outlive Cognito credential refresh windows,
+ * so the first file succeeds but subsequent files in the batch silently
+ * fail. The direct-SDK path mirrors largeCopy.ts: parallel parts, per-part
+ * retries, and proper abort cleanup.
+ */
+async function smartUpload(
+  file: File,
+  destPath: string,
+  onProgress?: (bytesUploaded: number, totalBytes: number) => void
+): Promise<void> {
+  if (file.size >= MULTIPART_UPLOAD_THRESHOLD_BYTES) {
+    await multipartUploadLargeFile({
+      bucket: S3_BUCKET,
+      region: S3_REGION,
+      file,
+      destKey: destPath,
+      onProgress,
+    });
+  } else {
+    await uploadData({
+      path: destPath,
+      data: file,
+      options: {
+        onProgress: ({ transferredBytes, totalBytes }) => {
+          if (onProgress && totalBytes) onProgress(transferredBytes, totalBytes);
+        },
+      },
+    }).result;
   }
 }
 
@@ -118,6 +157,50 @@ function FileBrowser() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [uploads, setUploads] = useState<UploadItem[]>([]);
   const [isNotificationOpen, setIsNotificationOpen] = useState(false);
+
+  // ---- Operations panel helpers ----
+  // The `uploads` state is reused as a generic in-flight operations list so
+  // moves/copies/deletes/downloads show alongside uploads in the same panel.
+  // Operations run as fire-and-forget Promises; the user can navigate freely
+  // while they finish, and the panel updates from anywhere in the app.
+  const startOperation = useCallback(
+    (type: OperationType, fileName: string, size: number, total?: number): string => {
+      const id = `op-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+      setUploads(prev => [
+        ...prev,
+        {
+          id,
+          type,
+          fileName,
+          progress: 0,
+          status: 'uploading',
+          size,
+          current: total ? 0 : undefined,
+          total,
+        },
+      ]);
+      return id;
+    },
+    []
+  );
+
+  const updateOperation = useCallback((id: string, patch: Partial<UploadItem>) => {
+    setUploads(prev => prev.map(u => (u.id === id ? { ...u, ...patch } : u)));
+  }, []);
+
+  const completeOperation = useCallback(
+    (id: string) => {
+      updateOperation(id, { status: 'completed', progress: 100, error: undefined });
+    },
+    [updateOperation]
+  );
+
+  const failOperation = useCallback(
+    (id: string, error: string) => {
+      updateOperation(id, { status: 'error', error: error.slice(0, 200) });
+    },
+    [updateOperation]
+  );
   const [availableFolders, setAvailableFolders] = useState<{ path: string; name: string; level: number }[]>([]);
   const [previewFile, setPreviewFile] = useState<FileItem | null>(null);
 
@@ -397,147 +480,225 @@ function FileBrowser() {
     }
   };
 
-  // Move/Copy handler for single item
-  const handleMoveOrCopy = async (destinationPath: string) => {
+  // Move/Copy handler for single item — runs in the background so the user
+  // can navigate elsewhere while the operation completes. The modal closes
+  // immediately when the user clicks the action button.
+  const handleMoveOrCopy = (destinationPath: string) => {
     if (!moveItem) return;
-    setIsProcessing(true);
-    try {
-      const { item, mode } = moveItem;
-      const newPath = destinationPath + item.name + (item.type === 'folder' ? '/' : '');
+    const { item, mode } = moveItem;
+    const newPath = destinationPath + item.name + (item.type === 'folder' ? '/' : '');
 
-      if (item.type === 'folder') {
-        const contents = await list({ path: item.path, options: { listAll: true } });
-        for (const file of contents.items) {
-          const newItemPath = file.path.replace(item.path, newPath);
-          await smartCopy(file.path, newItemPath, file.size || 0);
-          if (mode === 'move') {
-            await remove({ path: file.path });
-          }
-        }
-      } else {
-        await smartCopy(item.path, newPath, item.size || 0);
-        if (mode === 'move') {
-          await remove({ path: item.path });
-        }
-      }
+    // Close the modal first so the user is unblocked.
+    setMoveItem(null);
 
-      success(`${mode === 'move' ? 'Moved' : 'Copied'} ${item.name}`);
-      addNotification(
-        mode === 'move' ? 'Item Moved' : 'Item Copied',
-        `${item.name} ${mode === 'move' ? 'moved' : 'copied'} to ${destinationPath || 'root'}`,
-        mode,
-        newPath
-      );
-      setMoveItem(null);
-      setRefreshKey(prev => prev + 1);
-    } catch (err) {
-      const e = err as Error;
-      console.error('Move/Copy error:', e);
-      // Show the actual underlying error so users can see what went wrong
-      const detail = e?.message || String(err);
-      showError(`Failed to ${moveItem.mode}: ${detail.slice(0, 200)}`);
-    } finally {
-      setIsProcessing(false);
-    }
-  };
+    const opId = startOperation(mode, item.name, item.size || 0);
 
-  // Bulk Move/Copy handler
-  const handleBulkMoveOrCopy = async (destinationPath: string) => {
-    if (!bulkMoveMode || selectedItems.length === 0) return;
-    setIsProcessing(true);
-    try {
-      for (const item of selectedItems) {
-        const newPath = destinationPath + item.name + (item.type === 'folder' ? '/' : '');
-
+    (async () => {
+      try {
         if (item.type === 'folder') {
           const contents = await list({ path: item.path, options: { listAll: true } });
-          for (const file of contents.items) {
+          const total = contents.items.length || 1;
+          updateOperation(opId, { total, current: 0 });
+          for (let i = 0; i < contents.items.length; i++) {
+            const file = contents.items[i];
             const newItemPath = file.path.replace(item.path, newPath);
             await smartCopy(file.path, newItemPath, file.size || 0);
-            if (bulkMoveMode === 'move') {
+            if (mode === 'move') {
               await remove({ path: file.path });
             }
+            const done = i + 1;
+            updateOperation(opId, {
+              current: done,
+              progress: Math.round((done / total) * 100),
+            });
           }
         } else {
           await smartCopy(item.path, newPath, item.size || 0);
-          if (bulkMoveMode === 'move') {
+          if (mode === 'move') {
             await remove({ path: item.path });
           }
         }
-      }
 
-      success(`${bulkMoveMode === 'move' ? 'Moved' : 'Copied'} ${selectedItems.length} items`);
-      addNotification(
-        bulkMoveMode === 'move' ? 'Items Moved' : 'Items Copied',
-        `${selectedItems.length} items ${bulkMoveMode === 'move' ? 'moved' : 'copied'} to ${destinationPath || 'root'}`,
-        bulkMoveMode
-      );
-      setBulkMoveMode(null);
-      setSelectedItems([]);
-      setRefreshKey(prev => prev + 1);
-    } catch (err) {
-      const e = err as Error;
-      console.error('Bulk Move/Copy error:', e);
-      const detail = e?.message || String(err);
-      showError(`Failed to ${bulkMoveMode}: ${detail.slice(0, 200)}`);
-    } finally {
-      setIsProcessing(false);
-    }
+        completeOperation(opId);
+        success(`${mode === 'move' ? 'Moved' : 'Copied'} ${item.name}`);
+        addNotification(
+          mode === 'move' ? 'Item Moved' : 'Item Copied',
+          `${item.name} ${mode === 'move' ? 'moved' : 'copied'} to ${destinationPath || 'root'}`,
+          mode,
+          newPath
+        );
+        setRefreshKey(prev => prev + 1);
+      } catch (err) {
+        const e = err as Error;
+        console.error('Move/Copy error:', e);
+        const detail = e?.message || String(err);
+        failOperation(opId, detail);
+        showError(`Failed to ${mode} ${item.name}: ${detail.slice(0, 200)}`);
+      }
+    })();
   };
 
-  // Delete handler for single item
-  const handleDelete = async () => {
-    if (!deleteConfirm) return;
-    setIsProcessing(true);
-    try {
-      if (deleteConfirm.type === 'folder') {
-        const contents = await list({ path: deleteConfirm.path, options: { listAll: true } });
-        for (const item of contents.items) {
-          await remove({ path: item.path });
+  // Bulk Move/Copy handler — runs in the background. Each top-level item gets
+  // its own operations-panel entry so progress is visible per item.
+  const handleBulkMoveOrCopy = (destinationPath: string) => {
+    if (!bulkMoveMode || selectedItems.length === 0) return;
+    const mode = bulkMoveMode;
+    const itemsToProcess = [...selectedItems];
+
+    // Close modal and reset selection right away.
+    setBulkMoveMode(null);
+    setSelectedItems([]);
+
+    (async () => {
+      let successCount = 0;
+      let errorCount = 0;
+      for (const item of itemsToProcess) {
+        const newPath = destinationPath + item.name + (item.type === 'folder' ? '/' : '');
+        const opId = startOperation(mode, item.name, item.size || 0);
+        try {
+          if (item.type === 'folder') {
+            const contents = await list({ path: item.path, options: { listAll: true } });
+            const total = contents.items.length || 1;
+            updateOperation(opId, { total, current: 0 });
+            for (let i = 0; i < contents.items.length; i++) {
+              const file = contents.items[i];
+              const newItemPath = file.path.replace(item.path, newPath);
+              await smartCopy(file.path, newItemPath, file.size || 0);
+              if (mode === 'move') {
+                await remove({ path: file.path });
+              }
+              const done = i + 1;
+              updateOperation(opId, {
+                current: done,
+                progress: Math.round((done / total) * 100),
+              });
+            }
+          } else {
+            await smartCopy(item.path, newPath, item.size || 0);
+            if (mode === 'move') {
+              await remove({ path: item.path });
+            }
+          }
+          completeOperation(opId);
+          successCount++;
+        } catch (err) {
+          const detail = (err as Error)?.message || String(err);
+          console.error('Bulk Move/Copy error:', err);
+          failOperation(opId, detail);
+          errorCount++;
         }
-      } else {
-        await remove({ path: deleteConfirm.path });
       }
 
-      success(`Deleted ${deleteConfirm.name}`);
-      addNotification('Item Deleted', `${deleteConfirm.name} has been deleted`, 'delete');
-      setDeleteConfirm(null);
+      if (errorCount === 0) {
+        success(`${mode === 'move' ? 'Moved' : 'Copied'} ${successCount} items`);
+        addNotification(
+          mode === 'move' ? 'Items Moved' : 'Items Copied',
+          `${successCount} items ${mode === 'move' ? 'moved' : 'copied'} to ${destinationPath || 'root'}`,
+          mode
+        );
+      } else {
+        warning(
+          `${mode === 'move' ? 'Moved' : 'Copied'} ${successCount} of ${itemsToProcess.length} (${errorCount} failed) — see Operations panel`
+        );
+        addNotification(
+          mode === 'move' ? 'Items Moved' : 'Items Copied',
+          `${successCount} ${mode === 'move' ? 'moved' : 'copied'}, ${errorCount} failed`,
+          mode
+        );
+      }
       setRefreshKey(prev => prev + 1);
-    } catch (err) {
-      console.error('Delete error:', err);
-      showError('Failed to delete');
-    } finally {
-      setIsProcessing(false);
-    }
+    })();
   };
 
-  // Bulk delete handler
-  const handleBulkDelete = async () => {
-    if (selectedItems.length === 0) return;
-    setIsProcessing(true);
-    try {
-      for (const item of selectedItems) {
+  // Delete handler for single item — runs in the background so the user can
+  // navigate away while the deletion finishes.
+  const handleDelete = () => {
+    if (!deleteConfirm) return;
+    const item = deleteConfirm;
+    setDeleteConfirm(null);
+
+    const opId = startOperation('delete', item.name, item.size || 0);
+
+    (async () => {
+      try {
         if (item.type === 'folder') {
           const contents = await list({ path: item.path, options: { listAll: true } });
-          for (const file of contents.items) {
-            await remove({ path: file.path });
+          const total = contents.items.length || 1;
+          updateOperation(opId, { total, current: 0 });
+          for (let i = 0; i < contents.items.length; i++) {
+            await remove({ path: contents.items[i].path });
+            const done = i + 1;
+            updateOperation(opId, {
+              current: done,
+              progress: Math.round((done / total) * 100),
+            });
           }
         } else {
           await remove({ path: item.path });
         }
+
+        completeOperation(opId);
+        success(`Deleted ${item.name}`);
+        addNotification('Item Deleted', `${item.name} has been deleted`, 'delete');
+        setRefreshKey(prev => prev + 1);
+      } catch (err) {
+        const detail = (err as Error)?.message || String(err);
+        console.error('Delete error:', err);
+        failOperation(opId, detail);
+        showError(`Failed to delete ${item.name}: ${detail.slice(0, 200)}`);
+      }
+    })();
+  };
+
+  // Bulk delete handler — runs in the background; one panel entry per item.
+  const handleBulkDelete = () => {
+    if (selectedItems.length === 0) return;
+    const itemsToProcess = [...selectedItems];
+    setBulkDeleteConfirm(false);
+    setSelectedItems([]);
+
+    (async () => {
+      let successCount = 0;
+      let errorCount = 0;
+      for (const item of itemsToProcess) {
+        const opId = startOperation('delete', item.name, item.size || 0);
+        try {
+          if (item.type === 'folder') {
+            const contents = await list({ path: item.path, options: { listAll: true } });
+            const total = contents.items.length || 1;
+            updateOperation(opId, { total, current: 0 });
+            for (let i = 0; i < contents.items.length; i++) {
+              await remove({ path: contents.items[i].path });
+              const done = i + 1;
+              updateOperation(opId, {
+                current: done,
+                progress: Math.round((done / total) * 100),
+              });
+            }
+          } else {
+            await remove({ path: item.path });
+          }
+          completeOperation(opId);
+          successCount++;
+        } catch (err) {
+          const detail = (err as Error)?.message || String(err);
+          console.error('Bulk delete error:', err);
+          failOperation(opId, detail);
+          errorCount++;
+        }
       }
 
-      success(`Deleted ${selectedItems.length} items`);
-      addNotification('Items Deleted', `${selectedItems.length} items have been deleted`, 'delete');
-      setBulkDeleteConfirm(false);
-      setSelectedItems([]);
+      if (errorCount === 0) {
+        success(`Deleted ${successCount} items`);
+        addNotification('Items Deleted', `${successCount} items have been deleted`, 'delete');
+      } else {
+        warning(
+          `Deleted ${successCount} of ${itemsToProcess.length} (${errorCount} failed) — see Operations panel`
+        );
+        addNotification('Items Deleted', `${successCount} deleted, ${errorCount} failed`, 'delete');
+      }
       setRefreshKey(prev => prev + 1);
-    } catch (err) {
-      console.error('Bulk delete error:', err);
-      showError('Failed to delete some items');
-    } finally {
-      setIsProcessing(false);
-    }
+    })();
   };
 
   // Create folder handler
@@ -565,7 +726,10 @@ function FileBrowser() {
     }
   };
 
-  // Download handler for selected items
+  // Download handler for selected items — each file gets a brief entry in the
+  // operations panel so the user can see what was kicked off. Once the signed
+  // URL is handed to the browser the OS handles the actual transfer, so we
+  // mark the entry complete immediately after triggering the download.
   const handleDownloadSelected = async () => {
     if (selectedItems.length === 0) return;
 
@@ -575,6 +739,7 @@ function FileBrowser() {
         continue;
       }
 
+      const opId = startOperation('download', item.name, item.size || 0);
       try {
         const result = await getUrl({
           path: item.path,
@@ -589,11 +754,14 @@ function FileBrowser() {
         link.click();
         document.body.removeChild(link);
 
+        completeOperation(opId);
         success(`Downloading ${item.name}`);
         addNotification('File Downloaded', `${item.name} downloaded`, 'download', item.path);
       } catch (err) {
+        const detail = (err as Error)?.message || String(err);
         console.error('Download error:', err);
-        showError(`Failed to download ${item.name}`);
+        failOperation(opId, detail);
+        showError(`Failed to download ${item.name}: ${detail.slice(0, 200)}`);
       }
     }
   };
@@ -605,7 +773,13 @@ function FileBrowser() {
 
     const uploadPath = currentPath || folders[0].path;
 
-    const newUploads: UploadItem[] = Array.from(fileList).map(file => ({
+    // Snapshot the FileList into a real array up front — fileList is a live
+    // collection on the input element that loses entries when we reset
+    // e.target.value at the end of the handler, so iterating it mid-flight
+    // would drop files.
+    const files = Array.from(fileList);
+
+    const newUploads: UploadItem[] = files.map(file => ({
       id: `upload-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
       fileName: file.name,
       progress: 0,
@@ -614,66 +788,96 @@ function FileBrowser() {
     }));
 
     setUploads(prev => [...prev, ...newUploads]);
+    // Clear the input now so the user can immediately queue another batch
+    // while this one is still uploading.
+    e.target.value = '';
 
     let successCount = 0;
     let errorCount = 0;
+    const failedFiles: { name: string; error: string }[] = [];
 
-    for (let i = 0; i < fileList.length; i++) {
-      const file = fileList[i];
+    // Per-file retry: a transient network blip or a credentials hiccup
+    // shouldn't kill the upload — try each file up to MAX_ATTEMPTS times
+    // before giving up.
+    const MAX_ATTEMPTS = 3;
+
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
       const uploadId = newUploads[i].id;
       const path = uploadPath + file.name;
 
-      try {
-        setUploads(prev =>
-          prev.map(u => (u.id === uploadId ? { ...u, status: 'uploading' as const } : u))
-        );
+      let attempt = 0;
+      let lastError: Error | null = null;
 
-        // Throttle progress updates to reduce re-renders during batch uploads
-        let lastProgressUpdate = 0;
-        await uploadData({
-          path,
-          data: file,
-          options: {
-            onProgress: ({ transferredBytes, totalBytes }) => {
-              const now = Date.now();
-              const progress = totalBytes ? Math.round((transferredBytes / totalBytes) * 100) : 0;
-              // Only update state every 500ms or at 100% to avoid excessive re-renders
-              if (now - lastProgressUpdate > 500 || progress === 100) {
-                lastProgressUpdate = now;
-                setUploads(prev =>
-                  prev.map(u => (u.id === uploadId ? { ...u, progress } : u))
-                );
-              }
-            },
-          },
-        }).result;
+      while (attempt < MAX_ATTEMPTS) {
+        attempt++;
+        try {
+          setUploads(prev =>
+            prev.map(u =>
+              u.id === uploadId
+                ? { ...u, status: 'uploading' as const, progress: 0, error: undefined }
+                : u
+            )
+          );
 
-        setUploads(prev =>
-          prev.map(u => (u.id === uploadId ? { ...u, status: 'completed' as const, progress: 100 } : u))
-        );
+          // Throttle progress updates to reduce re-renders during batch uploads
+          let lastProgressUpdate = 0;
+          await smartUpload(file, path, (transferred, total) => {
+            const now = Date.now();
+            const progress = total ? Math.round((transferred / total) * 100) : 0;
+            // Only update state every 500ms or at 100% to avoid excessive re-renders
+            if (now - lastProgressUpdate > 500 || progress === 100) {
+              lastProgressUpdate = now;
+              setUploads(prev =>
+                prev.map(u => (u.id === uploadId ? { ...u, progress } : u))
+              );
+            }
+          });
 
-        successCount++;
-      } catch (err) {
-        console.error('Upload error:', err);
+          setUploads(prev =>
+            prev.map(u =>
+              u.id === uploadId
+                ? { ...u, status: 'completed' as const, progress: 100, error: undefined }
+                : u
+            )
+          );
+          successCount++;
+          lastError = null;
+          break; // success — leave the retry loop
+        } catch (err) {
+          lastError = err as Error;
+          console.error(`Upload attempt ${attempt}/${MAX_ATTEMPTS} failed for ${file.name}:`, err);
+          if (attempt < MAX_ATTEMPTS) {
+            // Exponential backoff before retrying the whole file
+            const delay = 2000 * Math.pow(2, attempt - 1);
+            await new Promise(resolve => setTimeout(resolve, delay));
+          }
+        }
+      }
+
+      if (lastError) {
+        const msg = (lastError.message || String(lastError)).slice(0, 200);
         setUploads(prev =>
           prev.map(u =>
             u.id === uploadId
-              ? { ...u, status: 'error' as const, error: 'Upload failed' }
+              ? { ...u, status: 'error' as const, error: msg }
               : u
           )
         );
         errorCount++;
+        failedFiles.push({ name: file.name, error: msg });
       }
     }
 
     // Single batch notification instead of per-file spam
-    const totalCount = fileList.length;
+    const totalCount = files.length;
     if (totalCount === 1) {
       if (successCount === 1) {
-        addNotification('File Uploaded', `${fileList[0].name} has been uploaded`, 'upload', uploadPath + fileList[0].name);
-        success(`Uploaded ${fileList[0].name}`);
+        addNotification('File Uploaded', `${files[0].name} has been uploaded`, 'upload', uploadPath + files[0].name);
+        success(`Uploaded ${files[0].name}`);
       } else {
-        showError(`Failed to upload ${fileList[0].name}`);
+        const detail = failedFiles[0]?.error || 'Upload failed';
+        showError(`Failed to upload ${files[0].name}: ${detail}`);
       }
     } else {
       const folderName = uploadPath.replace(/\/$/, '').split('/').pop() || uploadPath;
@@ -682,12 +886,11 @@ function FileBrowser() {
         success(`Uploaded ${successCount} files`);
       } else {
         addNotification('Batch Upload Complete', `${successCount} uploaded, ${errorCount} failed in ${folderName}`, 'upload', uploadPath);
-        warning(`Uploaded ${successCount} of ${totalCount} files (${errorCount} failed)`);
+        warning(`Uploaded ${successCount} of ${totalCount} files (${errorCount} failed) — see Uploads panel for details`);
       }
     }
 
     setRefreshKey(prev => prev + 1);
-    e.target.value = '';
   };
 
   // File input ref

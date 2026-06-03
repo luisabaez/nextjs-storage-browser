@@ -50,6 +50,9 @@ from column_registry import get_column_mapping
 # Conversion plan tracking — auto-populates SETUP_CONVERSION_PLAN_{MOCK}
 from conversion_plan_tracker import track_file_load
 
+# Mock promotion — clones a Mock's schema/data into a new Mock (admin action)
+from promote_mock import handle_promote_mock_request
+
 # ─── Configuration ────────────────────────────────────────────────────────────
 
 DEFAULT_BUCKET = "hacienda-erp-dev"
@@ -788,6 +791,41 @@ def lambda_handler(event, context):
                 "statusCode": 500,
                 "headers": headers,
                 "body": json.dumps({"error": str(e)}),
+            }
+
+    # ── PROMOTE MOCK ACTION ──
+    # Admin-only. Clones a source Mock's structural data into a new target Mock.
+    # Two-phase UX in the dashboard: first call with dry_run=true to render the
+    # preview, then call with dry_run=false to execute. Audit row always written
+    # to MOCK_PROMOTIONS regardless of outcome.
+    if action == "promote_mock":
+        try:
+            params = event.get("queryStringParameters") or {}
+            source = params.get("source", "")
+            target = params.get("target", "")
+            actor = params.get("actor", "")
+            dry_run = str(params.get("dry_run", "true")).lower() in ("true", "1", "yes")
+
+            conn_str = get_connection_string()
+            result = handle_promote_mock_request(
+                connection_str=conn_str,
+                source=source,
+                target=target,
+                actor=actor,
+                dry_run=dry_run,
+            )
+            status_code = 200 if result.get("ok") else 400
+            return {
+                "statusCode": status_code,
+                "headers": headers,
+                "body": json.dumps(result, default=str),
+            }
+        except Exception as e:
+            traceback.print_exc()
+            return {
+                "statusCode": 500,
+                "headers": headers,
+                "body": json.dumps({"ok": False, "error": str(e)}),
             }
 
     # ── CONVERSION PLAN ACTION ──

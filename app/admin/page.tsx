@@ -311,6 +311,10 @@ function AdminDashboard() {
           <span className="tab-icon">📋</span>
           Activity Log
         </button>
+        <Link href="/admin/promote-mock" className="admin-nav-tab" style={{ textDecoration: 'none' }}>
+          <span className="tab-icon">⏭️</span>
+          Promote Mock
+        </Link>
       </nav>
 
       {/* Main Content */}

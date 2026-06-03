@@ -17,11 +17,20 @@ Key behaviors:
 import re
 from datetime import datetime
 
-# All columns from the reference table SETUP_CONVERSION_PLAN_MOCK12,
-# plus additional tracking columns we add for version control.
+# All 92 columns from the Database_Schema_v9.xlsx Conversion Plan sheet,
+# plus 8 per-file-load tracking columns. Used when Lambda auto-creates a new
+# SETUP_CONVERSION_PLAN_MOCK{N} table (Phase 1 migration handles MOCK13
+# explicitly; this list governs MOCK14+ creation).
 SETUP_COLUMNS = [
-    # ── Original reference columns (54) ──
+    # ── Core Identity & WBS (spec cols 1-6, 5 new) ──
     "Pillar",
+    "ID",                                  # WBS ID string e.g. 1.1.1.1.5.1
+    "WBS_level",
+    "Validation_Group_ID",
+    "Predecessor_Validation_Group_ID",
+    "Successors_for_Initial_Validation",
+
+    # ── Entity Classification (spec cols 7-15) ──
     "Module",
     "Entity",
     "Data_Sources",
@@ -31,6 +40,8 @@ SETUP_COLUMNS = [
     "RESPONSE",
     "Entity_Requested_to_Source",
     "On_Conversion_Plan",
+
+    # ── Source & Enrichment (spec cols 16-28) ──
     "REQ_TO_BEGIN_MOCK",
     "Added_To_Conversion_Plan",
     "alternate_table_name",
@@ -44,6 +55,8 @@ SETUP_COLUMNS = [
     "COMPANY",
     "ENRICHMENT_SYSTEM",
     "SourceOnlyFlag_Extracted",
+
+    # ── Conversion Mapping (spec cols 29-43) ──
     "RECON_VIEW_NAME",
     "CONVERSION_TABLE",
     "CONVERSION_TABLE_SourceField",
@@ -59,6 +72,8 @@ SETUP_COLUMNS = [
     "BackpTableOnDelivery",
     "CONVERSION_TABLE_BU",
     "PostMockTable",
+
+    # ── Validation & Recon (spec cols 44-50) ──
     "POSTMOCK",
     "FileName",
     "File_Expected",
@@ -66,6 +81,8 @@ SETUP_COLUMNS = [
     "Validation_ViewPrefix",
     "CONVERSION_TABLE_DELTA01",
     "ExtractMethod",
+
+    # ── Extract & File (spec cols 51-58) ──
     "ValidationSourceExist",
     "ValidationBeforeSendExist",
     "Validation_Program",
@@ -74,7 +91,54 @@ SETUP_COLUMNS = [
     "BU",
     "Validation_ViewPrefix_BefSend",
     "RequiredPhase2",
-    # ── New tracking columns ──
+
+    # ── WBS Breakdown (spec cols 59-64, 6 new) ──
+    "WBS_L1_Mock",
+    "WBS_L2_Pillar",
+    "WBS_L3_Module",
+    "WBS_L4_Entity",
+    "WBS_L5_Source",
+    "WBS_L6_Table",
+
+    # ── Mock / Phase (spec cols 65-66, 2 new) ──
+    "Mock_Number",
+    "Phase",
+
+    # ── Scheduling & Ownership (spec cols 67-73, 7 new) ──
+    "Expected_File_Receipt_Date",
+    "Actual_File_Receipt_Date",
+    "Target_Conversion_Complete",
+    "Target_Oracle_Load_Date",
+    "Responsible_Team",
+    "Owner_Contact",
+    "Priority",
+
+    # ── Current Status (spec cols 74-85, 12 new) — drives the Gantt View ──
+    "Current_Process_Stage",
+    "Latest_File_ID",                 # eTag pointer into AWS_FILES
+    "Latest_File_Upload_Date",
+    "Total_Upload_Attempts",
+    "Latest_Validation_Status",
+    "Latest_Approval_Status",
+    "Latest_Approver",
+    "Latest_Approval_Date",
+    "Pre_Load_Validation_Status",
+    "Pre_Load_Recon_Status",
+    "Oracle_Load_Status",
+    "Oracle_Load_Date",
+
+    # ── Blockers & Issues (spec cols 86-89, 4 new) ──
+    "Blocker_Flag",
+    "Blocker_Description",
+    "Issue_Opened_Date",
+    "Issue_Resolved_Date",
+
+    # ── Audit (spec cols 90-92, 3 new) ──
+    "Last_Updated_By",
+    "Last_Updated_Date",
+    "Notes",
+
+    # ── Our per-file-load tracking columns (separate from spec Audit) ──
     "LoadedAt",            # Timestamp of when the file was loaded
     "LoadedBy",            # Who triggered the load
     "FileTimestamp",       # Date/time extracted from the filename
