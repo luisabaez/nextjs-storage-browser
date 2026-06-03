@@ -53,6 +53,11 @@ from conversion_plan_tracker import track_file_load
 # Mock promotion — clones a Mock's schema/data into a new Mock (admin action)
 from promote_mock import handle_promote_mock_request
 
+# AWS_FILES event-log writer — tracks every S3 file transition through the
+# pipeline. Imported as a module so per-call failures (caught inside each
+# function via the _safe decorator) never abort the main file load.
+import aws_files_writer
+
 # ─── Configuration ────────────────────────────────────────────────────────────
 
 DEFAULT_BUCKET = "hacienda-erp-dev"
@@ -106,6 +111,8 @@ def list_input_files(bucket):
                     "name": name,
                     "size": obj["Size"],
                     "last_modified": obj["LastModified"].isoformat(),
+                    # S3 returns ETag wrapped in double quotes — we strip in aws_files_writer
+                    "etag": obj.get("ETag", ""),
                 })
     return files
 
@@ -416,16 +423,49 @@ def process_single_file(bucket, file_info, connection_str, context=None, trigger
         "completedAt": None,
     }
 
+    # eTag captured up front so AWS_FILES rows can be written/updated
+    # regardless of which branch of the pipeline this file takes.
+    file_etag = file_info.get("etag", "")
+    result["etag"] = file_etag
+
     try:
         file_size = file_info.get("size", 0)
         is_large_file = file_size > CHUNK_THRESHOLD
 
         # Step 1: Parse filename
         parsed = parse_filename(filename)
+
+        # ── AWS_FILES: write seq 1 'Received' row ──
+        # Always write a row, even when parsing fails — the dashboard needs
+        # visibility into bad files too. If parse succeeded, the row gets the
+        # full FK metadata (validation_group_id, WBS_ID, etc.).
+        aws_files_writer.write_received_row(
+            connection_str=connection_str,
+            bucket=bucket,
+            file_key=file_key,
+            etag=file_etag,
+            file_size_bytes=file_size,
+            parsed=parsed if parsed["valid"] else None,
+            triggered_by=triggered_by,
+        )
+
         if not parsed["valid"]:
+            aws_files_writer.mark_gate_check_failure(
+                connection_str, file_etag,
+                "Check_File_Name", parsed["error"],
+            )
             raise ValueError(f"Invalid filename: {parsed['error']}")
 
+        # Gate 1 passed
+        aws_files_writer.update_gate_check(
+            connection_str, file_etag, "Check_File_Name", aws_files_writer.CHECK_PASS,
+        )
+
         if parsed["is_excluded"]:
+            aws_files_writer.mark_gate_check_failure(
+                connection_str, file_etag,
+                "Check_File_Expected", "Entity is excluded from this Mock",
+            )
             raise ValueError(f"File belongs to an excluded entity: {filename}")
 
         result["source"] = parsed["source"]
@@ -448,6 +488,45 @@ def process_single_file(bucket, file_info, connection_str, context=None, trigger
         # Step 2: Validate source
         if not validate_source(source):
             print(f"  WARNING: Unknown source agency '{source}', proceeding anyway")
+
+        # Gate 2: File_Expected check
+        # Query SETUP_CONVERSION_PLAN_{MOCK} for File_Expected on this entity.
+        # If 'N' the file should not have been uploaded — reject before reading.
+        # When the entity row isn't in the plan yet (first time we see it), we
+        # treat that as Expected=Y so onboarding doesn't break.
+        file_expected_ok = True
+        file_expected_msg = ""
+        try:
+            with pyodbc.connect(connection_str) as fe_conn:
+                fe_cur = fe_conn.cursor()
+                setup_table = f"SETUP_CONVERSION_PLAN_{mock_number}"
+                fe_cur.execute("SELECT COUNT(*) FROM sys.tables WHERE name = ?", (setup_table,))
+                if fe_cur.fetchone()[0] > 0:
+                    fe_cur.execute(
+                        f"SELECT TOP 1 [File_Expected] FROM [{setup_table}] "
+                        f"WHERE LTRIM(RTRIM(ISNULL([Entity], ''))) = ? "
+                        f"AND LTRIM(RTRIM(ISNULL([SOURCE], ''))) = ?",
+                        (parsed.get("entity_display") or entity_prefix, source),
+                    )
+                    fe_row = fe_cur.fetchone()
+                    if fe_row and (fe_row[0] or "").strip().upper() == "N":
+                        file_expected_ok = False
+                        file_expected_msg = (
+                            f"Entity {entity_prefix}/{source} has File_Expected=N in {setup_table}"
+                        )
+        except Exception as fe_err:
+            # Don't block processing if the lookup itself blows up
+            print(f"  WARNING: File_Expected lookup failed: {fe_err}")
+
+        if not file_expected_ok:
+            aws_files_writer.mark_gate_check_failure(
+                connection_str, file_etag,
+                "Check_File_Expected", file_expected_msg,
+            )
+            raise ValueError(f"File Not Expected: {file_expected_msg}")
+        aws_files_writer.update_gate_check(
+            connection_str, file_etag, "Check_File_Expected", aws_files_writer.CHECK_PASS,
+        )
 
         # Step 3: Read file from S3
         file_size_mb = file_size / (1024 * 1024)
@@ -485,11 +564,18 @@ def process_single_file(bucket, file_info, connection_str, context=None, trigger
                     f"No column mapping found for legacy type={file_type}, source={source}"
                 )
 
-            # Validate CSV headers
+            # Validate CSV headers (gate 3)
             actual_headers = list(df.columns)
             is_valid, header_error = validate_csv_headers(actual_headers, mapping["csv_columns"])
             if not is_valid:
+                aws_files_writer.mark_gate_check_failure(
+                    connection_str, file_etag,
+                    "Check_Column_Headers", header_error,
+                )
                 raise ValueError(f"Header validation failed: {header_error}")
+            aws_files_writer.update_gate_check(
+                connection_str, file_etag, "Check_Column_Headers", aws_files_writer.CHECK_PASS,
+            )
 
             table_name = legacy_get_table_name(file_type, mock_number, source)
             sql_columns = mapping["sql_columns"]
@@ -543,6 +629,15 @@ def process_single_file(bucket, file_info, connection_str, context=None, trigger
                 sql_columns = [sanitize_column_name(h) for h in actual_headers]
                 csv_columns = actual_headers
 
+            # Gate 3 (Check_Column_Headers): file gets loaded either via the
+            # mapped schema OR the dynamic fallback — both are valid Pass
+            # outcomes from the gate-check perspective. Hard failure only
+            # raises when the file can't be processed at all (handled below
+            # in the outer except as TSQL_Load_Error).
+            aws_files_writer.update_gate_check(
+                connection_str, file_etag, "Check_Column_Headers", aws_files_writer.CHECK_PASS,
+            )
+
             table_name = registry_get_table_name(entity_prefix, mock_number, source)
             print(f"  Target table ({'mapped' if use_mapped else 'dynamic'}): {table_name}")
 
@@ -565,10 +660,26 @@ def process_single_file(bucket, file_info, connection_str, context=None, trigger
                     _batch_insert(cursor, conn, table_name, sql_columns, rows)
                     result["rowCount"] = len(rows)
 
+        # Gates 4 & 5 pass + record final state on the seq 1 row
+        aws_files_writer.mark_load_success(
+            connection_str, file_etag, table_name, result["rowCount"],
+        )
+        # Capture Business_Unit (denorm'd onto AWS_FILES for filter/permissions)
+        try:
+            from conversion_plan_tracker import _extract_bu_from_dataframe
+            bu_value = _extract_bu_from_dataframe(df)
+            if bu_value:
+                aws_files_writer.update_business_unit(connection_str, file_etag, bu_value)
+        except Exception as bu_err:
+            print(f"  WARNING: BU extraction failed: {bu_err}")
+
         # Step 5: Move to processed folder (organized by MODULE/MOCK/SOURCE/ENTITY)
         dest_key = f"{PROCESSED_FOLDER}{parsed['module']}/{mock_number}/{source}/{entity_prefix}/{filename}"
         move_file(bucket, file_key, dest_key)
         print(f"  Moved to: {dest_key}")
+
+        # Seq 2 AWS_FILES row at the new S3 location
+        aws_files_writer.write_seq2_move_row(connection_str, file_etag, bucket, dest_key)
 
         # Step 6: Track file in SETUP_CONVERSION_PLAN_{MOCK}
         # Pass dest_key so the table stores where the file lives now
@@ -593,6 +704,28 @@ def process_single_file(bucket, file_info, connection_str, context=None, trigger
         result["error"] = error_msg
         result["completedAt"] = datetime.utcnow().isoformat()
 
+        # If the failure happened past the gate-check stage (i.e. during the
+        # actual TSQL load), record it as Check_TSQL_Load = Fail. Earlier gate
+        # failures already wrote their own AWS_FILES row update before raising
+        # — mark_gate_check_failure is idempotent-ish for the eTag so re-marking
+        # a later gate doesn't undo the earlier one (it only writes if the
+        # column isn't already Fail).
+        try:
+            err_text = (error_msg or "").lower()
+            already_marked = any(
+                m in err_text for m in (
+                    "invalid filename:", "file belongs to an excluded entity",
+                    "file not expected:", "header validation failed:",
+                )
+            )
+            if not already_marked:
+                aws_files_writer.mark_gate_check_failure(
+                    connection_str, file_etag,
+                    "Check_TSQL_Load", error_msg[:500],
+                )
+        except Exception as gate_err:
+            print(f"  WARNING: aws_files_writer gate marker failed: {gate_err}")
+
         # Move to failed folder
         try:
             mock = result.get("mockNumber", "unknown")
@@ -608,6 +741,8 @@ def process_single_file(bucket, file_info, connection_str, context=None, trigger
             move_file(bucket, file_key, dest_key)
             write_error_file(bucket, dest_key, f"{error_msg}\n\n{tb}")
             print(f"  Moved to: {dest_key}")
+            # Record where the failed file ended up on the seq 1 row
+            aws_files_writer.mark_moved_to_errors(connection_str, file_etag, dest_key)
         except Exception as move_err:
             print(f"  ERROR moving failed file: {move_err}")
 
