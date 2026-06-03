@@ -111,10 +111,11 @@ function PromoteMockPage() {
     )) {
       return;
     }
+    const rowMsg = totalRowsToCopy > 0
+      ? `Copies ${totalRowsToCopy.toLocaleString()} structural row(s) from MOCK${sourceMock}; clears tracking columns (LoadedAt, Latest_*, Approval_*, etc.) on the new Mock.`
+      : `Source has 0 rows. MOCK${targetMock} tables will be created EMPTY with the correct shape — ready to receive data when files are loaded.`;
     if (!window.confirm(
-      `This will create MOCK${targetMock} tables and copy structural rows from MOCK${sourceMock}.\n\n` +
-      'Tracking columns (LoadedAt, Latest_*, Approval_*, etc.) will be cleared on the new Mock.\n\n' +
-      'Proceed?'
+      `This will create ${tablesToCreate.length} MOCK${targetMock} table(s).\n\n${rowMsg}\n\nProceed?`
     )) return;
 
     setError('');
@@ -157,7 +158,13 @@ function PromoteMockPage() {
     );
   }
 
-  const canPromote = !!preview && preview.tables.some(t => t.rows_to_copy > 0);
+  // Promote is meaningful whenever at least one target table can be CREATED —
+  // i.e., the source table exists and the target doesn't. Empty source tables
+  // still produce a useful outcome: the target Mock gets fresh, correctly-shaped
+  // tables ready for new data.
+  const tablesToCreate = preview ? preview.tables.filter(t => t.source_exists && !t.target_exists) : [];
+  const canPromote = tablesToCreate.length > 0;
+  const totalRowsToCopy = preview ? preview.tables.reduce((sum, t) => sum + (t.rows_to_copy || 0), 0) : 0;
 
   return (
     <div className="admin-container" style={{ maxWidth: 1100, margin: '0 auto', padding: 24 }}>
@@ -259,18 +266,32 @@ function PromoteMockPage() {
             </tbody>
           </table>
 
-          <div style={{ display: 'flex', gap: 12, marginTop: 20, justifyContent: 'flex-end' }}>
-            <button className="btn btn-secondary" onClick={() => setPreview(null)} disabled={promoting}>
-              Cancel
-            </button>
-            <button
-              className="btn btn-primary"
-              onClick={runPromotion}
-              disabled={!canPromote || promoting}
-              title={!canPromote ? 'No rows would be copied (all targets exist or sources missing)' : ''}
-            >
-              {promoting ? 'Promoting…' : `Promote to ${preview.target_mock}`}
-            </button>
+          <div style={{ display: 'flex', gap: 12, marginTop: 20, justifyContent: 'space-between', alignItems: 'center' }}>
+            <div style={{ fontSize: 13, color: '#4b5563' }}>
+              {canPromote ? (
+                <>
+                  Will create <strong>{tablesToCreate.length}</strong> target table{tablesToCreate.length === 1 ? '' : 's'}
+                  {totalRowsToCopy > 0
+                    ? <> and copy <strong>{totalRowsToCopy.toLocaleString()}</strong> rows.</>
+                    : <> (no source rows to copy — target tables created empty, ready for new data).</>}
+                </>
+              ) : (
+                <>Nothing to promote — every target table already exists, or all source tables are missing.</>
+              )}
+            </div>
+            <div style={{ display: 'flex', gap: 12 }}>
+              <button className="btn btn-secondary" onClick={() => setPreview(null)} disabled={promoting}>
+                Cancel
+              </button>
+              <button
+                className="btn btn-primary"
+                onClick={runPromotion}
+                disabled={!canPromote || promoting}
+                title={!canPromote ? 'Nothing to promote (all targets exist or sources missing)' : ''}
+              >
+                {promoting ? 'Promoting…' : `Promote to ${preview.target_mock}`}
+              </button>
+            </div>
           </div>
         </section>
       )}
