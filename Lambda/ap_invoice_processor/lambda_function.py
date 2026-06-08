@@ -58,6 +58,15 @@ from promote_mock import handle_promote_mock_request
 # function via the _safe decorator) never abort the main file load.
 import aws_files_writer
 
+# Phase 4: Validation Group + cross-VG dependency tracking
+from validation_group_tracker import (
+    on_table_load_success as vg_on_table_load_success,
+    handle_list_runs as vg_handle_list_runs,
+    handle_run_complete as vg_handle_run_complete,
+    handle_run_decision as vg_handle_run_decision,
+)
+from vg_dependencies_check import evaluate_dependencies as vg_evaluate_dependencies
+
 # ─── Configuration ────────────────────────────────────────────────────────────
 
 DEFAULT_BUCKET = "hacienda-erp-dev"
@@ -695,6 +704,25 @@ def process_single_file(bucket, file_info, connection_str, context=None, trigger
             etag=file_etag,
         )
 
+        # Step 7 (Phase 4): Recompute Validation Group state.
+        # Wrapped in try/except — VG tracking is observational and must not
+        # break the main file pipeline if VALIDATION_GROUPS_{MOCK} is missing
+        # or the entity isn't mapped to a VG code yet.
+        try:
+            vg_summary = vg_on_table_load_success(
+                connection_str=connection_str,
+                mock_number=mock_number,
+                parsed=parsed,
+                etag=file_etag,
+            )
+            if vg_summary.get("run_created"):
+                print(f"  Validation run triggered: {vg_summary['run_created']} "
+                      f"({vg_summary['trigger_reason']})")
+            elif vg_summary.get("skipped_reason"):
+                print(f"  VG tracking skipped: {vg_summary['skipped_reason']}")
+        except Exception as vg_err:
+            print(f"  WARNING: VG tracker failed (file load still succeeded): {vg_err}")
+
         result["status"] = "success"
         result["completedAt"] = datetime.utcnow().isoformat()
 
@@ -931,6 +959,100 @@ def lambda_handler(event, context):
                 "headers": headers,
                 "body": json.dumps({"error": str(e)}),
             }
+
+    # ─── PHASE 4 — VALIDATION RUNS + DEPENDENCIES ───
+    if action == "validation_runs":
+        # ?action=validation_runs&mock=MOCK12[&status=Pending+Approval]
+        try:
+            params = event.get("queryStringParameters") or {}
+            mock = params.get("mock", "MOCK12")
+            status_filter = params.get("status") or None
+            conn_str = get_connection_string()
+            res = vg_handle_list_runs(conn_str, mock, status_filter)
+            return {
+                "statusCode": 200 if res.get("ok") else 400,
+                "headers": headers,
+                "body": json.dumps(res, default=str),
+            }
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
+    if action == "validation_run_complete":
+        # POSTed by the existing button-driven validation script when it finishes.
+        # Body: { "mock": "MOCK12", "run_id": "VAL-0001", "error_count": N,
+        #         "warning_count": N, "informative_count": N,
+        #         "validation_file_etag": "...", "actor": "validation-runner" }
+        try:
+            body = json.loads(event.get("body") or "{}")
+            conn_str = get_connection_string()
+            res = vg_handle_run_complete(
+                connection_str=conn_str,
+                mock_number=body.get("mock", "MOCK12"),
+                run_id=body.get("run_id", ""),
+                error_count=int(body.get("error_count", 0) or 0),
+                warning_count=int(body.get("warning_count", 0) or 0),
+                informative_count=int(body.get("informative_count", 0) or 0),
+                validation_file_etag=body.get("validation_file_etag") or None,
+                actor=body.get("actor", "") or "",
+            )
+            return {
+                "statusCode": 200 if res.get("ok") else 400,
+                "headers": headers,
+                "body": json.dumps(res, default=str),
+            }
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
+    if action == "validation_run_decide":
+        # POSTed by the approval UI.
+        # Body: { "mock": "MOCK12", "run_id": "VAL-0001",
+        #         "decision": "Approved" | "Rejected", "comments": "...",
+        #         "reextract_required": true|false,
+        #         "affected_members": "TBL1;TBL2", "actor": "user@example.com" }
+        try:
+            body = json.loads(event.get("body") or "{}")
+            conn_str = get_connection_string()
+            res = vg_handle_run_decision(
+                connection_str=conn_str,
+                mock_number=body.get("mock", "MOCK12"),
+                run_id=body.get("run_id", ""),
+                decision=body.get("decision", ""),
+                comments=body.get("comments", "") or "",
+                reextract_required=bool(body.get("reextract_required", False)),
+                affected_members=body.get("affected_members", "") or "",
+                actor=body.get("actor", "") or "",
+            )
+            return {
+                "statusCode": 200 if res.get("ok") else 400,
+                "headers": headers,
+                "body": json.dumps(res, default=str),
+            }
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
+    if action == "vg_dependencies_refresh":
+        # ?action=vg_dependencies_refresh&mock=MOCK12[&vgid=APINV-PRIFAS]
+        # Recomputes Dependency_Status across all VG_DEPENDENCIES rows.
+        try:
+            params = event.get("queryStringParameters") or {}
+            mock = params.get("mock", "MOCK12")
+            vgid = params.get("vgid") or None
+            conn_str = get_connection_string()
+            res = vg_evaluate_dependencies(conn_str, mock, vgid)
+            return {
+                "statusCode": 200, "headers": headers,
+                "body": json.dumps({"ok": True, **res}, default=str),
+            }
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
 
     # ── RESET FILE_EXPECTED ACTION ──
     # Admin-only. Flips File_Expected back to 'Y' for an entity+source row

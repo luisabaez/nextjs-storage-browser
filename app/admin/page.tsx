@@ -319,6 +319,10 @@ function AdminDashboard() {
           <span className="tab-icon">🔄</span>
           Allow Re-upload
         </Link>
+        <Link href="/admin/validation-approvals" className="admin-nav-tab" style={{ textDecoration: 'none' }}>
+          <span className="tab-icon">✅</span>
+          Validation Approvals
+        </Link>
       </nav>
 
       {/* Main Content */}
