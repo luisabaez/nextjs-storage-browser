@@ -387,14 +387,78 @@ def upsert_conversion_plan_row(cursor, mock_number, parsed, table_name,
               f"(file version {file_version}, table: {table_name})")
 
 
+def _flip_file_expected_after_load(cursor, mock_number, parsed, etag=None):
+    """
+    Per spec: File_Expected is automatically set to N after a successful
+    Table Load, on every row matching this Entity + Source. To re-upload,
+    an authorized user must flip it back to Y via the admin tool (see
+    handle_reset_file_expected).
+
+    Also rolls up Phase-1 status columns on the row(s):
+      Current_Process_Stage, Latest_File_ID, Latest_File_Upload_Date,
+      Total_Upload_Attempts, Last_Updated_By, Last_Updated_Date.
+
+    Skips gracefully if the columns don't exist yet (older Mock tables that
+    haven't been promoted to the 100-col shape).
+    """
+    setup_table = _get_setup_table_name(mock_number)
+    entity_display = parsed.get("entity_display") or ""
+    entity_prefix = parsed.get("entity_prefix") or ""
+    source = parsed.get("source") or ""
+    now = datetime.utcnow()
+
+    # Which new-spec columns are present on this table? If the table predates
+    # the Phase 1 migration we just skip those clauses.
+    cursor.execute(
+        "SELECT name FROM sys.columns WHERE object_id = OBJECT_ID(?)",
+        (setup_table,),
+    )
+    existing_cols = {row[0] for row in cursor.fetchall()}
+
+    set_clauses = ["[File_Expected] = 'N'"]
+    params = []
+    if "Current_Process_Stage" in existing_cols:
+        set_clauses.append("[Current_Process_Stage] = ?")
+        params.append("Table Load Success")
+    if etag and "Latest_File_ID" in existing_cols:
+        set_clauses.append("[Latest_File_ID] = ?")
+        params.append(etag)
+    if "Latest_File_Upload_Date" in existing_cols:
+        set_clauses.append("[Latest_File_Upload_Date] = ?")
+        params.append(now)
+    if "Total_Upload_Attempts" in existing_cols:
+        set_clauses.append("[Total_Upload_Attempts] = COALESCE([Total_Upload_Attempts], 0) + 1")
+    if "Last_Updated_By" in existing_cols:
+        set_clauses.append("[Last_Updated_By] = ?")
+        params.append("ap-invoice-processor-lambda")
+    if "Last_Updated_Date" in existing_cols:
+        set_clauses.append("[Last_Updated_Date] = ?")
+        params.append(now)
+
+    update_sql = (
+        f"UPDATE [{setup_table}] SET {', '.join(set_clauses)} "
+        f"WHERE (LTRIM(RTRIM(ISNULL([Entity], ''))) = ? "
+        f"       AND LTRIM(RTRIM(ISNULL([SOURCE], ''))) = ?) "
+        f"   OR (LTRIM(RTRIM(ISNULL([SubEntity], ''))) = ? "
+        f"       AND LTRIM(RTRIM(ISNULL([SOURCE], ''))) = ?)"
+    )
+    cursor.execute(update_sql, (*params, entity_display, source, entity_prefix, source))
+    flipped = cursor.rowcount
+    cursor.connection.commit()
+    if flipped:
+        print(f"  File_Expected flipped to N on {flipped} {setup_table} row(s) "
+              f"for {entity_prefix or entity_display}/{source}")
+
+
 def track_file_load(connection_str, mock_number, parsed, table_name,
                     row_count, df=None, triggered_by="",
-                    file_key="", file_size=0):
+                    file_key="", file_size=0, etag=None):
     """
     High-level function to track a file load in the conversion plan.
 
     Creates the SETUP_CONVERSION_PLAN_{MOCK} table if needed, then
-    upserts the file's row.
+    upserts the file's row, then flips File_Expected to N + updates
+    rollup status columns per Phase 3 spec.
 
     This is the main entry point called from lambda_function.py after
     a file is successfully loaded.
@@ -410,8 +474,120 @@ def track_file_load(connection_str, mock_number, parsed, table_name,
                 row_count, df=df, triggered_by=triggered_by,
                 file_key=file_key, file_size=file_size,
             )
+            # Phase 3: post-load housekeeping
+            _flip_file_expected_after_load(cursor, mock_number, parsed, etag=etag)
     except Exception as e:
         # Don't fail the whole file load if tracking fails
         print(f"  WARNING: Failed to track file in conversion plan: {e}")
         import traceback
         traceback.print_exc()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Reset File_Expected — admin-only path used when a re-upload is required
+# ─────────────────────────────────────────────────────────────────────────────
+def handle_reset_file_expected(connection_str, mock_number, entity=None,
+                                source=None, validation_group_id=None,
+                                reason=None, actor=""):
+    """
+    Flips File_Expected back to 'Y' for the matching row(s) in
+    SETUP_CONVERSION_PLAN_{MOCK}. Returns a dict ready for JSON response.
+
+    Match precedence (most specific first):
+      1. validation_group_id + source (if both supplied)
+      2. entity + source
+      3. entity alone (rare — affects all sources for an entity)
+
+    `reason` is appended to Notes for audit.
+    Always returns {"ok": bool, ...}; never raises (caller renders ok=False).
+    """
+    import pyodbc
+
+    try:
+        if not mock_number:
+            return {"ok": False, "error": "mock_number required"}
+        if not (entity or validation_group_id):
+            return {"ok": False, "error": "entity or validation_group_id required"}
+
+        setup_table = _get_setup_table_name(mock_number)
+        now = datetime.utcnow()
+
+        with pyodbc.connect(connection_str) as conn:
+            cur = conn.cursor()
+
+            # Guard: table must exist + must have File_Expected column
+            cur.execute("SELECT COUNT(*) FROM sys.tables WHERE name = ?", (setup_table,))
+            if cur.fetchone()[0] == 0:
+                return {"ok": False, "error": f"{setup_table} does not exist"}
+
+            cur.execute(
+                "SELECT name FROM sys.columns WHERE object_id = OBJECT_ID(?)",
+                (setup_table,),
+            )
+            existing_cols = {row[0] for row in cur.fetchall()}
+
+            set_clauses = ["[File_Expected] = 'Y'"]
+            params = []
+            if "Last_Updated_By" in existing_cols and actor:
+                set_clauses.append("[Last_Updated_By] = ?")
+                params.append(actor)
+            if "Last_Updated_Date" in existing_cols:
+                set_clauses.append("[Last_Updated_Date] = ?")
+                params.append(now)
+            if "Notes" in existing_cols and reason:
+                set_clauses.append(
+                    "[Notes] = COALESCE([Notes] + CHAR(10), '') + ?"
+                )
+                params.append(
+                    f"[{now.isoformat()}] File_Expected reset to Y by {actor}: {reason}"
+                )
+
+            # Build the WHERE clause based on match precedence
+            where_parts = []
+            where_params = []
+            if validation_group_id and source and "Validation_Group_ID" in existing_cols:
+                where_parts.append(
+                    "LTRIM(RTRIM(ISNULL([Validation_Group_ID], ''))) = ? "
+                    "AND LTRIM(RTRIM(ISNULL([SOURCE], ''))) = ?"
+                )
+                where_params.extend([validation_group_id, source])
+            if entity and source:
+                where_parts.append(
+                    "(LTRIM(RTRIM(ISNULL([Entity], ''))) = ? "
+                    " OR LTRIM(RTRIM(ISNULL([SubEntity], ''))) = ?) "
+                    "AND LTRIM(RTRIM(ISNULL([SOURCE], ''))) = ?"
+                )
+                where_params.extend([entity, entity, source])
+            if entity and not source and not where_parts:
+                where_parts.append(
+                    "(LTRIM(RTRIM(ISNULL([Entity], ''))) = ? "
+                    " OR LTRIM(RTRIM(ISNULL([SubEntity], ''))) = ?)"
+                )
+                where_params.extend([entity, entity])
+
+            if not where_parts:
+                return {"ok": False, "error": "No usable match criteria"}
+
+            where_clause = " OR ".join(f"({p})" for p in where_parts)
+            update_sql = (
+                f"UPDATE [{setup_table}] SET {', '.join(set_clauses)} "
+                f"WHERE {where_clause}"
+            )
+            cur.execute(update_sql, (*params, *where_params))
+            affected = cur.rowcount
+            conn.commit()
+
+            return {
+                "ok": True,
+                "mock_number": mock_number,
+                "rows_updated": affected,
+                "entity": entity,
+                "source": source,
+                "validation_group_id": validation_group_id,
+                "reason": reason,
+                "actor": actor,
+            }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {"ok": False, "error": str(e)}

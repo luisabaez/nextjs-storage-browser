@@ -48,7 +48,7 @@ from table_definitions import get_create_table_sql as legacy_get_create_table_sq
 from column_registry import get_column_mapping
 
 # Conversion plan tracking — auto-populates SETUP_CONVERSION_PLAN_{MOCK}
-from conversion_plan_tracker import track_file_load
+from conversion_plan_tracker import track_file_load, handle_reset_file_expected
 
 # Mock promotion — clones a Mock's schema/data into a new Mock (admin action)
 from promote_mock import handle_promote_mock_request
@@ -682,13 +682,17 @@ def process_single_file(bucket, file_info, connection_str, context=None, trigger
         aws_files_writer.write_seq2_move_row(connection_str, file_etag, bucket, dest_key)
 
         # Step 6: Track file in SETUP_CONVERSION_PLAN_{MOCK}
-        # Pass dest_key so the table stores where the file lives now
+        # Pass dest_key so the table stores where the file lives now.
+        # Pass eTag so the row's Latest_File_ID points into AWS_FILES, and
+        # _flip_file_expected_after_load sets File_Expected=N as a side effect
+        # (Phase 3 spec rule).
         track_file_load(
             connection_str, mock_number, parsed, table_name,
             row_count=result["rowCount"], df=df,
             triggered_by=triggered_by,
             file_key=dest_key,
             file_size=file_info.get("size", 0),
+            etag=file_etag,
         )
 
         result["status"] = "success"
@@ -926,6 +930,47 @@ def lambda_handler(event, context):
                 "statusCode": 500,
                 "headers": headers,
                 "body": json.dumps({"error": str(e)}),
+            }
+
+    # ── RESET FILE_EXPECTED ACTION ──
+    # Admin-only. Flips File_Expected back to 'Y' for an entity+source row
+    # in SETUP_CONVERSION_PLAN_{MOCK} so the source team can re-upload after
+    # the gate auto-flipped it to 'N' on a successful Table Load. Required by
+    # spec for the "re-extract after rejection" workflow (Phase 4 will call
+    # this automatically when a validation run is rejected with
+    # Reextract_Required=Y).
+    if action == "reset_file_expected":
+        try:
+            params = event.get("queryStringParameters") or {}
+            mock = params.get("mock", "")
+            entity = params.get("entity", "") or None
+            src = params.get("source", "") or None
+            vgid = params.get("validation_group_id", "") or None
+            reason = params.get("reason", "") or None
+            actor = params.get("actor", "")
+
+            conn_str = get_connection_string()
+            result = handle_reset_file_expected(
+                connection_str=conn_str,
+                mock_number=mock,
+                entity=entity,
+                source=src,
+                validation_group_id=vgid,
+                reason=reason,
+                actor=actor,
+            )
+            status_code = 200 if result.get("ok") else 400
+            return {
+                "statusCode": status_code,
+                "headers": headers,
+                "body": json.dumps(result, default=str),
+            }
+        except Exception as e:
+            traceback.print_exc()
+            return {
+                "statusCode": 500,
+                "headers": headers,
+                "body": json.dumps({"ok": False, "error": str(e)}),
             }
 
     # ── PROMOTE MOCK ACTION ──

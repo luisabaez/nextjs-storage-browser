@@ -315,6 +315,10 @@ function AdminDashboard() {
           <span className="tab-icon">⏭️</span>
           Promote Mock
         </Link>
+        <Link href="/admin/reset-file-expected" className="admin-nav-tab" style={{ textDecoration: 'none' }}>
+          <span className="tab-icon">🔄</span>
+          Allow Re-upload
+        </Link>
       </nav>
 
       {/* Main Content */}
