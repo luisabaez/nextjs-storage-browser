@@ -1061,6 +1061,166 @@ def lambda_handler(event, context):
             return {"statusCode": 500, "headers": headers,
                     "body": json.dumps({"ok": False, "error": str(e)})}
 
+    # ─── PHASE 6 — DASHBOARD: AWS FILES EVENT LOG ───
+    if action == "aws_files":
+        # ?action=aws_files
+        # Query params (all optional):
+        #   mock=MOCK12               Filter by Mock_Number
+        #   vgid=APINV-PRIFAS         Filter by Validation_Group_ID
+        #   vbl=VBL-FIN-AP            Filter by VBL_Group_ID
+        #   category=Extract          Filter by File_Category
+        #   status=Table+Load+Success Filter by File_Status
+        #   source=PRIFAS             Filter by Source
+        #   search=AP_INVOICE         Substring search on File_Name
+        #   etag=abc123               Lookup by eTag prefix
+        #   from=2026-01-01           Received_DateTime >= ?
+        #   to=2026-12-31             Received_DateTime <= ?
+        #   limit=200                 default 200, max 1000
+        #   offset=0                  for pagination
+        try:
+            params = event.get("queryStringParameters") or {}
+            limit = max(1, min(1000, int(params.get("limit", "200") or "200")))
+            offset = max(0, int(params.get("offset", "0") or "0"))
+
+            where = []
+            args = []
+            def add(col, val, op="="):
+                if val:
+                    where.append(f"{col} {op} ?")
+                    args.append(val)
+            add("Mock_Number",          params.get("mock"))
+            add("Validation_Group_ID",  params.get("vgid"))
+            add("VBL_Group_ID",         params.get("vbl"))
+            add("File_Category",        params.get("category"))
+            add("File_Status",          params.get("status"))
+            add("[Source]",             params.get("source"))
+            if params.get("search"):
+                where.append("File_Name LIKE ?")
+                args.append(f"%{params['search']}%")
+            if params.get("etag"):
+                where.append("AWS_eTag LIKE ?")
+                args.append(f"{params['etag']}%")
+            if params.get("from"):
+                where.append("Received_DateTime >= ?")
+                args.append(params["from"])
+            if params.get("to"):
+                where.append("Received_DateTime <= ?")
+                args.append(params["to"])
+
+            where_clause = ("WHERE " + " AND ".join(where)) if where else ""
+
+            conn_str = get_connection_string()
+            with pyodbc.connect(conn_str) as conn:
+                cur = conn.cursor()
+                # Total count for pagination
+                cur.execute(f"SELECT COUNT(*) FROM AWS_FILES {where_clause}", args)
+                total = cur.fetchone()[0]
+                # Page
+                cur.execute(
+                    f"""
+                    SELECT
+                        AWS_eTag, Movement_Sequence, File_Name, File_Category,
+                        File_Size_KB, Record_Count,
+                        Conversion_Plan_Table_Name, Conversion_Plan_Entity,
+                        Validation_Group_ID, VBL_Group_ID, WBS_ID,
+                        Pillar, Module, Data_Entity, [Source], Business_Unit, Mock_Number,
+                        S3_Bucket, Parent_Folder, File_URL, Moved_To_Folder,
+                        Received_DateTime, Processed_DateTime,
+                        File_Status, Error_Type, Error_Owner,
+                        Supersedes_eTag, Superseded_By_eTag, Split_From_eTag,
+                        Check_File_Name, Check_File_Expected, Check_Column_Headers,
+                        Check_TSQL_File_Found, Check_TSQL_Load,
+                        Sterling_Transmission_Status, Sterling_Transmission_DateTime,
+                        Created_By, Last_Updated_By, Last_Updated_DateTime
+                    FROM AWS_FILES
+                    {where_clause}
+                    ORDER BY Received_DateTime DESC, Movement_Sequence
+                    OFFSET ? ROWS FETCH NEXT ? ROWS ONLY
+                    """,
+                    args + [offset, limit],
+                )
+                cols = [c[0] for c in cur.description]
+                rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+            return {
+                "statusCode": 200, "headers": headers,
+                "body": json.dumps({
+                    "ok": True, "total": total, "limit": limit,
+                    "offset": offset, "rows": rows,
+                }, default=str),
+            }
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
+    if action == "validation_groups":
+        # ?action=validation_groups&mock=MOCK12
+        # Returns one row per VG with member counts, dependency summary,
+        # latest run + approval status. Powers the Validation Groups tab.
+        try:
+            params = event.get("queryStringParameters") or {}
+            mock = params.get("mock", "MOCK12")
+            vg_table = f"VALIDATION_GROUPS_{mock}"
+            dep_table = f"VG_DEPENDENCIES_{mock}"
+
+            conn_str = get_connection_string()
+            with pyodbc.connect(conn_str) as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT COUNT(*) FROM sys.tables WHERE name IN (?, ?)",
+                    (vg_table, dep_table),
+                )
+                if cur.fetchone()[0] < 2:
+                    return {"statusCode": 200, "headers": headers,
+                            "body": json.dumps({"ok": True, "groups": [],
+                                                "note": f"Per-Mock tables missing for {mock}"})}
+
+                cur.execute(
+                    f"""
+                    SELECT
+                        Validation_Group_ID, Validation_Group_Name,
+                        Pillar, Module, Data_Entity,
+                        Members_Total, Members_Currently_Loaded, All_Members_Loaded,
+                        Error_Threshold, Threshold_Exceeded, Reextract_Required,
+                        Current_Validation_Run_ID, Validation_Run_Count,
+                        Latest_Validation_Status, Latest_Validation_DateTime,
+                        Latest_Approval_Status, Latest_Approver,
+                        Latest_Approval_DateTime
+                    FROM {vg_table}
+                    ORDER BY Validation_Group_ID
+                    """
+                )
+                cols = [c[0] for c in cur.description]
+                groups = [dict(zip(cols, r)) for r in cur.fetchall()]
+
+                # Aggregate dep state per VG
+                cur.execute(
+                    f"""
+                    SELECT Validation_Group_ID,
+                           COUNT(*) AS dep_total,
+                           SUM(CASE WHEN Dependency_Status = 'Loaded' THEN 1 ELSE 0 END) AS dep_loaded,
+                           SUM(CASE WHEN Blocks_Validation_Trigger = 'Y' THEN 1 ELSE 0 END) AS dep_blocking
+                    FROM {dep_table}
+                    GROUP BY Validation_Group_ID
+                    """
+                )
+                dep_by_vg = {row[0]: {
+                    "total": row[1] or 0,
+                    "loaded": row[2] or 0,
+                    "blocking": row[3] or 0,
+                } for row in cur.fetchall()}
+                for g in groups:
+                    g["dependencies"] = dep_by_vg.get(g["Validation_Group_ID"], {
+                        "total": 0, "loaded": 0, "blocking": 0,
+                    })
+
+            return {"statusCode": 200, "headers": headers,
+                    "body": json.dumps({"ok": True, "groups": groups}, default=str)}
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
     # ─── PHASE 5 — VBL GROUPS / STERLING / DISTRIBUTION ───
     if action == "vbl_groups":
         # ?action=vbl_groups&mock=MOCK12[&status=Pending+Approval]

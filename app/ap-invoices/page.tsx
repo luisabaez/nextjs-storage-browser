@@ -10,6 +10,8 @@ import { FilePreviewModal } from '../components/FilePreviewModal';
 import { getUserPermissions, isAdminUser } from '../admin/types';
 import outputs from '../../amplify_outputs.json';
 import './ap-invoices.css';
+// Phase 6 dashboard tabs
+import { AWSFilesTab } from './tabs/AWSFilesTab';
 
 Amplify.configure(outputs as any);
 
@@ -227,7 +229,8 @@ const S3_FOLDERS = {
   unmatched: 'FailedUnmatchedFilenames/',
 };
 
-type TabId = 'all' | 'pending' | 'uploaded' | 'failed' | 'history' | 'gantt' | 'hierarchy';
+type TabId = 'all' | 'pending' | 'uploaded' | 'failed' | 'history' | 'gantt' | 'hierarchy'
+  | 'aws_files' | 'validation_groups' | 'validation_runs' | 'vbl_groups';
 
 interface HierarchyNode {
   id: string;
@@ -1924,6 +1927,10 @@ function DataFileDashboard() {
             {([
               { id: 'gantt' as TabId, label: 'Gantt View', count: null },
               { id: 'hierarchy' as TabId, label: 'Hierarchy View', count: null },
+              { id: 'aws_files' as TabId, label: 'AWS Files', count: null },
+              { id: 'validation_groups' as TabId, label: 'Validation Groups', count: null },
+              { id: 'validation_runs' as TabId, label: 'Validation Runs', count: null },
+              { id: 'vbl_groups' as TabId, label: 'VBL Groups', count: null },
               { id: 'all' as TabId, label: 'All Files', count: stats.total },
               { id: 'pending' as TabId, label: 'Pending', count: stats.pending },
               { id: 'uploaded' as TabId, label: 'Processed', count: stats.processed },
@@ -2184,6 +2191,25 @@ function DataFileDashboard() {
                 </>
               )}
             </div>
+          ) : activeTab === 'aws_files' ? (
+            <AWSFilesTab userBUFilter={userBUFilter ? Array.from(userBUFilter) : null} />
+          ) : activeTab === 'validation_groups' ? (
+            <Phase6Placeholder
+              title="Validation Groups"
+              description="Card view per Validation Group with member progress, dependency status, latest run, and pending-approval badge."
+            />
+          ) : activeTab === 'validation_runs' ? (
+            <Phase6Placeholder
+              title="Validation Runs"
+              description="Full VAL-NNNN run history with error/warning/informative counts and a direct link to the Validation-to-Source Excel."
+              extraNote="Note: the approval flow already works at /admin/validation-approvals."
+            />
+          ) : activeTab === 'vbl_groups' ? (
+            <Phase6Placeholder
+              title="VBL Groups"
+              description="Card per VBL group with member matrix, generated-file rollup, Sterling status, and distribution rollup."
+              extraNote="Note: the full approval + Sterling UI already works at /admin/vbl-approvals."
+            />
           ) : activeTab === 'history' ? (
             <div className="ap-history-content">
               {historyLoading ? (
@@ -2775,6 +2801,43 @@ function DataFileDashboard() {
           </div>
         );
       })()}
+    </div>
+  );
+}
+
+// Placeholder for tabs that exist as nav entries but whose content lands in
+// Phase 6.2. The full approval flows for Validation Runs and VBL Groups
+// already work today under /admin/validation-approvals and
+// /admin/vbl-approvals — these dashboard tabs are summary views layered on
+// top of that, coming next.
+function Phase6Placeholder({ title, description, extraNote }: {
+  title: string;
+  description: string;
+  extraNote?: string;
+}) {
+  return (
+    <div style={{
+      padding: 48, textAlign: 'center',
+      background: '#fff', border: '1px solid #e5e7eb', borderRadius: 8,
+      margin: 16,
+    }}>
+      <div style={{ fontSize: 36, marginBottom: 12 }}>&#128208;</div>
+      <h2 style={{ margin: '0 0 12px 0', color: '#111827' }}>{title}</h2>
+      <p style={{ color: '#4b5563', maxWidth: 560, margin: '0 auto 12px auto', lineHeight: 1.5 }}>
+        {description}
+      </p>
+      {extraNote && (
+        <p style={{ color: '#1d4ed8', maxWidth: 560, margin: '12px auto 0 auto', fontSize: 13 }}>
+          {extraNote}
+        </p>
+      )}
+      <div style={{
+        display: 'inline-block', marginTop: 16, padding: '6px 12px',
+        background: '#fef3c7', color: '#92400e',
+        borderRadius: 999, fontSize: 12, fontWeight: 600,
+      }}>
+        Phase 6.2 — coming next
+      </div>
     </div>
   );
 }
