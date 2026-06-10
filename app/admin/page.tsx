@@ -323,6 +323,10 @@ function AdminDashboard() {
           <span className="tab-icon">✅</span>
           Validation Approvals
         </Link>
+        <Link href="/admin/vbl-approvals" className="admin-nav-tab" style={{ textDecoration: 'none' }}>
+          <span className="tab-icon">🚢</span>
+          VBL + Sterling
+        </Link>
       </nav>
 
       {/* Main Content */}

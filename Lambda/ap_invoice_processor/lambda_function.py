@@ -67,6 +67,15 @@ from validation_group_tracker import (
 )
 from vg_dependencies_check import evaluate_dependencies as vg_evaluate_dependencies
 
+# Phase 5: VBL Group lifecycle + Sterling status + Distribution
+from vbl_group_tracker import (
+    on_validation_group_approved as vbl_on_vg_approved,
+    handle_list_vbl_groups,
+    handle_vbl_run_complete,
+    handle_vbl_run_decision,
+    handle_mark_sterling_sent,
+)
+
 # ─── Configuration ────────────────────────────────────────────────────────────
 
 DEFAULT_BUCKET = "hacienda-erp-dev"
@@ -1015,10 +1024,11 @@ def lambda_handler(event, context):
         #         "affected_members": "TBL1;TBL2", "actor": "user@example.com" }
         try:
             body = json.loads(event.get("body") or "{}")
+            mock = body.get("mock", "MOCK12")
             conn_str = get_connection_string()
             res = vg_handle_run_decision(
                 connection_str=conn_str,
-                mock_number=body.get("mock", "MOCK12"),
+                mock_number=mock,
                 run_id=body.get("run_id", ""),
                 decision=body.get("decision", ""),
                 comments=body.get("comments", "") or "",
@@ -1026,11 +1036,145 @@ def lambda_handler(event, context):
                 affected_members=body.get("affected_members", "") or "",
                 actor=body.get("actor", "") or "",
             )
+
+            # Phase 5 hook: on Approval, ripple state into VBL Groups
+            if res.get("ok") and res.get("decision") == "Approved":
+                try:
+                    vbl_summary = vbl_on_vg_approved(
+                        connection_str=conn_str,
+                        mock_number=mock,
+                        validation_group_id=res.get("vg_id", ""),
+                        approver_email=body.get("actor", "") or "",
+                    )
+                    res["vbl_propagation"] = vbl_summary
+                except Exception as vbl_err:
+                    print(f"  WARNING: VBL propagation failed: {vbl_err}")
+                    res["vbl_propagation_error"] = str(vbl_err)
+
             return {
                 "statusCode": 200 if res.get("ok") else 400,
                 "headers": headers,
                 "body": json.dumps(res, default=str),
             }
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
+    # ─── PHASE 5 — VBL GROUPS / STERLING / DISTRIBUTION ───
+    if action == "vbl_groups":
+        # ?action=vbl_groups&mock=MOCK12[&status=Pending+Approval]
+        try:
+            params = event.get("queryStringParameters") or {}
+            mock = params.get("mock", "MOCK12")
+            status_filter = params.get("status") or None
+            conn_str = get_connection_string()
+            res = handle_list_vbl_groups(conn_str, mock, status_filter)
+            return {"statusCode": 200 if res.get("ok") else 400,
+                    "headers": headers,
+                    "body": json.dumps(res, default=str)}
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
+    if action == "vbl_run_complete":
+        # POSTed by Conversion Load / Recon / VBL Report script.
+        # Body: { mock, vbl_group_id, vbl_file_etag, recon_file_etag,
+        #         conversion_load_file_etag, actor }
+        try:
+            body = json.loads(event.get("body") or "{}")
+            conn_str = get_connection_string()
+            res = handle_vbl_run_complete(
+                connection_str=conn_str,
+                mock_number=body.get("mock", "MOCK12"),
+                vbl_group_id=body.get("vbl_group_id", ""),
+                vbl_file_etag=body.get("vbl_file_etag") or None,
+                recon_file_etag=body.get("recon_file_etag") or None,
+                conversion_load_file_etag=body.get("conversion_load_file_etag") or None,
+                actor=body.get("actor", "") or "",
+            )
+            return {"statusCode": 200 if res.get("ok") else 400,
+                    "headers": headers,
+                    "body": json.dumps(res, default=str)}
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
+    if action == "vbl_run_decide":
+        # POSTed by the VBL approval UI.
+        # Body: { mock, vbl_group_id, decision, comments, actor }
+        try:
+            body = json.loads(event.get("body") or "{}")
+            conn_str = get_connection_string()
+            res = handle_vbl_run_decision(
+                connection_str=conn_str,
+                mock_number=body.get("mock", "MOCK12"),
+                vbl_group_id=body.get("vbl_group_id", ""),
+                decision=body.get("decision", ""),
+                comments=body.get("comments", "") or "",
+                actor=body.get("actor", "") or "",
+            )
+            return {"statusCode": 200 if res.get("ok") else 400,
+                    "headers": headers,
+                    "body": json.dumps(res, default=str)}
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
+    if action == "mark_sterling_sent":
+        # POSTed by VBL approval UI's 'Mark as Sent to Sterling' button.
+        # Body: { mock, vbl_group_id, sterling_status, error_notes, actor }
+        try:
+            body = json.loads(event.get("body") or "{}")
+            conn_str = get_connection_string()
+            res = handle_mark_sterling_sent(
+                connection_str=conn_str,
+                mock_number=body.get("mock", "MOCK12"),
+                vbl_group_id=body.get("vbl_group_id", ""),
+                sterling_status=body.get("sterling_status", "Submitted"),
+                actor=body.get("actor", "") or "",
+                error_notes=body.get("error_notes", "") or "",
+            )
+            return {"statusCode": 200 if res.get("ok") else 400,
+                    "headers": headers,
+                    "body": json.dumps(res, default=str)}
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
+    if action == "register_distribution_files":
+        # POSTed by the distribution script after BU-splitting a parent file.
+        # Body: { rows: [ { distribution_etag, parent_etag, bucket, dest_key,
+        #                   business_unit }, ... ], actor }
+        # Each row writes one AWS_FILES distribution entry.
+        try:
+            body = json.loads(event.get("body") or "{}")
+            actor = body.get("actor", "") or "distribution-runner"
+            conn_str = get_connection_string()
+            written = []
+            skipped = []
+            for r in body.get("rows", []):
+                result = aws_files_writer.write_distribution_row(
+                    connection_str=conn_str,
+                    distribution_etag=r.get("distribution_etag", ""),
+                    parent_etag=r.get("parent_etag", ""),
+                    bucket=r.get("bucket", DEFAULT_BUCKET),
+                    dest_key=r.get("dest_key", ""),
+                    business_unit=r.get("business_unit", ""),
+                    actor=actor,
+                )
+                if result:
+                    written.append(result)
+                else:
+                    skipped.append(r.get("distribution_etag", "")[:12])
+            return {"statusCode": 200, "headers": headers,
+                    "body": json.dumps({"ok": True,
+                                         "written": written,
+                                         "skipped": skipped})}
         except Exception as e:
             traceback.print_exc()
             return {"statusCode": 500, "headers": headers,

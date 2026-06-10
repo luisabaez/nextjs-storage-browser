@@ -566,6 +566,116 @@ def mark_moved_to_errors(connection_str: str, etag: str, dest_folder: str) -> No
 
 
 @_safe
+def write_distribution_row(connection_str: str, *,
+                            distribution_etag: str,
+                            parent_etag: str,
+                            bucket: str,
+                            dest_key: str,
+                            business_unit: str,
+                            actor: str = "distribution-runner") -> Optional[str]:
+    """
+    Phase 5 — registers a per-BU split file in AWS_FILES.
+
+    Called by the existing distribution script after it splits a parent file
+    (Extract, Validation to Source, Conversion Load, Recon Report, or VBL
+    Report) into per-BU copies. Each split file gets its own AWS_FILES row
+    with Split_From_eTag pointing back at the parent.
+
+    Returns the distribution_etag on success.
+    """
+    distribution_etag = _normalise_etag(distribution_etag)
+    parent_etag = _normalise_etag(parent_etag)
+    if not distribution_etag or not parent_etag or not business_unit:
+        return None
+
+    filename = dest_key.split("/")[-1]
+    parent_folder = "/".join(dest_key.split("/")[:-1]) + "/" if "/" in dest_key else ""
+    file_url = f"s3://{bucket}/{dest_key}"
+    parent_url = f"s3://{bucket}/{parent_folder}" if parent_folder else f"s3://{bucket}/"
+
+    with pyodbc.connect(connection_str) as conn:
+        cur = conn.cursor()
+
+        # Idempotency: skip if this distribution eTag already tracked
+        cur.execute(
+            "SELECT COUNT(*) FROM AWS_FILES "
+            "WHERE AWS_eTag = ? AND Movement_Sequence = 1",
+            (distribution_etag,),
+        )
+        if cur.fetchone()[0] > 0:
+            return distribution_etag
+
+        # Inherit metadata from the parent row so the child carries the same
+        # WBS_ID, Validation_Group_ID, VBL_Group_ID, etc.
+        cur.execute(
+            """
+            SELECT File_Category, Conversion_Plan_Table_Name, Conversion_Plan_Entity,
+                   Validation_Group_ID, VBL_Group_ID, WBS_ID, Pillar, Module,
+                   Data_Entity, [Source], Mock_Number, File_Size_KB, Record_Count
+            FROM AWS_FILES
+            WHERE AWS_eTag = ? AND Movement_Sequence = 1
+            """,
+            (parent_etag,),
+        )
+        parent_row = cur.fetchone()
+        if not parent_row:
+            print(f"  WARNING: parent eTag {parent_etag[:12]}… not found — "
+                  f"distribution row will have minimal metadata")
+            parent_row = (None,) * 13
+
+        parent_category = parent_row[0] or "Extract"
+        # Phase 2 spec defines this enum exactly
+        distribution_category = (
+            f"Distribution - {parent_category}"
+            if not parent_category.startswith("Distribution")
+            else parent_category
+        )
+
+        now = datetime.utcnow()
+        cur.execute(
+            """
+            INSERT INTO AWS_FILES (
+                AWS_eTag, Movement_Sequence, File_Name, File_Category,
+                File_Size_KB, Attempt_Number,
+                Conversion_Plan_Table_Name, Conversion_Plan_Entity,
+                Validation_Group_ID, VBL_Group_ID, WBS_ID, Pillar, Module,
+                Data_Entity, [Source], Business_Unit, Mock_Number,
+                S3_Bucket, Parent_Folder, Parent_Folder_URL, File_URL,
+                Created_DateTime, Received_DateTime, Processed_DateTime,
+                File_Status, Split_From_eTag,
+                Check_File_Name, Check_File_Expected, Check_Column_Headers,
+                Check_TSQL_File_Found, Check_TSQL_Load,
+                Created_By, Last_Updated_By, Last_Updated_DateTime
+            ) VALUES (?, 1, ?, ?,
+                ?, 1,
+                ?, ?,
+                ?, ?, ?, ?, ?,
+                ?, ?, ?, ?,
+                ?, ?, ?, ?,
+                ?, ?, ?,
+                'Distributed', ?,
+                'N/A', 'N/A', 'N/A', 'N/A', 'N/A',
+                ?, ?, ?)
+            """,
+            (
+                distribution_etag, filename, distribution_category,
+                parent_row[11],
+                parent_row[1], parent_row[2],
+                parent_row[3], parent_row[4], parent_row[5], parent_row[6], parent_row[7],
+                parent_row[8], parent_row[9], business_unit, parent_row[10],
+                bucket, parent_folder, parent_url, file_url,
+                now, now, now,
+                parent_etag,
+                actor, actor, now,
+            ),
+        )
+        conn.commit()
+        print(f"  AWS_FILES distribution row written: eTag={distribution_etag[:12]}… "
+              f"BU={business_unit} from parent={parent_etag[:12]}…")
+    return distribution_etag
+
+
+@_safe
 def update_business_unit(connection_str: str, etag: str, bu_value: str) -> None:
     """
     Populate Business_Unit on both seq 1 and seq 2 (if present). Called after
