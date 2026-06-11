@@ -13,6 +13,9 @@ import './ap-invoices.css';
 // Phase 6 dashboard tabs
 import { AWSFilesTab } from './tabs/AWSFilesTab';
 import { FileConfigTab } from './tabs/FileConfigTab';
+import { ValidationGroupsTab } from './tabs/ValidationGroupsTab';
+import { ValidationRunsTab } from './tabs/ValidationRunsTab';
+import { VBLGroupsTab } from './tabs/VBLGroupsTab';
 
 Amplify.configure(outputs as any);
 
@@ -110,6 +113,15 @@ interface ConversionPlanEntry {
   CONVERSION_TABLE_BU: string;
   File_Expected: string;
   MockNumber: string;
+  // Phase 1 spec columns (may be null if SETUP_CONVERSION_PLAN_MOCK{N} hasn't been
+  // promoted to the 100-col shape, or if the load predates the rollup logic)
+  Current_Process_Stage?: string | null;
+  Validation_Group_ID?: string | null;
+  Latest_Validation_Status?: string | null;
+  Latest_Approval_Status?: string | null;
+  Pre_Load_Validation_Status?: string | null;
+  Pre_Load_Recon_Status?: string | null;
+  Oracle_Load_Status?: string | null;
 }
 
 interface ConversionPlanGroup {
@@ -1553,6 +1565,64 @@ function DataFileDashboard() {
     return `${base}_V${ver}`;
   };
 
+  // Phase 6.3: derive Gantt stage badge from Current_Process_Stage.
+  // The Gantt has 4 visual columns (Initial Load / Prevalidation / Conversion /
+  // Validation/Sent). Map the 14 spec stage values to a per-column badge state
+  // (pass / fail / running / pending). When Current_Process_Stage isn't
+  // populated (older Mock tables without the Phase 1 spec columns), Initial
+  // Load defaults to Pass (because the row only exists if a load succeeded)
+  // and the other columns to Pending.
+  type StageBadge = 'pass' | 'fail' | 'processing' | 'pending';
+  const getGanttBadge = (
+    column: 'initial' | 'prevalidation' | 'conversion' | 'validation',
+    entry: ConversionPlanEntry,
+  ): { state: StageBadge; label: string } => {
+    const s = (entry.Current_Process_Stage || '').toLowerCase();
+    const validationStatus = (entry.Latest_Validation_Status || '').toLowerCase();
+    const approvalStatus = (entry.Latest_Approval_Status || '').toLowerCase();
+    const preLoadValidation = (entry.Pre_Load_Validation_Status || '').toLowerCase();
+    const preLoadRecon = (entry.Pre_Load_Recon_Status || '').toLowerCase();
+    const oracleLoad = (entry.Oracle_Load_Status || '').toLowerCase();
+
+    const failed = (...needles: string[]) =>
+      needles.some(n => s.includes(n.toLowerCase()) || validationStatus.includes(n) || approvalStatus.includes(n));
+    const passed = (...needles: string[]) =>
+      needles.some(n => s.includes(n.toLowerCase()));
+    const running = (...needles: string[]) =>
+      needles.some(n => s.includes(n.toLowerCase()) || validationStatus.includes(n));
+
+    if (column === 'initial') {
+      if (failed('gate check failed', 'table load failed')) return { state: 'fail', label: 'Fail' };
+      // If the row exists in SETUP_CONVERSION_PLAN, the load succeeded once.
+      return { state: 'pass', label: 'Pass' };
+    }
+    if (column === 'prevalidation') {
+      if (failed('validation failed', 'rejected', 'awaiting re-extract')) return { state: 'fail', label: 'Fail' };
+      if (passed('validation approved', 'in conversion', 'pre-load review',
+                 'pre-load approved', 'sent to oracle', 'loaded', 'complete')
+          || approvalStatus === 'approved')
+        return { state: 'pass', label: 'Pass' };
+      if (running('validation running', 'awaiting group completion', 'pending approval'))
+        return { state: 'processing', label: 'Running' };
+      return { state: 'pending', label: 'Pending' };
+    }
+    if (column === 'conversion') {
+      if (failed('blocked')) return { state: 'fail', label: 'Fail' };
+      if (passed('pre-load approved', 'sent to oracle', 'loaded', 'complete')
+          || preLoadValidation === 'approved' || preLoadRecon === 'approved')
+        return { state: 'pass', label: 'Pass' };
+      if (running('in conversion', 'pre-load review'))
+        return { state: 'processing', label: 'Running' };
+      return { state: 'pending', label: 'Pending' };
+    }
+    // column === 'validation' (final Sent-to-Oracle stage)
+    if (passed('complete', 'loaded') || oracleLoad === 'loaded')
+      return { state: 'pass', label: 'Pass' };
+    if (passed('sent to oracle') || oracleLoad === 'sent')
+      return { state: 'processing', label: 'Sent' };
+    return { state: 'pending', label: 'Pending' };
+  };
+
   // ─── Render ──────────────────────────────────────────────────────────────
 
   if (loading) {
@@ -2009,71 +2079,101 @@ function DataFileDashboard() {
                               )}
                             </div>
                           </td>
-                          {/* Initial Load */}
+                          {/* Initial Load — Phase 6.3 uses Current_Process_Stage */}
                           <td className="ap-gantt-stage-cell">
-                            {group.entries.map((entry, idx) => (
-                              <div key={`${entry.Table_Name}-${idx}`} className="ap-gantt-file-card">
-                                <span className="ap-gantt-status-badge pass">
-                                  <span className="ap-gantt-status-icon pass"></span>
-                                  Pass
-                                </span>
-                                <div className="ap-gantt-file-name" title={entry.FileName || entry.Table_Name}>
-                                  {entry.FileName || entry.Table_Name}
-                                  {parseInt(entry.LoadVersion || '1') > 1 && (
-                                    <span className="ap-gantt-version-badge">V{entry.LoadVersion}</span>
+                            {group.entries.map((entry, idx) => {
+                              const b = getGanttBadge('initial', entry);
+                              return (
+                                <div key={`${entry.Table_Name}-${idx}-initial`} className="ap-gantt-file-card">
+                                  <span className={`ap-gantt-status-badge ${b.state}`}>
+                                    <span className={`ap-gantt-status-icon ${b.state}`}></span>
+                                    {b.label}
+                                  </span>
+                                  <div className="ap-gantt-file-name" title={entry.FileName || entry.Table_Name}>
+                                    {entry.FileName || entry.Table_Name}
+                                    {parseInt(entry.LoadVersion || '1') > 1 && (
+                                      <span className="ap-gantt-version-badge">V{entry.LoadVersion}</span>
+                                    )}
+                                  </div>
+                                  <div className="ap-gantt-file-date">{formatConversionDate(entry.LoadedAt)}</div>
+                                  {entry.Current_Process_Stage && (
+                                    <div className="ap-gantt-file-date" style={{ fontSize: 10, color: '#6b7280' }}>{entry.Current_Process_Stage}</div>
                                   )}
+                                  <button className="ap-gantt-view-link" onClick={() => setSelectedConversionEntry(entry)}>
+                                    View &#8599;
+                                  </button>
                                 </div>
-                                <div className="ap-gantt-file-date">{formatConversionDate(entry.LoadedAt)}</div>
-                                <button className="ap-gantt-view-link" onClick={() => setSelectedConversionEntry(entry)}>
-                                  View &#8599;
-                                </button>
-                              </div>
-                            ))}
+                              );
+                            })}
                           </td>
-                          {/* Prevalidation */}
+                          {/* Prevalidation — Validation to Source approval */}
                           <td className="ap-gantt-stage-cell">
-                            {group.entries.map((entry, idx) => (
-                              <div key={`${entry.Table_Name}-${idx}`} className="ap-gantt-file-card">
-                                <span className="ap-gantt-status-badge pending">
-                                  <span className="ap-gantt-status-icon pending"></span>
-                                  Pending
-                                </span>
-                                <div className="ap-gantt-file-name ap-gantt-pending-label">{entry.FileName || entry.Table_Name}</div>
-                                <button className="ap-gantt-view-link" onClick={() => setSelectedConversionEntry(entry)}>
-                                  View &#8599;
-                                </button>
-                              </div>
-                            ))}
+                            {group.entries.map((entry, idx) => {
+                              const b = getGanttBadge('prevalidation', entry);
+                              return (
+                                <div key={`${entry.Table_Name}-${idx}-pv`} className="ap-gantt-file-card">
+                                  <span className={`ap-gantt-status-badge ${b.state}`}>
+                                    <span className={`ap-gantt-status-icon ${b.state}`}></span>
+                                    {b.label}
+                                  </span>
+                                  <div className={`ap-gantt-file-name ${b.state === 'pending' ? 'ap-gantt-pending-label' : ''}`}>
+                                    {entry.FileName || entry.Table_Name}
+                                  </div>
+                                  {entry.Validation_Group_ID && (
+                                    <div className="ap-gantt-file-date" style={{ fontSize: 10, color: '#6b7280' }}>VG: {entry.Validation_Group_ID}</div>
+                                  )}
+                                  <button className="ap-gantt-view-link" onClick={() => setSelectedConversionEntry(entry)}>
+                                    View &#8599;
+                                  </button>
+                                </div>
+                              );
+                            })}
                           </td>
-                          {/* Conversion */}
+                          {/* Conversion — VBL / Pre-load review */}
                           <td className="ap-gantt-stage-cell">
-                            {group.entries.map((entry, idx) => (
-                              <div key={`${entry.Table_Name}-${idx}`} className="ap-gantt-file-card">
-                                <span className="ap-gantt-status-badge pending">
-                                  <span className="ap-gantt-status-icon pending"></span>
-                                  Pending
-                                </span>
-                                <div className="ap-gantt-file-name ap-gantt-pending-label">{entry.FileName || entry.Table_Name}</div>
-                                <button className="ap-gantt-view-link" onClick={() => setSelectedConversionEntry(entry)}>
-                                  View &#8599;
-                                </button>
-                              </div>
-                            ))}
+                            {group.entries.map((entry, idx) => {
+                              const b = getGanttBadge('conversion', entry);
+                              return (
+                                <div key={`${entry.Table_Name}-${idx}-conv`} className="ap-gantt-file-card">
+                                  <span className={`ap-gantt-status-badge ${b.state}`}>
+                                    <span className={`ap-gantt-status-icon ${b.state}`}></span>
+                                    {b.label}
+                                  </span>
+                                  <div className={`ap-gantt-file-name ${b.state === 'pending' ? 'ap-gantt-pending-label' : ''}`}>
+                                    {entry.FileName || entry.Table_Name}
+                                  </div>
+                                  {entry.Pre_Load_Validation_Status && (
+                                    <div className="ap-gantt-file-date" style={{ fontSize: 10, color: '#6b7280' }}>{entry.Pre_Load_Validation_Status}</div>
+                                  )}
+                                  <button className="ap-gantt-view-link" onClick={() => setSelectedConversionEntry(entry)}>
+                                    View &#8599;
+                                  </button>
+                                </div>
+                              );
+                            })}
                           </td>
-                          {/* Validation */}
+                          {/* Validation — Sterling sent / Oracle loaded */}
                           <td className="ap-gantt-stage-cell">
-                            {group.entries.map((entry, idx) => (
-                              <div key={`${entry.Table_Name}-${idx}`} className="ap-gantt-file-card">
-                                <span className="ap-gantt-status-badge pending">
-                                  <span className="ap-gantt-status-icon pending"></span>
-                                  Pending
-                                </span>
-                                <div className="ap-gantt-file-name ap-gantt-pending-label">{entry.FileName || entry.Table_Name}</div>
-                                <button className="ap-gantt-view-link" onClick={() => setSelectedConversionEntry(entry)}>
-                                  View &#8599;
-                                </button>
-                              </div>
-                            ))}
+                            {group.entries.map((entry, idx) => {
+                              const b = getGanttBadge('validation', entry);
+                              return (
+                                <div key={`${entry.Table_Name}-${idx}-val`} className="ap-gantt-file-card">
+                                  <span className={`ap-gantt-status-badge ${b.state}`}>
+                                    <span className={`ap-gantt-status-icon ${b.state}`}></span>
+                                    {b.label}
+                                  </span>
+                                  <div className={`ap-gantt-file-name ${b.state === 'pending' ? 'ap-gantt-pending-label' : ''}`}>
+                                    {entry.FileName || entry.Table_Name}
+                                  </div>
+                                  {entry.Oracle_Load_Status && (
+                                    <div className="ap-gantt-file-date" style={{ fontSize: 10, color: '#6b7280' }}>{entry.Oracle_Load_Status}</div>
+                                  )}
+                                  <button className="ap-gantt-view-link" onClick={() => setSelectedConversionEntry(entry)}>
+                                    View &#8599;
+                                  </button>
+                                </div>
+                              );
+                            })}
                           </td>
                         </tr>
                       ))}
@@ -2198,22 +2298,11 @@ function DataFileDashboard() {
           ) : activeTab === 'file_config' ? (
             <FileConfigTab userEmail={userEmail} />
           ) : activeTab === 'validation_groups' ? (
-            <Phase6Placeholder
-              title="Validation Groups"
-              description="Card view per Validation Group with member progress, dependency status, latest run, and pending-approval badge."
-            />
+            <ValidationGroupsTab userEmail={userEmail} />
           ) : activeTab === 'validation_runs' ? (
-            <Phase6Placeholder
-              title="Validation Runs"
-              description="Full VAL-NNNN run history with error/warning/informative counts and a direct link to the Validation-to-Source Excel."
-              extraNote="Note: the approval flow already works at /admin/validation-approvals."
-            />
+            <ValidationRunsTab />
           ) : activeTab === 'vbl_groups' ? (
-            <Phase6Placeholder
-              title="VBL Groups"
-              description="Card per VBL group with member matrix, generated-file rollup, Sterling status, and distribution rollup."
-              extraNote="Note: the full approval + Sterling UI already works at /admin/vbl-approvals."
-            />
+            <VBLGroupsTab />
           ) : activeTab === 'history' ? (
             <div className="ap-history-content">
               {historyLoading ? (

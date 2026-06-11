@@ -1616,6 +1616,12 @@ def lambda_handler(event, context):
                     "LoadedBy", "FileTimestamp", "RowCount", "LoadVersion",
                     "PreviousLoadedAt", "S3SourceKey", "FileSize",
                     "LOAD_REQUIRED", "CONVERSION_TABLE_BU",
+                    # Phase 1 spec columns — present on Mocks promoted to
+                    # the 100-col shape; gracefully skipped on legacy Mocks.
+                    "File_Expected", "Current_Process_Stage", "Validation_Group_ID",
+                    "Latest_Validation_Status", "Latest_Approval_Status",
+                    "Pre_Load_Validation_Status", "Pre_Load_Recon_Status",
+                    "Oracle_Load_Status",
                 ]
                 col_list = ", ".join(f"[{c}]" for c in select_cols)
 
