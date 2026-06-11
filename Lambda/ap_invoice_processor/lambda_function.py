@@ -76,6 +76,9 @@ from vbl_group_tracker import (
     handle_mark_sterling_sent,
 )
 
+# Phase 6.2: File configuration admin (replaces uploading an Excel)
+import file_config_admin
+
 # ─── Configuration ────────────────────────────────────────────────────────────
 
 DEFAULT_BUCKET = "hacienda-erp-dev"
@@ -1056,6 +1059,164 @@ def lambda_handler(event, context):
                 "headers": headers,
                 "body": json.dumps(res, default=str),
             }
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
+    # ─── PHASE 6.2 — FILE CONFIGURATION ADMIN ───
+    if action == "file_configs":
+        # ?action=file_configs&mock=MOCK12[&module=FIN][&search=AP]
+        try:
+            p = event.get("queryStringParameters") or {}
+            conn_str = get_connection_string()
+            res = file_config_admin.list_file_configs(
+                conn_str, p.get("mock", "MOCK12"),
+                p.get("module") or None, p.get("search") or None,
+            )
+            return {"statusCode": 200 if res.get("ok") else 400,
+                    "headers": headers,
+                    "body": json.dumps(res, default=str)}
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
+    if action == "file_config_detail":
+        # ?action=file_config_detail&mock=MOCK12&entity=...&source=...
+        try:
+            p = event.get("queryStringParameters") or {}
+            conn_str = get_connection_string()
+            res = file_config_admin.get_file_config_detail(
+                conn_str, p.get("mock", "MOCK12"),
+                p.get("entity", ""), p.get("source", ""),
+            )
+            return {"statusCode": 200 if res.get("ok") else 400,
+                    "headers": headers,
+                    "body": json.dumps(res, default=str)}
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
+    if action == "update_file_config":
+        # POST { mock, entity, source, updates: {field: value, ...}, actor }
+        try:
+            body = json.loads(event.get("body") or "{}")
+            conn_str = get_connection_string()
+            res = file_config_admin.update_file_config(
+                conn_str, body.get("mock", "MOCK12"),
+                body.get("entity", ""), body.get("source", ""),
+                body.get("updates") or {},
+                body.get("actor", "") or "",
+            )
+            return {"statusCode": 200 if res.get("ok") else 400,
+                    "headers": headers,
+                    "body": json.dumps(res, default=str)}
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
+    if action == "update_validation_group":
+        # POST { mock, vg_id, members_total?, error_threshold?, actor }
+        try:
+            body = json.loads(event.get("body") or "{}")
+            conn_str = get_connection_string()
+            res = file_config_admin.update_validation_group(
+                conn_str, body.get("mock", "MOCK12"),
+                body.get("vg_id", ""),
+                body.get("members_total"),
+                body.get("error_threshold"),
+                body.get("actor", "") or "",
+            )
+            return {"statusCode": 200 if res.get("ok") else 400,
+                    "headers": headers,
+                    "body": json.dumps(res, default=str)}
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
+    if action == "add_file_entity":
+        # POST { mock, payload: {Entity, Source, Table_Name, ...}, actor }
+        try:
+            body = json.loads(event.get("body") or "{}")
+            conn_str = get_connection_string()
+            res = file_config_admin.add_file_entity(
+                conn_str, body.get("mock", "MOCK12"),
+                body.get("payload") or {},
+                body.get("actor", "") or "",
+            )
+            return {"statusCode": 200 if res.get("ok") else 400,
+                    "headers": headers,
+                    "body": json.dumps(res, default=str)}
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
+    if action == "list_sql_tables":
+        # ?action=list_sql_tables[&prefix=FIN_]
+        try:
+            p = event.get("queryStringParameters") or {}
+            conn_str = get_connection_string()
+            res = file_config_admin.list_sql_tables(conn_str, p.get("prefix") or None)
+            return {"statusCode": 200 if res.get("ok") else 400,
+                    "headers": headers,
+                    "body": json.dumps(res, default=str)}
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
+    if action == "sql_table_columns":
+        # ?action=sql_table_columns&table=...
+        try:
+            p = event.get("queryStringParameters") or {}
+            conn_str = get_connection_string()
+            res = file_config_admin.get_sql_table_columns(conn_str, p.get("table", ""))
+            return {"statusCode": 200 if res.get("ok") else 400,
+                    "headers": headers,
+                    "body": json.dumps(res, default=str)}
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
+    if action == "save_column_mapping":
+        # POST { mock, entity, source, table_name, mappings: [...], actor }
+        try:
+            body = json.loads(event.get("body") or "{}")
+            conn_str = get_connection_string()
+            res = file_config_admin.save_column_mapping(
+                conn_str, body.get("mock", "MOCK12"),
+                body.get("entity", ""), body.get("source", ""),
+                body.get("table_name", "") or "",
+                body.get("mappings") or [],
+                body.get("actor", "") or "",
+            )
+            return {"statusCode": 200 if res.get("ok") else 400,
+                    "headers": headers,
+                    "body": json.dumps(res, default=str)}
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
+    if action == "create_sql_table":
+        # POST { table_name, columns: [{name, data_type, length?, nullable?}, ...], actor }
+        try:
+            body = json.loads(event.get("body") or "{}")
+            conn_str = get_connection_string()
+            res = file_config_admin.create_sql_table(
+                conn_str, body.get("table_name", ""),
+                body.get("columns") or [],
+                body.get("actor", "") or "",
+            )
+            return {"statusCode": 200 if res.get("ok") else 400,
+                    "headers": headers,
+                    "body": json.dumps(res, default=str)}
         except Exception as e:
             traceback.print_exc()
             return {"statusCode": 500, "headers": headers,

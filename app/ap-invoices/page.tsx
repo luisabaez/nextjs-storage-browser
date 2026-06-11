@@ -12,6 +12,7 @@ import outputs from '../../amplify_outputs.json';
 import './ap-invoices.css';
 // Phase 6 dashboard tabs
 import { AWSFilesTab } from './tabs/AWSFilesTab';
+import { FileConfigTab } from './tabs/FileConfigTab';
 
 Amplify.configure(outputs as any);
 
@@ -230,7 +231,7 @@ const S3_FOLDERS = {
 };
 
 type TabId = 'all' | 'pending' | 'uploaded' | 'failed' | 'history' | 'gantt' | 'hierarchy'
-  | 'aws_files' | 'validation_groups' | 'validation_runs' | 'vbl_groups';
+  | 'aws_files' | 'file_config' | 'validation_groups' | 'validation_runs' | 'vbl_groups';
 
 interface HierarchyNode {
   id: string;
@@ -1928,6 +1929,7 @@ function DataFileDashboard() {
               { id: 'gantt' as TabId, label: 'Gantt View', count: null },
               { id: 'hierarchy' as TabId, label: 'Hierarchy View', count: null },
               { id: 'aws_files' as TabId, label: 'AWS Files', count: null },
+              { id: 'file_config' as TabId, label: 'File Config', count: null },
               { id: 'validation_groups' as TabId, label: 'Validation Groups', count: null },
               { id: 'validation_runs' as TabId, label: 'Validation Runs', count: null },
               { id: 'vbl_groups' as TabId, label: 'VBL Groups', count: null },
@@ -2193,6 +2195,8 @@ function DataFileDashboard() {
             </div>
           ) : activeTab === 'aws_files' ? (
             <AWSFilesTab userBUFilter={userBUFilter ? Array.from(userBUFilter) : null} />
+          ) : activeTab === 'file_config' ? (
+            <FileConfigTab userEmail={userEmail} />
           ) : activeTab === 'validation_groups' ? (
             <Phase6Placeholder
               title="Validation Groups"
