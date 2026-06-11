@@ -1314,6 +1314,107 @@ def lambda_handler(event, context):
             return {"statusCode": 500, "headers": headers,
                     "body": json.dumps({"ok": False, "error": str(e)})}
 
+    if action == "aws_file_chain":
+        # ?action=aws_file_chain&etag=<full eTag>
+        # Returns the version chain (Supersedes -> Superseded_By walk) and the
+        # split lineage (parent via Split_From_eTag, children where Split_From
+        # points at this eTag) for the dashboard's detail overlay.
+        try:
+            p = event.get("queryStringParameters") or {}
+            etag = (p.get("etag") or "").strip().strip('"')
+            if not etag:
+                return {"statusCode": 400, "headers": headers,
+                        "body": json.dumps({"ok": False, "error": "etag required"})}
+
+            conn_str = get_connection_string()
+            with pyodbc.connect(conn_str) as conn:
+                cur = conn.cursor()
+
+                def fetch_row(e):
+                    cur.execute(
+                        """
+                        SELECT TOP 1
+                            AWS_eTag, Movement_Sequence, File_Name, File_Category,
+                            File_Status, File_Size_KB, Record_Count,
+                            Conversion_Plan_Entity, [Source], Business_Unit, Mock_Number,
+                            Parent_Folder, File_URL,
+                            Received_DateTime, Processed_DateTime,
+                            Supersedes_eTag, Superseded_By_eTag, Split_From_eTag,
+                            Validation_Group_ID, VBL_Group_ID
+                        FROM AWS_FILES
+                        WHERE AWS_eTag = ? AND Movement_Sequence = 1
+                        """,
+                        (e,),
+                    )
+                    r = cur.fetchone()
+                    if not r:
+                        return None
+                    cols = [c[0] for c in cur.description]
+                    return dict(zip(cols, r))
+
+                # Anchor (the file the user clicked on)
+                anchor = fetch_row(etag)
+                if not anchor:
+                    return {"statusCode": 404, "headers": headers,
+                            "body": json.dumps({"ok": False, "error": "eTag not found"})}
+
+                # Walk supersede chain backwards (toward older versions)
+                older = []
+                cursor_e = anchor.get("Supersedes_eTag")
+                seen = {etag}
+                while cursor_e and cursor_e not in seen:
+                    seen.add(cursor_e)
+                    row = fetch_row(cursor_e)
+                    if not row:
+                        break
+                    older.append(row)
+                    cursor_e = row.get("Supersedes_eTag")
+
+                # Walk supersede chain forwards (toward newer versions)
+                newer = []
+                cursor_e = anchor.get("Superseded_By_eTag")
+                while cursor_e and cursor_e not in seen:
+                    seen.add(cursor_e)
+                    row = fetch_row(cursor_e)
+                    if not row:
+                        break
+                    newer.append(row)
+                    cursor_e = row.get("Superseded_By_eTag")
+
+                # Split parent (if this is a distribution row)
+                split_parent = None
+                if anchor.get("Split_From_eTag"):
+                    split_parent = fetch_row(anchor["Split_From_eTag"])
+
+                # Split children (other rows whose Split_From points at this eTag)
+                cur.execute(
+                    """
+                    SELECT
+                        AWS_eTag, File_Name, File_Category, File_Status,
+                        Business_Unit, Parent_Folder, Received_DateTime
+                    FROM AWS_FILES
+                    WHERE Split_From_eTag = ? AND Movement_Sequence = 1
+                    ORDER BY Business_Unit, Received_DateTime
+                    """,
+                    (etag,),
+                )
+                split_cols = [c[0] for c in cur.description]
+                split_children = [dict(zip(split_cols, r)) for r in cur.fetchall()]
+
+                return {"statusCode": 200, "headers": headers,
+                        "body": json.dumps({
+                            "ok": True,
+                            "anchor": anchor,
+                            "older_versions": older,
+                            "newer_versions": newer,
+                            "split_parent": split_parent,
+                            "split_children": split_children,
+                        }, default=str)}
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
     if action == "validation_groups":
         # ?action=validation_groups&mock=MOCK12
         # Returns one row per VG with member counts, dependency summary,

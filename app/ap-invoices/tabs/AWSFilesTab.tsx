@@ -330,11 +330,13 @@ export function AWSFilesTab({ userBUFilter }: { userBUFilter: string[] | null })
               <DetailRow label="File_URL"         value={selectedRow.File_URL || '—'} mono small />
             </DetailSection>
 
-            <DetailSection title="Version Chain">
-              <DetailRow label="Supersedes"       value={selectedRow.Supersedes_eTag    ? short(selectedRow.Supersedes_eTag)    : '—'} mono />
-              <DetailRow label="Superseded_By"    value={selectedRow.Superseded_By_eTag ? short(selectedRow.Superseded_By_eTag) : '—'} mono />
-              <DetailRow label="Split_From"       value={selectedRow.Split_From_eTag    ? short(selectedRow.Split_From_eTag)    : '—'} mono />
-            </DetailSection>
+            <ChainAndLineage etag={selectedRow.AWS_eTag} onJump={e => {
+              // When user clicks a chain/lineage node, swap the selected row
+              // in-place so we re-fetch its chain. Cheap UX: just reset the
+              // selection to a stub with the eTag — the row fetch will run
+              // again via the panel.
+              setSelectedRow(prev => prev ? { ...prev, AWS_eTag: e } : prev);
+            }} />
 
             <DetailSection title="Lifecycle">
               <DetailRow label="Received"   value={fmt(selectedRow.Received_DateTime)} />
@@ -353,6 +355,178 @@ export function AWSFilesTab({ userBUFilter }: { userBUFilter: string[] | null })
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Phase 6.4 — Version Chain walk + Split lineage tree
+// ────────────────────────────────────────────────────────────────────────────
+interface ChainResp {
+  ok: boolean;
+  anchor: ChainNode;
+  older_versions: ChainNode[];
+  newer_versions: ChainNode[];
+  split_parent: ChainNode | null;
+  split_children: ChainNode[];
+  error?: string;
+}
+
+interface ChainNode {
+  AWS_eTag: string;
+  Movement_Sequence?: number;
+  File_Name: string;
+  File_Category?: string;
+  File_Status: string;
+  Conversion_Plan_Entity?: string | null;
+  Source?: string | null;
+  Business_Unit?: string | null;
+  Mock_Number?: string | null;
+  Parent_Folder?: string | null;
+  File_URL?: string | null;
+  Received_DateTime?: string | null;
+  Supersedes_eTag?: string | null;
+  Superseded_By_eTag?: string | null;
+  Split_From_eTag?: string | null;
+}
+
+function ChainAndLineage({ etag, onJump }: { etag: string; onJump: (e: string) => void }) {
+  const [data, setData] = useState<ChainResp | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    let live = true;
+    setLoading(true); setError('');
+    (async () => {
+      try {
+        const resp = await fetch(`${LAMBDA_URL}?action=aws_file_chain&etag=${encodeURIComponent(etag)}`);
+        const j: ChainResp = await resp.json();
+        if (!live) return;
+        if (!j.ok) setError(j.error || 'Chain load failed');
+        else setData(j);
+      } catch (e) {
+        if (live) setError(`Network error: ${(e as Error).message}`);
+      } finally {
+        if (live) setLoading(false);
+      }
+    })();
+    return () => { live = false; };
+  }, [etag]);
+
+  const hasVersionChain = data && (data.older_versions.length > 0 || data.newer_versions.length > 0);
+  const hasLineage = data && (data.split_parent || (data.split_children?.length || 0) > 0);
+
+  return (
+    <>
+      <DetailSection title="Version Chain">
+        {loading && <div style={{ color: '#9ca3af', fontSize: 12, padding: 8 }}>Loading chain…</div>}
+        {error && <div style={{ color: '#dc2626', fontSize: 12 }}>{error}</div>}
+        {data && !hasVersionChain && (
+          <div style={{ color: '#9ca3af', fontSize: 12, padding: 8 }}>
+            No prior or subsequent versions for this entity+source.
+          </div>
+        )}
+        {data && hasVersionChain && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            {/* Oldest first → anchor → newest last */}
+            {data.older_versions.slice().reverse().map(n => (
+              <ChainNodeRow key={n.AWS_eTag} node={n} relation="older" onJump={onJump} />
+            ))}
+            <ChainNodeRow node={data.anchor} relation="anchor" onJump={onJump} />
+            {data.newer_versions.map(n => (
+              <ChainNodeRow key={n.AWS_eTag} node={n} relation="newer" onJump={onJump} />
+            ))}
+          </div>
+        )}
+      </DetailSection>
+
+      <DetailSection title="Split Lineage (BU Distribution)">
+        {loading && <div style={{ color: '#9ca3af', fontSize: 12, padding: 8 }}>Loading lineage…</div>}
+        {data && !hasLineage && (
+          <div style={{ color: '#9ca3af', fontSize: 12, padding: 8 }}>
+            This file is not part of a BU split (no parent or children).
+          </div>
+        )}
+        {data && hasLineage && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {data.split_parent && (
+              <>
+                <div style={{ fontSize: 11, color: '#6b7280', fontWeight: 600 }}>
+                  ↑ Consolidated parent
+                </div>
+                <ChainNodeRow node={data.split_parent} relation="parent" onJump={onJump} />
+                <div style={{ fontSize: 18, textAlign: 'center', color: '#9ca3af', lineHeight: 1 }}>↓</div>
+              </>
+            )}
+            <ChainNodeRow node={data.anchor} relation="anchor" onJump={onJump} />
+            {(data.split_children?.length || 0) > 0 && (
+              <>
+                <div style={{ fontSize: 18, textAlign: 'center', color: '#9ca3af', lineHeight: 1 }}>↓</div>
+                <div style={{ fontSize: 11, color: '#6b7280', fontWeight: 600 }}>
+                  ↓ BU split children ({data.split_children.length})
+                </div>
+                {data.split_children.map(c => (
+                  <ChainNodeRow key={c.AWS_eTag} node={c} relation="child" onJump={onJump} indent />
+                ))}
+              </>
+            )}
+          </div>
+        )}
+      </DetailSection>
+    </>
+  );
+}
+
+function ChainNodeRow({ node, relation, onJump, indent }: {
+  node: ChainNode;
+  relation: 'older' | 'newer' | 'anchor' | 'parent' | 'child';
+  onJump: (e: string) => void;
+  indent?: boolean;
+}) {
+  const isAnchor = relation === 'anchor';
+  const bg = isAnchor ? '#fef3c7' : '#fff';
+  const border = isAnchor ? '2px solid #f59e0b' : '1px solid #e5e7eb';
+  const relLabel = ({
+    older: 'older',
+    newer: 'newer',
+    anchor: 'current',
+    parent: 'parent',
+    child: 'child',
+  } as const)[relation];
+  const fmt = (s?: string | null) => s ? new Date(s).toLocaleString() : '';
+
+  return (
+    <div
+      onClick={() => !isAnchor && onJump(node.AWS_eTag)}
+      style={{
+        background: bg, border, borderRadius: 6, padding: 8,
+        cursor: isAnchor ? 'default' : 'pointer',
+        marginLeft: indent ? 16 : 0,
+      }}
+    >
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+        <div style={{ fontFamily: 'monospace', fontSize: 11, color: isAnchor ? '#92400e' : '#374151', fontWeight: isAnchor ? 700 : 400 }}>
+          {node.AWS_eTag.slice(0, 16)}…
+        </div>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <span style={{ background: '#f3f4f6', color: '#6b7280', padding: '1px 6px', borderRadius: 999, fontSize: 10, fontWeight: 600 }}>
+            {relLabel}
+          </span>
+          {node.Business_Unit && (
+            <span style={{ background: '#dbeafe', color: '#1e40af', padding: '1px 6px', borderRadius: 999, fontSize: 10, fontWeight: 600 }}>
+              BU {node.Business_Unit}
+            </span>
+          )}
+        </div>
+      </div>
+      <div style={{ fontSize: 11, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        {node.File_Name}
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: '#6b7280', marginTop: 2 }}>
+        <span>{node.File_Status}</span>
+        <span>{fmt(node.Received_DateTime)}</span>
+      </div>
     </div>
   );
 }

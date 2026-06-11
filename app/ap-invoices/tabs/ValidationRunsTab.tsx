@@ -7,7 +7,7 @@
  * Decision making lives in /admin/validation-approvals (Phase 4).
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Chip, LabelledInput, pillToneForStatus } from './ValidationGroupsTab';
+import { Chip, LabelledInput, pillToneForStatus, BUScopeNotice } from './ValidationGroupsTab';
 
 const LAMBDA_URL = 'https://5ahxjcxhrcopng5hjgc2n6utxq0rwcmm.lambda-url.us-east-1.on.aws/';
 
@@ -34,7 +34,9 @@ const STATUS_OPTIONS = [
   '', 'Pending Trigger', 'Running', 'Pending Approval', 'Approved', 'Rejected',
 ];
 
-export function ValidationRunsTab() {
+export function ValidationRunsTab({ userBUFilter }: {
+  userBUFilter: string[] | null;
+}) {
   const [mock, setMock] = useState('MOCK12');
   const [statusFilter, setStatusFilter] = useState('');
   const [vgFilter, setVgFilter] = useState('');
@@ -98,6 +100,10 @@ export function ValidationRunsTab() {
           ⇗ Open approver console
         </a>
       </div>
+
+      {userBUFilter && userBUFilter.length > 0 && (
+        <BUScopeNotice userBUFilter={userBUFilter} />
+      )}
 
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
         <Chip label={`${rollup.total} runs in view`} tone="gray" />

@@ -16,7 +16,7 @@
  *     - map each header to a target SQL column
  *     - save → INSERTs a SETUP_CONVERSION_PLAN row + column mappings
  */
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react'; // useMemo for BU filter
 
 const LAMBDA_URL = 'https://5ahxjcxhrcopng5hjgc2n6utxq0rwcmm.lambda-url.us-east-1.on.aws/';
 
@@ -79,7 +79,10 @@ interface SQLColumn {
   ordinal_position: number;
 }
 
-export function FileConfigTab({ userEmail }: { userEmail: string }) {
+export function FileConfigTab({ userEmail, userBUFilter }: {
+  userEmail: string;
+  userBUFilter: string[] | null;
+}) {
   const [mock, setMock] = useState('MOCK12');
   const [rows, setRows] = useState<ConfigRow[]>([]);
   const [loading, setLoading] = useState(false);
@@ -88,6 +91,22 @@ export function FileConfigTab({ userEmail }: { userEmail: string }) {
   const [moduleFilter, setModuleFilter] = useState('');
   const [selected, setSelected] = useState<ConfigRow | null>(null);
   const [showAdd, setShowAdd] = useState(false);
+
+  // BU permission filter — rows with a BU value get checked against the
+  // user's allowed BUs. Rows with no BU set are visible to everyone (those
+  // are likely newly-onboarded entities pending a load). Admins (null
+  // filter) see everything.
+  const filteredRows = useMemo(() => {
+    if (!userBUFilter) return rows;
+    if (userBUFilter.length === 0) return [];
+    const allowed = new Set(userBUFilter);
+    return rows.filter(r => {
+      if (!r.BU || !r.BU.trim()) return true;
+      const rowBUs = r.BU.split(',').map(s => s.trim().replace(/^0+/, '') || '0');
+      return rowBUs.some(bu => allowed.has(bu));
+    });
+  }, [rows, userBUFilter]);
+  const hiddenByBU = rows.length - filteredRows.length;
 
   const load = useCallback(async () => {
     setLoading(true); setError('');
@@ -140,7 +159,12 @@ export function FileConfigTab({ userEmail }: { userEmail: string }) {
       )}
 
       <div style={{ fontSize: 13, color: '#4b5563', marginBottom: 8 }}>
-        {loading ? 'Loading…' : `${rows.length} entit${rows.length === 1 ? 'y' : 'ies'} in ${mock}`}
+        {loading ? 'Loading…' : `${filteredRows.length} entit${filteredRows.length === 1 ? 'y' : 'ies'} in ${mock}`}
+        {hiddenByBU > 0 && (
+          <span style={{ marginLeft: 8, color: '#92400e' }}>
+            · {hiddenByBU} hidden by BU permission
+          </span>
+        )}
       </div>
 
       <div style={{ overflowX: 'auto', border: '1px solid #e5e7eb', borderRadius: 8 }}>
@@ -160,12 +184,14 @@ export function FileConfigTab({ userEmail }: { userEmail: string }) {
             </tr>
           </thead>
           <tbody>
-            {rows.length === 0 && !loading && (
+            {filteredRows.length === 0 && !loading && (
               <tr><td colSpan={10} style={{ padding: 24, textAlign: 'center', color: '#9ca3af' }}>
-                No entities found. Click <strong>+ Add new file</strong> to onboard one.
+                {rows.length > 0
+                  ? 'No entities visible at your BU permissions for this filter.'
+                  : <>No entities found. Click <strong>+ Add new file</strong> to onboard one.</>}
               </td></tr>
             )}
-            {rows.map((r, i) => (
+            {filteredRows.map((r, i) => (
               <tr
                 key={`${r.Entity}-${r.SOURCE}-${i}`}
                 onClick={() => setSelected(r)}

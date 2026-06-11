@@ -11,7 +11,7 @@
  * Action buttons surface but link out to /admin/vbl-approvals.
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Chip, LabelledInput, pillToneForStatus } from './ValidationGroupsTab';
+import { Chip, LabelledInput, pillToneForStatus, BUScopeNotice } from './ValidationGroupsTab';
 
 const LAMBDA_URL = 'https://5ahxjcxhrcopng5hjgc2n6utxq0rwcmm.lambda-url.us-east-1.on.aws/';
 
@@ -44,7 +44,9 @@ interface VBL {
   members: VBLMember[];
 }
 
-export function VBLGroupsTab() {
+export function VBLGroupsTab({ userBUFilter }: {
+  userBUFilter: string[] | null;
+}) {
   const [mock, setMock] = useState('MOCK12');
   const [groups, setGroups] = useState<VBL[]>([]);
   const [loading, setLoading] = useState(false);
@@ -107,6 +109,10 @@ export function VBLGroupsTab() {
           ⇗ Open VBL + Sterling console
         </a>
       </div>
+
+      {userBUFilter && userBUFilter.length > 0 && (
+        <BUScopeNotice userBUFilter={userBUFilter} />
+      )}
 
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
         <Chip label={`${rollup.total} VBL groups`} tone="gray" />

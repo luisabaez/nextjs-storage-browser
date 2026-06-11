@@ -40,7 +40,10 @@ interface VG {
   dependencies?: { total: number; loaded: number; blocking: number };
 }
 
-export function ValidationGroupsTab({ userEmail }: { userEmail: string }) {
+export function ValidationGroupsTab({ userEmail, userBUFilter }: {
+  userEmail: string;
+  userBUFilter: string[] | null;
+}) {
   const [mock, setMock] = useState('MOCK12');
   const [groups, setGroups] = useState<VG[]>([]);
   const [moduleFilter, setModuleFilter] = useState('');
@@ -115,6 +118,10 @@ export function ValidationGroupsTab({ userEmail }: { userEmail: string }) {
           {refreshingDeps ? 'Re-evaluating…' : 'Re-evaluate dependencies'}
         </button>
       </div>
+
+      {userBUFilter && userBUFilter.length > 0 && (
+        <BUScopeNotice userBUFilter={userBUFilter} />
+      )}
 
       {/* Rollup chips */}
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
@@ -308,6 +315,28 @@ export function Chip({ label, tone = 'gray', small }: {
     }}>
       {label}
     </span>
+  );
+}
+
+// Reusable notice shown on tabs where rows aren't directly BU-scoped.
+// Validation Groups / Runs / VBL Groups aggregate across multiple entities
+// and many sources, so we can't reliably hide whole rows by BU permission.
+// We surface a notice instead so BU-restricted users know which entities
+// (in the AWS Files + File Config tabs) they actually own decisions on.
+export function BUScopeNotice({ userBUFilter }: { userBUFilter: string[] }) {
+  return (
+    <div style={{
+      background: '#dbeafe', border: '1px solid #93c5fd', color: '#1e40af',
+      padding: 10, borderRadius: 6, marginBottom: 12, fontSize: 12,
+    }}>
+      <strong>BU scope:</strong> You can view group/run state across all
+      groups, but downstream decisions are restricted to BUs you own:
+      <span style={{ marginLeft: 6, fontFamily: 'monospace', fontWeight: 600 }}>
+        {userBUFilter.join(', ')}
+      </span>
+      . The <strong>AWS Files</strong> and <strong>File Config</strong> tabs
+      filter rows by BU automatically.
+    </div>
   );
 }
 

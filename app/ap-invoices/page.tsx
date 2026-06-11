@@ -2296,13 +2296,13 @@ function DataFileDashboard() {
           ) : activeTab === 'aws_files' ? (
             <AWSFilesTab userBUFilter={userBUFilter ? Array.from(userBUFilter) : null} />
           ) : activeTab === 'file_config' ? (
-            <FileConfigTab userEmail={userEmail} />
+            <FileConfigTab userEmail={userEmail} userBUFilter={userBUFilter ? Array.from(userBUFilter) : null} />
           ) : activeTab === 'validation_groups' ? (
-            <ValidationGroupsTab userEmail={userEmail} />
+            <ValidationGroupsTab userEmail={userEmail} userBUFilter={userBUFilter ? Array.from(userBUFilter) : null} />
           ) : activeTab === 'validation_runs' ? (
-            <ValidationRunsTab />
+            <ValidationRunsTab userBUFilter={userBUFilter ? Array.from(userBUFilter) : null} />
           ) : activeTab === 'vbl_groups' ? (
-            <VBLGroupsTab />
+            <VBLGroupsTab userBUFilter={userBUFilter ? Array.from(userBUFilter) : null} />
           ) : activeTab === 'history' ? (
             <div className="ap-history-content">
               {historyLoading ? (
