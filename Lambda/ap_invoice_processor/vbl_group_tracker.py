@@ -307,6 +307,243 @@ def handle_vbl_run_decision(connection_str: str, mock_number: str,
         return {"ok": False, "error": str(e)}
 
 
+def handle_create_vbl_group(connection_str: str, mock_number: str,
+                            payload: dict, actor: str = "") -> dict:
+    """
+    INSERT a new VBL_GROUPS_{MOCK} row + its VBL_GROUP_MEMBERS rows in
+    one transaction.
+
+    payload shape:
+      {
+        "vbl_group_id":   "VBL-FIN-GL",   # required, must not already exist
+        "vbl_group_name": "FIN General Ledger — Before Load",  # required
+        "pillar":         "FIN",          # required
+        "module":         "GL",           # required
+        "members": [                      # required, at least one
+          { "validation_group_id": "GLBAL-PRIFAS", "required": True },
+          { "validation_group_id": "GLBUDG-PRIFAS", "required": False }
+        ]
+      }
+
+    Validates that:
+      - All required string fields are present and non-empty
+      - The vbl_group_id is not already in use
+      - Every referenced Validation_Group_ID exists in
+        VALIDATION_GROUPS_{MOCK}
+
+    Returns {ok: bool, ...} — never raises.
+    """
+    vbl_table  = f"VBL_GROUPS_{mock_number}"
+    vblm_table = f"VBL_GROUP_MEMBERS_{mock_number}"
+    vg_table   = f"VALIDATION_GROUPS_{mock_number}"
+
+    vbl_id   = (payload.get("vbl_group_id") or "").strip()
+    vbl_name = (payload.get("vbl_group_name") or "").strip()
+    pillar   = (payload.get("pillar") or "").strip()
+    module   = (payload.get("module") or "").strip()
+    members  = payload.get("members") or []
+
+    missing = []
+    if not vbl_id:   missing.append("vbl_group_id")
+    if not vbl_name: missing.append("vbl_group_name")
+    if not pillar:   missing.append("pillar")
+    if not module:   missing.append("module")
+    if not members:  missing.append("members (at least one)")
+    if missing:
+        return {"ok": False, "error": f"Missing required fields: {', '.join(missing)}"}
+
+    try:
+        with pyodbc.connect(connection_str) as conn:
+            cur = conn.cursor()
+            # Tables present?
+            cur.execute(
+                "SELECT COUNT(*) FROM sys.tables WHERE name IN (?, ?, ?)",
+                (vbl_table, vblm_table, vg_table),
+            )
+            if cur.fetchone()[0] < 3:
+                return {"ok": False, "error":
+                        f"Per-Mock tables missing for {mock_number} "
+                        f"(need {vbl_table}, {vblm_table}, {vg_table})"}
+
+            # VBL_Group_ID unique?
+            cur.execute(f"SELECT COUNT(*) FROM {vbl_table} WHERE VBL_Group_ID = ?", (vbl_id,))
+            if cur.fetchone()[0] > 0:
+                return {"ok": False, "error":
+                        f"VBL group '{vbl_id}' already exists in {vbl_table}"}
+
+            # Validate member VG IDs exist
+            requested_vgs = [(m.get("validation_group_id") or "").strip() for m in members]
+            requested_vgs = [v for v in requested_vgs if v]
+            if not requested_vgs:
+                return {"ok": False, "error": "No valid member validation_group_id values supplied"}
+
+            placeholders = ",".join(["?"] * len(requested_vgs))
+            cur.execute(
+                f"SELECT Validation_Group_ID FROM {vg_table} "
+                f"WHERE Validation_Group_ID IN ({placeholders})",
+                requested_vgs,
+            )
+            existing_vgs = {row[0] for row in cur.fetchall()}
+            missing_vgs = [v for v in requested_vgs if v not in existing_vgs]
+            if missing_vgs:
+                return {"ok": False, "error":
+                        f"These Validation Groups don't exist in {vg_table}: "
+                        f"{', '.join(missing_vgs)}"}
+
+            required_count = sum(1 for m in members
+                                 if m.get("required") in (True, "Y", "y", "true", "1"))
+            now = datetime.utcnow()
+
+            # 1. VBL_GROUPS row
+            cur.execute(
+                f"""
+                INSERT INTO {vbl_table}
+                (VBL_Group_ID, VBL_Group_Name, Mock_Number, Pillar, Module,
+                 Val_To_Source_Members_Total, Val_To_Source_Members_Approved,
+                 All_Val_To_Source_Approved,
+                 VBL_Run_Count,
+                 Last_Updated_By, Last_Updated_DateTime, Notes)
+                VALUES (?, ?, ?, ?, ?, ?, 0, 'N', 0, ?, ?, ?)
+                """,
+                (vbl_id, vbl_name, mock_number, pillar.upper(), module.upper(),
+                 required_count,
+                 actor or "vbl_create_ui", now,
+                 f"Created via dashboard by {actor or 'unknown'} at {now.isoformat()}Z"),
+            )
+
+            # 2. VBL_GROUP_MEMBERS rows
+            inserted_members = 0
+            for m in members:
+                vg = (m.get("validation_group_id") or "").strip()
+                if not vg:
+                    continue
+                required = "Y" if m.get("required") in (True, "Y", "y", "true", "1") else "N"
+                cur.execute(
+                    f"""
+                    INSERT INTO {vblm_table}
+                    (VBL_Group_ID, Validation_Group_ID, Required,
+                     Blocks_VBL_Trigger, Last_Updated_By, Last_Updated_DateTime)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (vbl_id, vg, required,
+                     "Y" if required == "Y" else "N",
+                     actor or "vbl_create_ui", now),
+                )
+                inserted_members += 1
+
+            conn.commit()
+            return {
+                "ok": True,
+                "vbl_group_id": vbl_id,
+                "members_inserted": inserted_members,
+                "members_required": required_count,
+            }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {"ok": False, "error": str(e)}
+
+
+def handle_update_vbl_members(connection_str: str, mock_number: str,
+                              vbl_group_id: str, members: list,
+                              actor: str = "") -> dict:
+    """
+    Replace the entire member list for a VBL group. DELETE then INSERT in
+    one transaction, then recompute Val_To_Source_Members_Total +
+    Val_To_Source_Members_Approved on the VBL_GROUPS row.
+
+    Safe to call repeatedly. Doesn't touch the VBL group's run state.
+    """
+    vbl_table  = f"VBL_GROUPS_{mock_number}"
+    vblm_table = f"VBL_GROUP_MEMBERS_{mock_number}"
+    vg_table   = f"VALIDATION_GROUPS_{mock_number}"
+
+    if not vbl_group_id:
+        return {"ok": False, "error": "vbl_group_id required"}
+    if not members:
+        return {"ok": False, "error": "members list cannot be empty"}
+
+    try:
+        with pyodbc.connect(connection_str) as conn:
+            cur = conn.cursor()
+            cur.execute(f"SELECT COUNT(*) FROM {vbl_table} WHERE VBL_Group_ID = ?",
+                        (vbl_group_id,))
+            if cur.fetchone()[0] == 0:
+                return {"ok": False, "error":
+                        f"VBL group '{vbl_group_id}' not found in {vbl_table}"}
+
+            # Validate member VG IDs exist
+            requested_vgs = [(m.get("validation_group_id") or "").strip() for m in members]
+            requested_vgs = [v for v in requested_vgs if v]
+            placeholders = ",".join(["?"] * len(requested_vgs))
+            cur.execute(
+                f"SELECT Validation_Group_ID FROM {vg_table} "
+                f"WHERE Validation_Group_ID IN ({placeholders})",
+                requested_vgs,
+            )
+            existing_vgs = {row[0] for row in cur.fetchall()}
+            missing_vgs = [v for v in requested_vgs if v not in existing_vgs]
+            if missing_vgs:
+                return {"ok": False, "error":
+                        f"These Validation Groups don't exist: {', '.join(missing_vgs)}"}
+
+            now = datetime.utcnow()
+            cur.execute(f"DELETE FROM {vblm_table} WHERE VBL_Group_ID = ?",
+                        (vbl_group_id,))
+            deleted = cur.rowcount
+
+            inserted = 0
+            approved_required = 0
+            for m in members:
+                vg = (m.get("validation_group_id") or "").strip()
+                if not vg:
+                    continue
+                required = "Y" if m.get("required") in (True, "Y", "y", "true", "1") else "N"
+                # Carry forward the current approval status if the user is
+                # editing an existing membership.
+                # For now we re-init to NULL — the next VG approval will set it.
+                cur.execute(
+                    f"""
+                    INSERT INTO {vblm_table}
+                    (VBL_Group_ID, Validation_Group_ID, Required,
+                     Blocks_VBL_Trigger, Last_Updated_By, Last_Updated_DateTime)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (vbl_group_id, vg, required,
+                     "Y" if required == "Y" else "N",
+                     actor or "vbl_edit_ui", now),
+                )
+                inserted += 1
+                if required == "Y":
+                    approved_required += 1
+
+            # Recompute total on the parent row
+            cur.execute(
+                f"""
+                UPDATE {vbl_table} SET
+                    Val_To_Source_Members_Total = ?,
+                    Val_To_Source_Members_Approved = 0,
+                    All_Val_To_Source_Approved = 'N',
+                    Last_Updated_By = ?,
+                    Last_Updated_DateTime = ?
+                WHERE VBL_Group_ID = ?
+                """,
+                (approved_required, actor or "vbl_edit_ui", now, vbl_group_id),
+            )
+            conn.commit()
+            return {
+                "ok": True,
+                "vbl_group_id": vbl_group_id,
+                "deleted": deleted,
+                "inserted": inserted,
+                "required_total": approved_required,
+            }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {"ok": False, "error": str(e)}
+
+
 def handle_mark_sterling_sent(connection_str: str, mock_number: str,
                                vbl_group_id: str,
                                sterling_status: str = "Submitted",
