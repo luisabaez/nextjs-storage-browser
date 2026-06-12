@@ -109,13 +109,20 @@ PROMOTABLE_TABLES = [
 
 
 def _normalise_mock(value: str) -> str:
-    """Accept 'MOCK14', 'mock14', or '14' → returns 'MOCK14'."""
+    """
+    Accept any of:
+        '14' / 'mock14' / 'MOCK14'  → 'MOCK14'
+        '13PRE' / 'mock13pre'        → 'MOCK13PRE'   (PRE = dev/test sibling)
+        '14PRE2'                     → 'MOCK14PRE2'  (multiple PRE rounds)
+    Leading digits trigger the MOCK prefix; anything that already starts with
+    MOCK is left alone. Free-form labels (e.g. 'SANDBOX') pass through as-is.
+    """
     s = (value or "").strip().upper()
     if not s:
         return ""
     if s.startswith("MOCK"):
         return s
-    if s.isdigit():
+    if s[0].isdigit():
         return f"MOCK{s}"
     return s
 

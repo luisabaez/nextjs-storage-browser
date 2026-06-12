@@ -51,7 +51,8 @@ function PromoteMockPage() {
   const [isAdmin, setIsAdmin] = useState(false);
   const [authChecked, setAuthChecked] = useState(false);
 
-  // Form
+  // Form — accepts plain numbers (13), MOCK-prefixed (MOCK13), or PRE
+  // siblings (13PRE / MOCK13PRE) for dev-team testing tracks.
   const [sourceMock, setSourceMock] = useState('13');
   const [targetMock, setTargetMock] = useState('14');
 
@@ -181,6 +182,21 @@ function PromoteMockPage() {
           are cleared so the new Mock starts clean. The <strong>AWS_FILES</strong>
           event log is global and is never touched by this operation.
         </p>
+        <div style={{
+          background: '#eff6ff', border: '1px solid #bfdbfe', color: '#1e40af',
+          padding: 10, borderRadius: 6, fontSize: 12, marginTop: 8,
+        }}>
+          <strong>Mock label syntax:</strong>
+          <ul style={{ margin: '4px 0 0 18px', padding: 0 }}>
+            <li><code>13</code> or <code>MOCK13</code> — production Mock</li>
+            <li><code>13PRE</code> or <code>MOCK13PRE</code> — dev/test sibling Mock running in parallel with Mock 13</li>
+            <li><code>14PRE2</code> — second PRE round for Mock 14</li>
+          </ul>
+          The <strong>PRE</strong> suffix is part of the filename pattern
+          (<code>FIN_AP_INVOICE_HDR_MOCK13PRE_PRIFAS_…csv</code>) and creates parallel tables like
+          <code> SETUP_CONVERSION_PLAN_MOCK13PRE</code>. Use PRE to onboard or stress-test changes
+          without touching the client&apos;s production Mock 13 data.
+        </div>
 
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto', gap: 16, alignItems: 'end', marginTop: 16 }}>
           <label style={{ display: 'block' }}>
@@ -189,7 +205,7 @@ function PromoteMockPage() {
               type="text"
               value={sourceMock}
               onChange={e => setSourceMock(e.target.value)}
-              placeholder="13"
+              placeholder="13 / MOCK13 / 13PRE"
               style={{ width: '100%', padding: '8px 10px', border: '1px solid #d1d5db', borderRadius: 6 }}
               disabled={previewing || promoting}
             />
@@ -200,7 +216,7 @@ function PromoteMockPage() {
               type="text"
               value={targetMock}
               onChange={e => setTargetMock(e.target.value)}
-              placeholder="14"
+              placeholder="14 / 13PRE / 14PRE2"
               style={{ width: '100%', padding: '8px 10px', border: '1px solid #d1d5db', borderRadius: 6 }}
               disabled={previewing || promoting}
             />

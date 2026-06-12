@@ -16,6 +16,7 @@ import { FileConfigTab } from './tabs/FileConfigTab';
 import { ValidationGroupsTab } from './tabs/ValidationGroupsTab';
 import { ValidationRunsTab } from './tabs/ValidationRunsTab';
 import { VBLGroupsTab } from './tabs/VBLGroupsTab';
+import { PipelineMetrics } from './PipelineMetrics';
 
 Amplify.configure(outputs as any);
 
@@ -1991,6 +1992,12 @@ function DataFileDashboard() {
             />
           </div>
         </div>}
+
+        {/* Phase 6.5 — pipeline metrics strip (auto-refresh every 30s) */}
+        <PipelineMetrics
+          defaultMock={filterMock && filterMock !== 'all' ? filterMock : 'MOCK12'}
+          onJump={target => setActiveTab(target)}
+        />
 
         {/* Tabs + Table */}
         <div className="ap-tabs">

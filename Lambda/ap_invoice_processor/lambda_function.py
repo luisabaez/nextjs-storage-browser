@@ -1314,6 +1314,180 @@ def lambda_handler(event, context):
             return {"statusCode": 500, "headers": headers,
                     "body": json.dumps({"ok": False, "error": str(e)})}
 
+    if action == "pipeline_metrics":
+        # ?action=pipeline_metrics[&mock=MOCK12][&window_hours=24]
+        # Lightweight rollup that powers the dashboard metric tiles.
+        # Cheap: one COUNT query per metric, no row payload returned.
+        try:
+            p = event.get("queryStringParameters") or {}
+            mock = (p.get("mock") or "").strip().upper() or None
+            window_hours = max(1, min(168, int(p.get("window_hours", "24") or "24")))
+
+            conn_str = get_connection_string()
+            with pyodbc.connect(conn_str) as conn:
+                cur = conn.cursor()
+
+                # ─── AWS_FILES rollup ───
+                mock_clause = "AND Mock_Number = ?" if mock else ""
+                mock_args = [mock] if mock else []
+
+                # Queue depth — Received / Gate Check Running on seq 1
+                cur.execute(
+                    f"""
+                    SELECT COUNT(*) FROM AWS_FILES
+                    WHERE Movement_Sequence = 1
+                      AND File_Status IN ('Received','Gate Check Running')
+                      {mock_clause}
+                    """,
+                    mock_args,
+                )
+                queue_depth = cur.fetchone()[0] or 0
+
+                # In flight — past gate, not yet Table Load Success
+                cur.execute(
+                    f"""
+                    SELECT COUNT(*) FROM AWS_FILES
+                    WHERE Movement_Sequence = 1
+                      AND File_Status NOT IN ('Received','Gate Check Running',
+                        'Table Load Success','Invalid File Name','File Not Expected',
+                        'Invalid Headers','TSQL Load File Not Found','TSQL Load Error',
+                        'Superseded','Archived','Rejected','Distributed','Loaded')
+                      {mock_clause}
+                    """,
+                    mock_args,
+                )
+                in_flight = cur.fetchone()[0] or 0
+
+                # Window aggregates
+                cur.execute(
+                    f"""
+                    SELECT
+                        SUM(CASE WHEN File_Status = 'Table Load Success' THEN 1 ELSE 0 END) AS loaded,
+                        SUM(CASE WHEN File_Status IN ('Invalid File Name','File Not Expected',
+                            'Invalid Headers','TSQL Load File Not Found','TSQL Load Error')
+                            THEN 1 ELSE 0 END) AS failed,
+                        SUM(CASE WHEN File_Status = 'Superseded' THEN 1 ELSE 0 END) AS superseded
+                    FROM AWS_FILES
+                    WHERE Movement_Sequence = 1
+                      AND Received_DateTime >= DATEADD(hour, ?, SYSUTCDATETIME())
+                      {mock_clause}
+                    """,
+                    [-window_hours] + mock_args,
+                )
+                row = cur.fetchone()
+                loaded_window = row[0] or 0
+                failed_window = row[1] or 0
+                superseded_window = row[2] or 0
+
+                # Mean load duration (seconds): Processed - Received, capped at window
+                cur.execute(
+                    f"""
+                    SELECT AVG(CAST(DATEDIFF(SECOND, Received_DateTime, Processed_DateTime) AS FLOAT))
+                    FROM AWS_FILES
+                    WHERE Movement_Sequence = 1
+                      AND File_Status = 'Table Load Success'
+                      AND Received_DateTime IS NOT NULL
+                      AND Processed_DateTime IS NOT NULL
+                      AND Received_DateTime >= DATEADD(hour, ?, SYSUTCDATETIME())
+                      {mock_clause}
+                    """,
+                    [-window_hours] + mock_args,
+                )
+                mean_load = cur.fetchone()[0]
+                mean_load_seconds = float(mean_load) if mean_load is not None else None
+
+                # By module (for the module breakdown chart)
+                cur.execute(
+                    f"""
+                    SELECT COALESCE(Module, '(unknown)'), COUNT(*)
+                    FROM AWS_FILES
+                    WHERE Movement_Sequence = 1
+                      AND Received_DateTime >= DATEADD(hour, ?, SYSUTCDATETIME())
+                      {mock_clause}
+                    GROUP BY Module
+                    ORDER BY COUNT(*) DESC
+                    """,
+                    [-window_hours] + mock_args,
+                )
+                by_module = {r[0] or '(unknown)': r[1] for r in cur.fetchall()}
+
+                # By status
+                cur.execute(
+                    f"""
+                    SELECT File_Status, COUNT(*)
+                    FROM AWS_FILES
+                    WHERE Movement_Sequence = 1
+                      AND Received_DateTime >= DATEADD(hour, ?, SYSUTCDATETIME())
+                      {mock_clause}
+                    GROUP BY File_Status
+                    ORDER BY COUNT(*) DESC
+                    """,
+                    [-window_hours] + mock_args,
+                )
+                by_status = {r[0]: r[1] for r in cur.fetchall()}
+
+                # ─── VALIDATION_RUNS pending (per-Mock table; only count if mock given) ───
+                validation_runs_pending = None
+                if mock:
+                    vr_table = f"VALIDATION_RUNS_{mock}"
+                    cur.execute("SELECT COUNT(*) FROM sys.tables WHERE name = ?", (vr_table,))
+                    if cur.fetchone()[0] > 0:
+                        cur.execute(
+                            f"SELECT COUNT(*) FROM {vr_table} WHERE Run_Status = 'Pending Approval'"
+                        )
+                        validation_runs_pending = cur.fetchone()[0] or 0
+
+                # ─── VBL_GROUPS pending + Sterling pending ───
+                vbl_runs_pending = None
+                sterling_pending = None
+                if mock:
+                    vbl_table = f"VBL_GROUPS_{mock}"
+                    cur.execute("SELECT COUNT(*) FROM sys.tables WHERE name = ?", (vbl_table,))
+                    if cur.fetchone()[0] > 0:
+                        cur.execute(
+                            f"SELECT COUNT(*) FROM {vbl_table} WHERE Latest_VBL_Status = 'Pending Approval'"
+                        )
+                        vbl_runs_pending = cur.fetchone()[0] or 0
+                        cur.execute(
+                            f"""
+                            SELECT COUNT(*) FROM {vbl_table}
+                            WHERE Latest_Approval_Status = 'Approved'
+                              AND COALESCE(Sterling_Transmission_Status, '') NOT IN ('Submitted')
+                              AND Conversion_Load_File_eTag IS NOT NULL
+                            """
+                        )
+                        sterling_pending = cur.fetchone()[0] or 0
+
+                # Success rate over window
+                denom = loaded_window + failed_window
+                success_rate = (loaded_window / denom) if denom > 0 else None
+
+                return {
+                    "statusCode": 200, "headers": headers,
+                    "body": json.dumps({
+                        "ok": True,
+                        "mock": mock,
+                        "window_hours": window_hours,
+                        "queue_depth": queue_depth,
+                        "in_flight": in_flight,
+                        "loaded_window": loaded_window,
+                        "failed_window": failed_window,
+                        "superseded_window": superseded_window,
+                        "mean_load_seconds": mean_load_seconds,
+                        "throughput_per_hour": (loaded_window / window_hours) if window_hours else 0,
+                        "success_rate": success_rate,
+                        "validation_runs_pending": validation_runs_pending,
+                        "vbl_runs_pending": vbl_runs_pending,
+                        "sterling_pending": sterling_pending,
+                        "by_module": by_module,
+                        "by_status": by_status,
+                    }, default=str),
+                }
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
     if action == "aws_file_chain":
         # ?action=aws_file_chain&etag=<full eTag>
         # Returns the version chain (Supersedes -> Superseded_By walk) and the
