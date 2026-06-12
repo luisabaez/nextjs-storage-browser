@@ -64,6 +64,7 @@ from validation_group_tracker import (
     handle_list_runs as vg_handle_list_runs,
     handle_run_complete as vg_handle_run_complete,
     handle_run_decision as vg_handle_run_decision,
+    list_group_members as vg_list_group_members,
 )
 from vg_dependencies_check import evaluate_dependencies as vg_evaluate_dependencies
 
@@ -986,6 +987,27 @@ def lambda_handler(event, context):
                 "headers": headers,
                 "body": json.dumps(res, default=str),
             }
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
+    if action == "validation_group_members":
+        # ?action=validation_group_members&mock=MOCK12&vgid=APINV-PRIFAS
+        # Returns members of the VG annotated with current load status so the
+        # dashboard can show what's loaded vs. pending vs. failed.
+        try:
+            params = event.get("queryStringParameters") or {}
+            mock = params.get("mock", "MOCK12")
+            vgid = params.get("vgid", "")
+            if not vgid:
+                return {"statusCode": 400, "headers": headers,
+                        "body": json.dumps({"ok": False, "error": "vgid required"})}
+            conn_str = get_connection_string()
+            res = vg_list_group_members(conn_str, mock, vgid)
+            return {"statusCode": 200 if res.get("ok") else 400,
+                    "headers": headers,
+                    "body": json.dumps(res, default=str)}
         except Exception as e:
             traceback.print_exc()
             return {"statusCode": 500, "headers": headers,

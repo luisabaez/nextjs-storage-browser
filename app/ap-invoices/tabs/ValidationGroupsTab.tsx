@@ -51,6 +51,7 @@ export function ValidationGroupsTab({ userEmail, userBUFilter }: {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [refreshingDeps, setRefreshingDeps] = useState(false);
+  const [selectedVG, setSelectedVG] = useState<VG | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true); setError('');
@@ -147,16 +148,33 @@ export function ValidationGroupsTab({ userEmail, userBUFilter }: {
           </div>
         )}
         {filtered.map(g => (
-          <VGCard key={g.Validation_Group_ID} mock={mock} vg={g} userEmail={userEmail} onSaved={load} />
+          <VGCard
+            key={g.Validation_Group_ID}
+            mock={mock}
+            vg={g}
+            userEmail={userEmail}
+            onSaved={load}
+            onOpenDetail={() => setSelectedVG(g)}
+          />
         ))}
       </div>
+
+      {selectedVG && (
+        <VGMembersPanel
+          mock={mock}
+          vg={selectedVG}
+          userBUFilter={userBUFilter}
+          onClose={() => setSelectedVG(null)}
+        />
+      )}
     </div>
   );
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-function VGCard({ mock, vg, userEmail, onSaved }: {
+function VGCard({ mock, vg, userEmail, onSaved, onOpenDetail }: {
   mock: string; vg: VG; userEmail: string; onSaved: () => void;
+  onOpenDetail: () => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [membersTotal, setMembersTotal] = useState(String(vg.Members_Total ?? 0));
@@ -249,9 +267,18 @@ function VGCard({ mock, vg, userEmail, onSaved }: {
       {!editing ? (
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 12, color: '#6b7280', borderTop: '1px dashed #e5e7eb', paddingTop: 8 }}>
           <span>Error threshold: <strong style={{ color: '#111' }}>{vg.Error_Threshold ?? 0}</strong></span>
-          <button onClick={() => setEditing(true)} className="btn btn-secondary" style={{ padding: '4px 10px', fontSize: 12 }}>
-            Edit totals
-          </button>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button
+              onClick={onOpenDetail}
+              className="btn btn-primary"
+              style={{ padding: '4px 10px', fontSize: 12 }}
+            >
+              View members
+            </button>
+            <button onClick={() => setEditing(true)} className="btn btn-secondary" style={{ padding: '4px 10px', fontSize: 12 }}>
+              Edit totals
+            </button>
+          </div>
         </div>
       ) : (
         <div style={{ borderTop: '1px dashed #e5e7eb', paddingTop: 8, display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -284,6 +311,298 @@ function VGCard({ mock, vg, userEmail, onSaved }: {
       {vg.Current_Validation_Run_ID && (
         <div style={{ fontSize: 11, color: '#6b7280', fontFamily: 'monospace' }}>
           Current run: {vg.Current_Validation_Run_ID} · {vg.Validation_Run_Count || 0} total
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Phase 6.6 — VG Members detail panel
+// ────────────────────────────────────────────────────────────────────────────
+interface VGMember {
+  entity: string;
+  subentity: string;
+  source: string;
+  table_name: string;
+  file_expected: string | null;
+  explicit_vg_match: boolean;
+  business_unit: string | null;
+  parent_entity: string | null;
+  expected_filename_pattern: string | null;
+  current_process_stage: string | null;
+  load_status: 'loaded' | 'pending' | 'failed' | 'in_flight' | 'superseded';
+  file: {
+    AWS_eTag: string;
+    File_Name: string;
+    File_Status: string;
+    Error_Type: string | null;
+    Record_Count: number | null;
+    Received_DateTime: string | null;
+    Processed_DateTime: string | null;
+    Supersedes_eTag: string | null;
+    Superseded_By_eTag: string | null;
+    Moved_To_Folder: string | null;
+  } | null;
+}
+
+interface VGMembersResp {
+  ok: boolean;
+  vg_id: string;
+  mock_number: string;
+  members: VGMember[];
+  stats: { total: number; loaded: number; pending: number; failed: number; in_flight: number; superseded: number };
+  error?: string;
+}
+
+function VGMembersPanel({ mock, vg, userBUFilter, onClose }: {
+  mock: string;
+  vg: VG;
+  userBUFilter: string[] | null;
+  onClose: () => void;
+}) {
+  const [data, setData] = useState<VGMembersResp | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    setLoading(true); setError('');
+    (async () => {
+      try {
+        const url = `${LAMBDA_URL}?action=validation_group_members&mock=${encodeURIComponent(mock)}&vgid=${encodeURIComponent(vg.Validation_Group_ID)}`;
+        const resp = await fetch(url);
+        const d: VGMembersResp = await resp.json();
+        if (!d.ok) setError(d.error || 'Load failed');
+        else setData(d);
+      } catch (e) { setError(`Network error: ${(e as Error).message}`); }
+      finally { setLoading(false); }
+    })();
+  }, [mock, vg.Validation_Group_ID]);
+
+  // Apply BU permission filter client-side
+  const visibleMembers = useMemo(() => {
+    const all = data?.members || [];
+    if (!userBUFilter) return all;
+    if (userBUFilter.length === 0) return [];
+    const allowed = new Set(userBUFilter);
+    return all.filter(m => {
+      if (!m.business_unit) return true;
+      const bus = m.business_unit.split(',').map(s => s.trim().replace(/^0+/, '') || '0');
+      return bus.some(b => allowed.has(b));
+    });
+  }, [data, userBUFilter]);
+  const hiddenByBU = (data?.members.length || 0) - visibleMembers.length;
+
+  const loaded = visibleMembers.filter(m => m.load_status === 'loaded');
+  const pending = visibleMembers.filter(m => m.load_status === 'pending');
+  const failed = visibleMembers.filter(m => m.load_status === 'failed');
+  const inFlight = visibleMembers.filter(m => m.load_status === 'in_flight');
+  const superseded = visibleMembers.filter(m => m.load_status === 'superseded');
+
+  return (
+    <div
+      onClick={onClose}
+      style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', zIndex: 999 }}
+    >
+      <div
+        onClick={e => e.stopPropagation()}
+        style={{
+          position: 'fixed', right: 0, top: 0, bottom: 0,
+          width: 'min(680px, 96vw)', background: '#fff',
+          boxShadow: '-4px 0 24px rgba(0,0,0,0.15)',
+          padding: 20, overflowY: 'auto', zIndex: 1000,
+        }}
+      >
+        <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16 }}>
+          <div>
+            <h2 style={{ margin: 0, fontFamily: 'monospace' }}>{vg.Validation_Group_ID}</h2>
+            <div style={{ fontSize: 13, color: '#6b7280', marginTop: 4 }}>{vg.Validation_Group_Name}</div>
+            <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 2 }}>{vg.Pillar} · {vg.Module} · {mock}</div>
+          </div>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', fontSize: 24, cursor: 'pointer', color: '#6b7280' }}>×</button>
+        </header>
+
+        {error && (
+          <div style={{ background: '#fef2f2', border: '1px solid #fecaca', color: '#991b1b', padding: 10, borderRadius: 6, marginBottom: 12 }}>
+            {error}
+          </div>
+        )}
+
+        {loading && !data ? (
+          <div style={{ padding: 24, textAlign: 'center', color: '#6b7280' }}>Loading members…</div>
+        ) : data && (
+          <>
+            {/* Stats summary */}
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 12 }}>
+              <Chip label={`${data.stats.total} members`} tone="gray" small />
+              <Chip label={`${data.stats.loaded} loaded`} tone="green" small />
+              {data.stats.pending > 0 && <Chip label={`${data.stats.pending} pending`} tone="amber" small />}
+              {data.stats.failed > 0 && <Chip label={`${data.stats.failed} failed`} tone="red" small />}
+              {data.stats.in_flight > 0 && <Chip label={`${data.stats.in_flight} in flight`} tone="blue" small />}
+              {data.stats.superseded > 0 && <Chip label={`${data.stats.superseded} superseded`} tone="purple" small />}
+              {hiddenByBU > 0 && (
+                <Chip label={`${hiddenByBU} hidden by BU`} tone="amber" small />
+              )}
+            </div>
+
+            {visibleMembers.length === 0 && (
+              <div style={{ padding: 24, textAlign: 'center', color: '#9ca3af', fontSize: 13 }}>
+                {data.members.length === 0
+                  ? <>No members found. Add entities for this group via <strong>File Config → + Add new file</strong> (set Validation_Group_ID = {vg.Validation_Group_ID}).</>
+                  : 'All members hidden by your BU permissions.'}
+              </div>
+            )}
+
+            {/* Loaded */}
+            {loaded.length > 0 && (
+              <MemberSection title={`Loaded (${loaded.length})`} tone="green">
+                {loaded.map(m => <MemberRow key={`${m.subentity}-${m.source}`} m={m} />)}
+              </MemberSection>
+            )}
+
+            {/* Pending */}
+            {pending.length > 0 && (
+              <MemberSection title={`Pending (${pending.length})`} tone="amber">
+                <div style={{ fontSize: 11, color: '#92400e', marginBottom: 6 }}>
+                  No file has been uploaded yet for these entities. The Validation Group can&apos;t fire
+                  until every required member reaches Table Load Success.
+                </div>
+                {pending.map(m => <MemberRow key={`${m.subentity}-${m.source}`} m={m} />)}
+              </MemberSection>
+            )}
+
+            {/* Failed */}
+            {failed.length > 0 && (
+              <MemberSection title={`Failed (${failed.length})`} tone="red">
+                <div style={{ fontSize: 11, color: '#991b1b', marginBottom: 6 }}>
+                  These members have a gate-check or TSQL-load failure as their latest upload. A new
+                  successful upload will move them to Loaded.
+                </div>
+                {failed.map(m => <MemberRow key={`${m.subentity}-${m.source}`} m={m} />)}
+              </MemberSection>
+            )}
+
+            {/* In flight */}
+            {inFlight.length > 0 && (
+              <MemberSection title={`In flight (${inFlight.length})`} tone="blue">
+                {inFlight.map(m => <MemberRow key={`${m.subentity}-${m.source}`} m={m} />)}
+              </MemberSection>
+            )}
+
+            {/* Superseded */}
+            {superseded.length > 0 && (
+              <MemberSection title={`Superseded only (${superseded.length})`} tone="purple">
+                <div style={{ fontSize: 11, color: '#5b21b6', marginBottom: 6 }}>
+                  Latest active version is superseded — typically transient between a re-upload.
+                </div>
+                {superseded.map(m => <MemberRow key={`${m.subentity}-${m.source}`} m={m} />)}
+              </MemberSection>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function MemberSection({ title, tone, children }: {
+  title: string;
+  tone: 'green' | 'amber' | 'red' | 'blue' | 'purple';
+  children: React.ReactNode;
+}) {
+  const tones = {
+    green: '#16a34a', amber: '#d97706', red: '#dc2626', blue: '#2563eb', purple: '#7c3aed',
+  };
+  return (
+    <section style={{ marginBottom: 18 }}>
+      <h3 style={{
+        margin: '0 0 8px 0', fontSize: 12, fontWeight: 700,
+        textTransform: 'uppercase', letterSpacing: 0.5,
+        color: tones[tone],
+        borderLeft: `3px solid ${tones[tone]}`, paddingLeft: 8,
+      }}>{title}</h3>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>{children}</div>
+    </section>
+  );
+}
+
+function MemberRow({ m }: { m: VGMember }) {
+  const fmt = (s: string | null | undefined) => s ? new Date(s).toLocaleString() : '';
+  return (
+    <div style={{
+      background: '#f9fafb', borderRadius: 6, padding: 10,
+      display: 'flex', flexDirection: 'column', gap: 4,
+    }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
+        <div style={{ display: 'flex', flexDirection: 'column' }}>
+          <div style={{ fontWeight: 600, fontSize: 13 }}>{m.entity || m.subentity}</div>
+          <div style={{ fontSize: 11, color: '#6b7280', fontFamily: 'monospace' }}>
+            {m.subentity} · {m.source}
+            {!m.explicit_vg_match && (
+              <span style={{ marginLeft: 6, color: '#92400e', fontStyle: 'italic' }}>(derived)</span>
+            )}
+          </div>
+        </div>
+        {m.business_unit && (
+          <Chip label={`BU ${m.business_unit}`} tone="blue" small />
+        )}
+      </div>
+
+      <div style={{ fontSize: 11, color: '#374151', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        → {m.table_name || '— no table —'}
+      </div>
+
+      {m.file ? (
+        <div style={{
+          borderTop: '1px dashed #e5e7eb', marginTop: 2, paddingTop: 6,
+          fontSize: 11, display: 'flex', flexDirection: 'column', gap: 2,
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+            <span style={{ color: '#6b7280' }}>File</span>
+            <span style={{ fontFamily: 'monospace', maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={m.file.File_Name}>
+              {m.file.File_Name}
+            </span>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+            <span style={{ color: '#6b7280' }}>Status</span>
+            <Chip label={m.file.File_Status} tone={pillToneForStatus(m.file.File_Status)} small />
+          </div>
+          {m.file.Error_Type && (
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <span style={{ color: '#6b7280' }}>Error type</span>
+              <span style={{ color: '#dc2626' }}>{m.file.Error_Type}</span>
+            </div>
+          )}
+          {m.file.Record_Count != null && (
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <span style={{ color: '#6b7280' }}>Records</span>
+              <span style={{ fontFamily: 'monospace' }}>{m.file.Record_Count.toLocaleString()}</span>
+            </div>
+          )}
+          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+            <span style={{ color: '#6b7280' }}>eTag</span>
+            <span style={{ fontFamily: 'monospace' }}>{m.file.AWS_eTag.slice(0, 16)}…</span>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+            <span style={{ color: '#6b7280' }}>Received</span>
+            <span style={{ fontSize: 10 }}>{fmt(m.file.Received_DateTime)}</span>
+          </div>
+          {m.file.Processed_DateTime && (
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <span style={{ color: '#6b7280' }}>Processed</span>
+              <span style={{ fontSize: 10 }}>{fmt(m.file.Processed_DateTime)}</span>
+            </div>
+          )}
+        </div>
+      ) : (
+        <div style={{
+          borderTop: '1px dashed #e5e7eb', marginTop: 2, paddingTop: 6,
+          fontSize: 11, color: '#9ca3af', fontStyle: 'italic',
+        }}>
+          No upload received yet.
+          {m.expected_filename_pattern && (
+            <> Expected filename: <code style={{ fontFamily: 'monospace' }}>{m.expected_filename_pattern}</code></>
+          )}
         </div>
       )}
     </div>

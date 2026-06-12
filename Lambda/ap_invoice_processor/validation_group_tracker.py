@@ -320,6 +320,149 @@ def handle_list_runs(connection_str: str, mock_number: str,
         return {"ok": False, "error": str(e)}
 
 
+def list_group_members(connection_str: str, mock_number: str,
+                       vg_id: str) -> dict:
+    """
+    Returns the members of a Validation Group annotated with their current
+    load status. Powers the dashboard's VG detail panel.
+
+    Membership comes from two sources, UNION'ed:
+      1. Explicit: SETUP_CONVERSION_PLAN_{MOCK} rows whose Validation_Group_ID
+         matches.
+      2. Derived: rows whose (SubEntity prefix, SOURCE) pair maps to the VG
+         via the ENTITY_PREFIX_TO_VG_CODE naming convention. Catches Mock
+         tables that haven't had VG_ID backfilled yet.
+
+    For each member we look at AWS_FILES for the latest non-superseded seq 1
+    row and label the member loaded / pending / failed / superseded.
+    """
+    setup_table = f"SETUP_CONVERSION_PLAN_{mock_number}"
+
+    # Parse APINV-PRIFAS -> entity_code='APINV', source='PRIFAS'
+    if '-' not in vg_id:
+        return {"ok": False, "error": f"vg_id '{vg_id}' missing hyphen"}
+    entity_code, _, source = vg_id.partition('-')
+    entity_code = entity_code.upper()
+    source = source.upper()
+
+    # Reverse-map entity_code -> list of entity_prefixes that resolve to it.
+    entity_prefixes = [p for p, code in ENTITY_PREFIX_TO_VG_CODE.items()
+                       if code == entity_code]
+
+    members: list[dict] = []
+    try:
+        with pyodbc.connect(connection_str) as conn:
+            cur = conn.cursor()
+
+            cur.execute("SELECT COUNT(*) FROM sys.tables WHERE name = ?", (setup_table,))
+            if cur.fetchone()[0] == 0:
+                return {"ok": True, "vg_id": vg_id, "members": [],
+                        "note": f"{setup_table} does not exist"}
+
+            # Build the WHERE clause — explicit match OR derived match
+            where_parts = ["Validation_Group_ID = ?"]
+            args: list = [vg_id]
+            if entity_prefixes:
+                placeholders = ", ".join(["?"] * len(entity_prefixes))
+                where_parts.append(
+                    f"(LTRIM(RTRIM(ISNULL([SOURCE], ''))) = ? "
+                    f"AND LTRIM(RTRIM(ISNULL([SubEntity], ''))) IN ({placeholders}))"
+                )
+                args.append(source)
+                args.extend(entity_prefixes)
+
+            where_clause = " OR ".join(f"({p})" for p in where_parts)
+
+            cur.execute(
+                f"""
+                SELECT DISTINCT
+                    Entity, SubEntity, [SOURCE], Table_Name,
+                    File_Expected, Validation_Group_ID, BU, Parent_Entity,
+                    FileName, LoadedAt, [RowCount], Current_Process_Stage
+                FROM [{setup_table}]
+                WHERE {where_clause}
+                ORDER BY SubEntity, [SOURCE]
+                """,
+                args,
+            )
+            mcols = [c[0] for c in cur.description]
+            setup_rows = [dict(zip(mcols, r)) for r in cur.fetchall()]
+
+            # For each member, find the most recent active AWS_FILES seq 1 row
+            for sr in setup_rows:
+                entity = sr.get("Entity") or ""
+                src = sr.get("SOURCE") or ""
+                subentity = sr.get("SubEntity") or ""
+                table_name = sr.get("Table_Name") or ""
+
+                cur.execute(
+                    """
+                    SELECT TOP 1
+                        AWS_eTag, File_Name, File_Status, Error_Type,
+                        Record_Count, Received_DateTime, Processed_DateTime,
+                        Supersedes_eTag, Superseded_By_eTag,
+                        Moved_To_Folder
+                    FROM AWS_FILES
+                    WHERE Mock_Number = ? AND Movement_Sequence = 1
+                      AND Superseded_By_eTag IS NULL
+                      AND (
+                          Conversion_Plan_Table_Name = ?
+                          OR (Conversion_Plan_Entity = ? AND [Source] = ?)
+                      )
+                    ORDER BY Received_DateTime DESC
+                    """,
+                    (mock_number, table_name, entity, src),
+                )
+                row = cur.fetchone()
+                file_info = None
+                load_status = "pending"
+                if row:
+                    fcols = [c[0] for c in cur.description]
+                    file_info = dict(zip(fcols, row))
+                    fs = (file_info.get("File_Status") or "").lower()
+                    if fs == "table load success":
+                        load_status = "loaded"
+                    elif fs in ("invalid file name", "file not expected",
+                                "invalid headers", "tsql load file not found",
+                                "tsql load error"):
+                        load_status = "failed"
+                    elif fs == "superseded":
+                        load_status = "superseded"
+                    else:
+                        load_status = "in_flight"
+
+                members.append({
+                    "entity": entity,
+                    "subentity": subentity,
+                    "source": src,
+                    "table_name": table_name,
+                    "file_expected": sr.get("File_Expected"),
+                    "explicit_vg_match": sr.get("Validation_Group_ID") == vg_id,
+                    "business_unit": sr.get("BU"),
+                    "parent_entity": sr.get("Parent_Entity"),
+                    "expected_filename_pattern": sr.get("FileName"),
+                    "current_process_stage": sr.get("Current_Process_Stage"),
+                    "load_status": load_status,
+                    "file": file_info,
+                })
+
+            stats = {
+                "total": len(members),
+                "loaded": sum(1 for m in members if m["load_status"] == "loaded"),
+                "pending": sum(1 for m in members if m["load_status"] == "pending"),
+                "failed": sum(1 for m in members if m["load_status"] == "failed"),
+                "in_flight": sum(1 for m in members if m["load_status"] == "in_flight"),
+                "superseded": sum(1 for m in members if m["load_status"] == "superseded"),
+            }
+
+            return {"ok": True, "vg_id": vg_id, "mock_number": mock_number,
+                    "members": members, "stats": stats}
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {"ok": False, "error": str(e)}
+
+
 def handle_run_complete(connection_str: str, mock_number: str, run_id: str,
                         error_count: int = 0, warning_count: int = 0,
                         informative_count: int = 0,
