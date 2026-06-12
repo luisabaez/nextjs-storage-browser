@@ -358,11 +358,20 @@ def mark_gate_check_failure(connection_str: str, etag: str, failed_check: str,
       - Failed column → 'Fail'
       - Any not-yet-run subsequent columns → 'Not Run'
       - File_Status, Error_Type, Error_Owner set per the failed check
+      - Roll up Current_Process_Stage on the SETUP_CONVERSION_PLAN row per
+        the spec enum: gate checks 1-3 → 'Gate Check Failed',
+                       gate checks 4-5 → 'Table Load Failed'
     """
     etag = _normalise_etag(etag)
     if not etag or failed_check not in GATE_CHECK_COLUMNS:
         return
     file_status, error_owner = _FAILURE_DETAILS[failed_check]
+    # Stage rollup per spec — first three checks are owned by Source Team
+    # and surface as 'Gate Check Failed'; the TSQL pair surface as
+    # 'Table Load Failed'.
+    stage_rollup = ("Table Load Failed"
+                    if failed_check in ("Check_TSQL_File_Found", "Check_TSQL_Load")
+                    else "Gate Check Failed")
     # Subsequent checks all become Not Run (they were never attempted)
     idx = GATE_CHECK_COLUMNS.index(failed_check)
     subsequent = GATE_CHECK_COLUMNS[idx + 1:]
@@ -388,8 +397,41 @@ def mark_gate_check_failure(connection_str: str, etag: str, failed_check: str,
             """,
             (*params, etag),
         )
+
+        # Roll up the failure stage onto the SETUP_CONVERSION_PLAN row, if
+        # we can identify the entity from the AWS_FILES row we just updated.
+        cur.execute(
+            """
+            SELECT Mock_Number, Conversion_Plan_Entity, [Source]
+            FROM AWS_FILES WHERE AWS_eTag = ? AND Movement_Sequence = 1
+            """,
+            (etag,),
+        )
+        meta = cur.fetchone()
+        if meta and meta[0] and meta[1] and meta[2]:
+            mock, entity, source = meta
+            setup_table = f"SETUP_CONVERSION_PLAN_{mock}"
+            cur.execute("SELECT COUNT(*) FROM sys.tables WHERE name = ?", (setup_table,))
+            if cur.fetchone()[0] > 0:
+                cur.execute(
+                    "SELECT COUNT(*) FROM sys.columns WHERE object_id = OBJECT_ID(?) AND name = 'Current_Process_Stage'",
+                    (setup_table,),
+                )
+                if cur.fetchone()[0] > 0:
+                    cur.execute(
+                        f"""
+                        UPDATE [{setup_table}] SET
+                            Current_Process_Stage = ?,
+                            Last_Updated_By = 'aws_files_writer',
+                            Last_Updated_Date = SYSUTCDATETIME()
+                        WHERE LTRIM(RTRIM(ISNULL([Entity], ''))) = ?
+                          AND LTRIM(RTRIM(ISNULL([SOURCE], ''))) = ?
+                        """,
+                        (stage_rollup, entity, source),
+                    )
+
         conn.commit()
-        print(f"  AWS_FILES gate fail: eTag={etag[:12]}… check={failed_check} → {file_status}")
+        print(f"  AWS_FILES gate fail: eTag={etag[:12]}… check={failed_check} → {file_status} (stage: {stage_rollup})")
 
 
 @_safe

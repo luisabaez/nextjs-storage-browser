@@ -418,8 +418,12 @@ def _flip_file_expected_after_load(cursor, mock_number, parsed, etag=None):
     set_clauses = ["[File_Expected] = 'N'"]
     params = []
     if "Current_Process_Stage" in existing_cols:
+        # Per spec enum — after a successful Table Load the entity is waiting
+        # for its sibling Validation Group members to also reach TLS before
+        # validation can fire. validation_group_tracker bumps this to
+        # 'Validation Running' when the group's last member arrives.
         set_clauses.append("[Current_Process_Stage] = ?")
-        params.append("Table Load Success")
+        params.append("Awaiting Group Completion")
     if etag and "Latest_File_ID" in existing_cols:
         set_clauses.append("[Latest_File_ID] = ?")
         params.append(etag)

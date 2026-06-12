@@ -51,6 +51,7 @@ interface AWSFileRow {
   Created_By: string | null;
   Last_Updated_By: string | null;
   Last_Updated_DateTime: string | null;
+  Reason_for_Upload?: string | null;
 }
 
 interface Filters {
@@ -346,6 +347,14 @@ export function AWSFilesTab({ userBUFilter }: { userBUFilter: string[] | null })
               <DetailRow label="File_Size_KB" value={selectedRow.File_Size_KB?.toLocaleString() || '—'} />
             </DetailSection>
 
+            <ReasonForUploadEditor
+              etag={selectedRow.AWS_eTag}
+              currentValue={selectedRow.Reason_for_Upload}
+              onSaved={(newVal) => {
+                setSelectedRow(prev => prev ? { ...prev, Reason_for_Upload: newVal } : prev);
+              }}
+            />
+
             {selectedRow.Sterling_Transmission_Status && (
               <DetailSection title="Sterling">
                 <DetailRow label="Status"    value={selectedRow.Sterling_Transmission_Status} />
@@ -528,6 +537,89 @@ function ChainNodeRow({ node, relation, onJump, indent }: {
         <span>{fmt(node.Received_DateTime)}</span>
       </div>
     </div>
+  );
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Phase 6.9 — Reason_for_Upload editor on the file detail panel
+// ────────────────────────────────────────────────────────────────────────────
+const REASON_OPTIONS = [
+  '', 'Initial Load', 'Re-extract', 'Correction',
+  'Late Arrival', 'Manual Re-upload', 'Other',
+];
+
+function ReasonForUploadEditor({ etag, currentValue, onSaved }: {
+  etag: string;
+  currentValue: string | null | undefined;
+  onSaved: (newVal: string | null) => void;
+}) {
+  const [value, setValue] = useState(currentValue || '');
+  const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+
+  useEffect(() => { setValue(currentValue || ''); }, [currentValue, etag]);
+
+  const save = async () => {
+    setSaving(true); setErr('');
+    try {
+      const resp = await fetch(`${LAMBDA_URL}?action=update_aws_file_reason`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ etag, reason: value, actor: 'dashboard' }),
+      });
+      const d = await resp.json();
+      if (!d.ok) setErr(d.error || 'Save failed');
+      else { setEditing(false); onSaved(value || null); }
+    } catch (e) { setErr(`Network error: ${(e as Error).message}`); }
+    finally { setSaving(false); }
+  };
+
+  return (
+    <DetailSection title="Reason for Upload">
+      {err && <div style={{ color: '#dc2626', fontSize: 11, marginBottom: 6 }}>{err}</div>}
+      {!editing ? (
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '4px 4px' }}>
+          <span style={{ fontSize: 13 }}>
+            {currentValue || <span style={{ color: '#9ca3af' }}>— not set —</span>}
+          </span>
+          <button
+            onClick={() => setEditing(true)}
+            style={{ background: 'none', border: '1px solid #d1d5db', borderRadius: 4, padding: '2px 8px', fontSize: 11, color: '#374151', cursor: 'pointer' }}
+          >
+            Edit
+          </button>
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: 4 }}>
+          <select
+            value={value}
+            onChange={e => setValue(e.target.value)}
+            style={{ padding: '6px 8px', border: '1px solid #d1d5db', borderRadius: 4, fontSize: 13, background: '#fff' }}
+          >
+            {REASON_OPTIONS.map(o => (
+              <option key={o} value={o}>{o || '— Clear (set to null) —'}</option>
+            ))}
+          </select>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 6 }}>
+            <button
+              onClick={() => { setEditing(false); setValue(currentValue || ''); }}
+              disabled={saving}
+              style={{ background: 'none', border: '1px solid #d1d5db', borderRadius: 4, padding: '4px 10px', fontSize: 12, cursor: 'pointer' }}
+            >
+              Cancel
+            </button>
+            <button
+              onClick={save}
+              disabled={saving}
+              className="btn btn-primary"
+              style={{ padding: '4px 10px', fontSize: 12 }}
+            >
+              {saving ? 'Saving…' : 'Save'}
+            </button>
+          </div>
+        </div>
+      )}
+    </DetailSection>
   );
 }
 

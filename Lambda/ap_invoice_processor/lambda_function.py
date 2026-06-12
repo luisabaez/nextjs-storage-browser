@@ -1318,7 +1318,8 @@ def lambda_handler(event, context):
                         Check_File_Name, Check_File_Expected, Check_Column_Headers,
                         Check_TSQL_File_Found, Check_TSQL_Load,
                         Sterling_Transmission_Status, Sterling_Transmission_DateTime,
-                        Created_By, Last_Updated_By, Last_Updated_DateTime
+                        Created_By, Last_Updated_By, Last_Updated_DateTime,
+                        Reason_for_Upload
                     FROM AWS_FILES
                     {where_clause}
                     ORDER BY Received_DateTime DESC, Movement_Sequence
@@ -1509,6 +1510,48 @@ def lambda_handler(event, context):
                         "by_status": by_status,
                     }, default=str),
                 }
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
+    if action == "update_aws_file_reason":
+        # POST { etag, reason, actor }
+        # Lets admins backfill Reason_for_Upload on an AWS_FILES row from
+        # the dashboard detail panel. Updates both seq 1 and seq 2 if
+        # present so the lineage stays consistent.
+        VALID = {'Initial Load', 'Re-extract', 'Correction', 'Late Arrival',
+                 'Manual Re-upload', 'Other', ''}
+        try:
+            body = json.loads(event.get("body") or "{}")
+            etag = (body.get("etag") or "").strip().strip('"')
+            reason = (body.get("reason") or "").strip()
+            actor = body.get("actor", "") or ""
+            if not etag:
+                return {"statusCode": 400, "headers": headers,
+                        "body": json.dumps({"ok": False, "error": "etag required"})}
+            if reason not in VALID:
+                return {"statusCode": 400, "headers": headers,
+                        "body": json.dumps({"ok": False, "error":
+                            f"reason must be one of: {sorted(v for v in VALID if v)}"})}
+            conn_str = get_connection_string()
+            with pyodbc.connect(conn_str) as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    UPDATE AWS_FILES SET
+                        Reason_for_Upload = NULLIF(?, ''),
+                        Last_Updated_By = ?,
+                        Last_Updated_DateTime = SYSUTCDATETIME()
+                    WHERE AWS_eTag = ?
+                    """,
+                    (reason, actor or "dashboard", etag),
+                )
+                affected = cur.rowcount
+                conn.commit()
+            return {"statusCode": 200, "headers": headers,
+                    "body": json.dumps({"ok": True, "rows_updated": affected,
+                                         "reason": reason or None})}
         except Exception as e:
             traceback.print_exc()
             return {"statusCode": 500, "headers": headers,

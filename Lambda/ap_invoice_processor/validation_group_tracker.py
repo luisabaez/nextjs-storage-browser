@@ -112,6 +112,57 @@ def _next_run_id(cur, mock_number: str) -> str:
         return "VAL-0001"
 
 
+def _update_stage_for_vg_members(cur, mock_number: str, vg_id: str,
+                                  stage: str) -> int:
+    """
+    Bulk-update Current_Process_Stage on every SETUP_CONVERSION_PLAN row that
+    belongs to this Validation Group (explicit Validation_Group_ID match,
+    plus rows that match by entity_prefix + source via the naming
+    convention — same logic as list_group_members).
+    Returns count of rows touched. Silently skips when columns are missing.
+    """
+    setup = f"SETUP_CONVERSION_PLAN_{mock_number}"
+
+    cur.execute("SELECT COUNT(*) FROM sys.tables WHERE name = ?", (setup,))
+    if cur.fetchone()[0] == 0:
+        return 0
+    cur.execute(
+        "SELECT name FROM sys.columns WHERE object_id = OBJECT_ID(?)", (setup,),
+    )
+    cols = {r[0] for r in cur.fetchall()}
+    if "Current_Process_Stage" not in cols:
+        return 0
+
+    # Reverse-map vg_id to entity_prefixes (e.g. APINV-PRIFAS → ['FIN_AP_*'])
+    entity_code, _, src = vg_id.partition('-')
+    prefixes = [p for p, code in ENTITY_PREFIX_TO_VG_CODE.items()
+                if code == entity_code.upper()]
+
+    where = ["Validation_Group_ID = ?"]
+    args = [vg_id]
+    if prefixes and src:
+        placeholders = ",".join(["?"] * len(prefixes))
+        where.append(
+            f"(LTRIM(RTRIM(ISNULL([SOURCE], ''))) = ? "
+            f"AND LTRIM(RTRIM(ISNULL([SubEntity], ''))) IN ({placeholders}))"
+        )
+        args.append(src.upper())
+        args.extend(prefixes)
+    where_clause = " OR ".join(f"({p})" for p in where)
+
+    cur.execute(
+        f"""
+        UPDATE [{setup}] SET
+            Current_Process_Stage = ?,
+            Last_Updated_By = 'validation_group_tracker',
+            Last_Updated_Date = SYSUTCDATETIME()
+        WHERE {where_clause}
+        """,
+        (stage, *args),
+    )
+    return cur.rowcount
+
+
 def _next_run_number_for_group(cur, mock_number: str, vg_id: str) -> int:
     cur.execute(
         f"SELECT COUNT(*) FROM VALIDATION_RUNS_{mock_number} "
@@ -263,6 +314,11 @@ def on_table_load_success(connection_str: str, mock_number: str, parsed: dict,
                 """,
                 (run_id, vg_id),
             )
+
+            # Per spec: every entity in the group flips to 'Validation Running'
+            # once the run is fired.
+            _update_stage_for_vg_members(cur, mock_number, vg_id, "Validation Running")
+
             conn.commit()
 
             summary["run_created"] = run_id
@@ -600,6 +656,19 @@ def handle_run_decision(connection_str: str, mock_number: str, run_id: str,
                  "Y" if reextract_required else "N",
                  actor, now, vg_id),
             )
+
+            # Per spec — roll the stage forward on every member:
+            #   Approved        → 'Validation Approved'
+            #   Rejected + Reex → 'Awaiting Re-extract'
+            #   Rejected only   → 'Validation Failed'
+            if decision == "Approved":
+                next_stage = "Validation Approved"
+            elif reextract_required:
+                next_stage = "Awaiting Re-extract"
+            else:
+                next_stage = "Validation Failed"
+            _update_stage_for_vg_members(cur, mock_number, vg_id, next_stage)
+
             conn.commit()
 
             # If rejected with reextract, flip File_Expected on affected entities

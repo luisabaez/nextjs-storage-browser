@@ -222,6 +222,44 @@ def handle_list_vbl_groups(connection_str: str, mock_number: str,
         return {"ok": False, "error": str(e)}
 
 
+def _bump_stage_for_vbl_members(cur, mock_number: str, vbl_group_id: str,
+                                 stage: str) -> int:
+    """
+    Bulk update Current_Process_Stage on every SETUP_CONVERSION_PLAN row
+    whose Validation_Group_ID belongs to this VBL group. Used when VBL-
+    level state transitions happen (Conversion Load generated, Sterling
+    sent, etc.).
+    """
+    setup = f"SETUP_CONVERSION_PLAN_{mock_number}"
+    vblm  = f"VBL_GROUP_MEMBERS_{mock_number}"
+
+    cur.execute("SELECT COUNT(*) FROM sys.tables WHERE name IN (?, ?)",
+                (setup, vblm))
+    if cur.fetchone()[0] < 2:
+        return 0
+    cur.execute(
+        "SELECT name FROM sys.columns WHERE object_id = OBJECT_ID(?)", (setup,),
+    )
+    cols = {r[0] for r in cur.fetchall()}
+    if "Current_Process_Stage" not in cols:
+        return 0
+
+    cur.execute(
+        f"""
+        UPDATE s SET
+            Current_Process_Stage = ?,
+            Last_Updated_By = 'vbl_group_tracker',
+            Last_Updated_Date = SYSUTCDATETIME()
+        FROM [{setup}] s
+        INNER JOIN {vblm} m
+            ON m.Validation_Group_ID = s.Validation_Group_ID
+        WHERE m.VBL_Group_ID = ?
+        """,
+        (stage, vbl_group_id),
+    )
+    return cur.rowcount
+
+
 def handle_vbl_run_complete(connection_str: str, mock_number: str,
                             vbl_group_id: str,
                             vbl_file_etag: Optional[str] = None,
@@ -258,6 +296,9 @@ def handle_vbl_run_complete(connection_str: str, mock_number: str,
                 (vbl_file_etag, recon_file_etag, conversion_load_file_etag,
                  now, actor or "vbl-runner", now, vbl_group_id),
             )
+            # Per spec: once VBL run files exist the entities advance to
+            # 'Pre-load Review' (awaiting human approval of the VBL).
+            _bump_stage_for_vbl_members(cur, mock_number, vbl_group_id, "Pre-load Review")
             conn.commit()
             return {"ok": True, "vbl_group_id": vbl_group_id,
                     "next_status": "Pending Approval"}
@@ -300,6 +341,13 @@ def handle_vbl_run_decision(connection_str: str, mock_number: str,
                 """,
                 (decision, decision, actor, now, comments,
                  actor, now, vbl_group_id),
+            )
+            # Spec stage:
+            #   Approved → 'Pre-load Approved' (ready for Sterling)
+            #   Rejected → 'Blocked' (manual recovery)
+            _bump_stage_for_vbl_members(
+                cur, mock_number, vbl_group_id,
+                "Pre-load Approved" if decision == "Approved" else "Blocked",
             )
             conn.commit()
             return {"ok": True, "vbl_group_id": vbl_group_id, "decision": decision}
@@ -736,6 +784,12 @@ def handle_mark_sterling_sent(connection_str: str, mock_number: str,
                      sterling_status, actor, now, cl_etag),
                 )
                 updated_aws = cur.rowcount > 0
+
+            # Stage rollup on the conversion plan entities behind this VBL
+            if sterling_status == "Submitted":
+                _bump_stage_for_vbl_members(cur, mock_number, vbl_group_id, "Sent to Oracle")
+            elif sterling_status == "Error":
+                _bump_stage_for_vbl_members(cur, mock_number, vbl_group_id, "Blocked")
 
             conn.commit()
             return {
