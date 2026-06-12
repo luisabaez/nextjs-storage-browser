@@ -77,6 +77,8 @@ from vbl_group_tracker import (
     handle_mark_sterling_sent,
     handle_create_vbl_group,
     handle_update_vbl_members,
+    handle_update_vbl_group,
+    handle_delete_vbl_group,
 )
 
 # Phase 6.2: File configuration admin (replaces uploading an Excel)
@@ -1734,6 +1736,45 @@ def lambda_handler(event, context):
                 vbl_group_id=body.get("vbl_group_id", ""),
                 decision=body.get("decision", ""),
                 comments=body.get("comments", "") or "",
+                actor=body.get("actor", "") or "",
+            )
+            return {"statusCode": 200 if res.get("ok") else 400,
+                    "headers": headers,
+                    "body": json.dumps(res, default=str)}
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
+    if action == "update_vbl_group":
+        # POST { mock, vbl_group_id, updates: {VBL_Group_Name?, Notes?}, actor }
+        try:
+            body = json.loads(event.get("body") or "{}")
+            conn_str = get_connection_string()
+            res = handle_update_vbl_group(
+                connection_str=conn_str,
+                mock_number=body.get("mock", "MOCK12"),
+                vbl_group_id=body.get("vbl_group_id", ""),
+                updates=body.get("updates") or {},
+                actor=body.get("actor", "") or "",
+            )
+            return {"statusCode": 200 if res.get("ok") else 400,
+                    "headers": headers,
+                    "body": json.dumps(res, default=str)}
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
+    if action == "delete_vbl_group":
+        # POST { mock, vbl_group_id, actor }
+        try:
+            body = json.loads(event.get("body") or "{}")
+            conn_str = get_connection_string()
+            res = handle_delete_vbl_group(
+                connection_str=conn_str,
+                mock_number=body.get("mock", "MOCK12"),
+                vbl_group_id=body.get("vbl_group_id", ""),
                 actor=body.get("actor", "") or "",
             )
             return {"statusCode": 200 if res.get("ok") else 400,

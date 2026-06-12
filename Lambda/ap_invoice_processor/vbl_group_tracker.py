@@ -544,6 +544,126 @@ def handle_update_vbl_members(connection_str: str, mock_number: str,
         return {"ok": False, "error": str(e)}
 
 
+def handle_update_vbl_group(connection_str: str, mock_number: str,
+                             vbl_group_id: str, updates: dict,
+                             actor: str = "") -> dict:
+    """
+    Update metadata fields on a VBL group row. Whitelist-guarded — only the
+    fields here can be touched via this endpoint:
+        VBL_Group_Name, Notes
+    Pillar / Module are derived from VBL_Group_ID and stay frozen; renaming
+    a VBL ID is intentionally not supported because eTag references in
+    AWS_FILES, VBL_GROUP_MEMBERS, and live runs would dangle.
+    """
+    vbl_table = f"VBL_GROUPS_{mock_number}"
+    editable = {"VBL_Group_Name", "Notes"}
+    safe = {k: v for k, v in (updates or {}).items() if k in editable}
+    if not safe:
+        return {"ok": False, "error": "No editable fields supplied"}
+
+    try:
+        with pyodbc.connect(connection_str) as conn:
+            cur = conn.cursor()
+            cur.execute(f"SELECT COUNT(*) FROM {vbl_table} WHERE VBL_Group_ID = ?",
+                        (vbl_group_id,))
+            if cur.fetchone()[0] == 0:
+                return {"ok": False, "error":
+                        f"VBL group '{vbl_group_id}' not found"}
+
+            now = datetime.utcnow()
+            sets = []
+            args: list = []
+            for k, v in safe.items():
+                sets.append(f"[{k}] = ?")
+                args.append(v if v != "" else None)
+            sets.append("Last_Updated_By = ?")
+            args.append(actor or "vbl_edit_ui")
+            sets.append("Last_Updated_DateTime = ?")
+            args.append(now)
+
+            cur.execute(
+                f"UPDATE {vbl_table} SET {', '.join(sets)} WHERE VBL_Group_ID = ?",
+                (*args, vbl_group_id),
+            )
+            conn.commit()
+            return {"ok": True, "rows_updated": cur.rowcount,
+                    "updated_fields": list(safe.keys())}
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {"ok": False, "error": str(e)}
+
+
+def handle_delete_vbl_group(connection_str: str, mock_number: str,
+                             vbl_group_id: str, actor: str = "") -> dict:
+    """
+    Delete a VBL group: removes all VBL_GROUP_MEMBERS rows first, then the
+    parent VBL_GROUPS row. AWS_FILES rows are never touched (they're a
+    global event log and may still be needed for audit).
+
+    A warning summary is returned alongside the deletion result so the UI
+    can surface what was cascaded.
+    """
+    vbl_table  = f"VBL_GROUPS_{mock_number}"
+    vblm_table = f"VBL_GROUP_MEMBERS_{mock_number}"
+
+    if not vbl_group_id:
+        return {"ok": False, "error": "vbl_group_id required"}
+
+    try:
+        with pyodbc.connect(connection_str) as conn:
+            cur = conn.cursor()
+            cur.execute(
+                f"""
+                SELECT VBL_Group_Name, Pillar, Module,
+                       Latest_VBL_Status, Latest_Approval_Status,
+                       Sterling_Transmission_Status,
+                       VBL_File_eTag, Recon_File_eTag, Conversion_Load_File_eTag
+                FROM {vbl_table}
+                WHERE VBL_Group_ID = ?
+                """,
+                (vbl_group_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return {"ok": False, "error":
+                        f"VBL group '{vbl_group_id}' not found"}
+            cols = [c[0] for c in cur.description]
+            preview = dict(zip(cols, row))
+
+            cur.execute(
+                f"SELECT COUNT(*) FROM {vblm_table} WHERE VBL_Group_ID = ?",
+                (vbl_group_id,),
+            )
+            member_count = cur.fetchone()[0]
+
+            cur.execute(
+                f"DELETE FROM {vblm_table} WHERE VBL_Group_ID = ?",
+                (vbl_group_id,),
+            )
+            members_deleted = cur.rowcount
+
+            cur.execute(
+                f"DELETE FROM {vbl_table} WHERE VBL_Group_ID = ?",
+                (vbl_group_id,),
+            )
+            parent_deleted = cur.rowcount
+            conn.commit()
+
+            return {
+                "ok": True,
+                "vbl_group_id": vbl_group_id,
+                "members_deleted": members_deleted,
+                "parent_deleted": parent_deleted,
+                "deleted_preview": preview,
+                "actor": actor or "vbl_delete_ui",
+            }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {"ok": False, "error": str(e)}
+
+
 def handle_mark_sterling_sent(connection_str: str, mock_number: str,
                                vbl_group_id: str,
                                sterling_status: str = "Submitted",

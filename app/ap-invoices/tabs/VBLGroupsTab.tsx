@@ -11,6 +11,7 @@
  * Action buttons surface but link out to /admin/vbl-approvals.
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { Chip, LabelledInput, pillToneForStatus, BUScopeNotice } from './ValidationGroupsTab';
 
 const LAMBDA_URL = 'https://5ahxjcxhrcopng5hjgc2n6utxq0rwcmm.lambda-url.us-east-1.on.aws/';
@@ -55,6 +56,8 @@ export function VBLGroupsTab({ userBUFilter }: {
   // Phase 6.7 — create + edit modals
   const [showCreate, setShowCreate] = useState(false);
   const [editingGroup, setEditingGroup] = useState<VBL | null>(null);
+  // Phase 6.8 — navigation to full detail page
+  const router = useRouter();
 
   const load = useCallback(async () => {
     setLoading(true); setError('');
@@ -148,6 +151,7 @@ export function VBLGroupsTab({ userBUFilter }: {
             g={g}
             distributionCount={distCounts[g.VBL_Group_ID]}
             onEditMembers={() => setEditingGroup(g)}
+            onOpenDetail={() => router.push(`/ap-invoices/vbl/${encodeURIComponent(mock)}/${encodeURIComponent(g.VBL_Group_ID)}`)}
           />
         ))}
       </div>
@@ -172,11 +176,15 @@ export function VBLGroupsTab({ userBUFilter }: {
   );
 }
 
-function VBLCard({ g, distributionCount, onEditMembers }: {
+function VBLCard({ g, distributionCount, onEditMembers, onOpenDetail }: {
   g: VBL;
   distributionCount?: number;
   onEditMembers: () => void;
+  onOpenDetail: () => void;
 }) {
+  // Stop propagation on any button inside the card so they don't trigger
+  // the card's navigation handler.
+  const stop = (e: React.MouseEvent) => e.stopPropagation();
   const fmt = (s: string | null) => s ? new Date(s).toLocaleString() : '—';
   const allApproved = g.All_Val_To_Source_Approved === 'Y';
   const approvedReq = g.Val_To_Source_Members_Approved ?? 0;
@@ -184,13 +192,27 @@ function VBLCard({ g, distributionCount, onEditMembers }: {
   const pct = totalReq > 0 ? Math.min(100, Math.round((approvedReq / totalReq) * 100)) : 0;
 
   return (
-    <div style={{
-      background: '#fff', border: '1px solid #e5e7eb', borderRadius: 8,
-      padding: 16, display: 'flex', flexDirection: 'column', gap: 10,
-    }}>
+    <div
+      onClick={onOpenDetail}
+      style={{
+        background: '#fff', border: '1px solid #e5e7eb', borderRadius: 8,
+        padding: 16, display: 'flex', flexDirection: 'column', gap: 10,
+        cursor: 'pointer', transition: 'box-shadow 0.15s, border-color 0.15s',
+      }}
+      onMouseEnter={e => {
+        e.currentTarget.style.boxShadow = '0 4px 16px rgba(0,0,0,0.06)';
+        e.currentTarget.style.borderColor = '#3b82f6';
+      }}
+      onMouseLeave={e => {
+        e.currentTarget.style.boxShadow = 'none';
+        e.currentTarget.style.borderColor = '#e5e7eb';
+      }}
+    >
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
         <div>
-          <div style={{ fontFamily: 'monospace', fontWeight: 700, fontSize: 14 }}>{g.VBL_Group_ID}</div>
+          <div style={{ fontFamily: 'monospace', fontWeight: 700, fontSize: 14, color: '#1d4ed8' }}>
+            {g.VBL_Group_ID} <span style={{ fontSize: 11, color: '#9ca3af', fontWeight: 400 }}>↗</span>
+          </div>
           <div style={{ fontSize: 12, color: '#6b7280', marginTop: 2 }}>{g.VBL_Group_Name}</div>
           <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 2 }}>{g.Pillar} · {g.Module}</div>
         </div>
@@ -224,7 +246,7 @@ function VBLCard({ g, distributionCount, onEditMembers }: {
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
           <div style={{ fontSize: 11, color: '#6b7280', textTransform: 'uppercase', fontWeight: 600 }}>Members</div>
           <button
-            onClick={onEditMembers}
+            onClick={e => { stop(e); onEditMembers(); }}
             style={{ background: 'none', border: '1px solid #d1d5db', borderRadius: 4, padding: '2px 8px', fontSize: 11, color: '#374151', cursor: 'pointer' }}
           >
             Edit members
