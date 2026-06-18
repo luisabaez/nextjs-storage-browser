@@ -726,26 +726,90 @@ function FileBrowser() {
     }
   };
 
-  // Download handler for selected items — each file gets a brief entry in the
-  // operations panel so the user can see what was kicked off. Once the signed
-  // URL is handed to the browser the OS handles the actual transfer, so we
-  // mark the entry complete immediately after triggering the download.
-  const handleDownloadSelected = async () => {
-    if (selectedItems.length === 0) return;
+  // Phase 7 — download routing.
+  //
+  // Three modes:
+  //   1. Single file: direct presigned URL → browser downloads. Same as before.
+  //   2. Multiple files, total size known and < SIZE_THRESHOLD: stagger individual
+  //      presigned-URL downloads with a 700ms delay between each. Browsers usually
+  //      allow up to ~10 sequential programmatic downloads; the delay gives them
+  //      enough time to register one before the next fires.
+  //   3. Anything else (folder selected, or total size >= threshold, or user clicked
+  //      "Download as ZIP" explicitly): hit the server-side zip Lambda. Returns a
+  //      single presigned URL → single download, no popup-blocker risk.
+  //
+  // SIZE_THRESHOLD is set to 2 GB per the team's spec ("under 2 GB download files,
+  // over 2 GB zip them").
+  const SIZE_THRESHOLD_BYTES = 2 * 1024 * 1024 * 1024;
+  const STAGGER_DELAY_MS = 700;
 
-    for (const item of selectedItems) {
-      if (item.type === 'folder') {
-        info(`Cannot download folder "${item.name}" directly`);
-        continue;
+  // Server-side zip path — used for folders, oversized selections, and the
+  // explicit "Download as ZIP" option from the toolbar dropdown.
+  const zipAndDownload = async (items: FileItem[], filename: string) => {
+    const opId = startOperation(
+      'download',
+      `Building ZIP (${items.length} item${items.length === 1 ? '' : 's'})…`,
+      items.reduce((sum, it) => sum + (it.size || 0), 0),
+    );
+    try {
+      const LAMBDA_URL = 'https://5ahxjcxhrcopng5hjgc2n6utxq0rwcmm.lambda-url.us-east-1.on.aws/';
+      // Folders pass the prefix with trailing slash so the Lambda recurses.
+      const paths = items.map(it => it.type === 'folder' && !it.path.endsWith('/')
+        ? it.path + '/'
+        : it.path);
+
+      const resp = await fetch(`${LAMBDA_URL}?action=zip_files`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          bucket: S3_BUCKET,
+          paths,
+          filename,
+          actor: userEmail,
+        }),
+      });
+      const data = await resp.json();
+      if (!data.ok) {
+        failOperation(opId, data.error || 'Zip build failed');
+        showError(`Failed to build ZIP: ${(data.error || 'unknown error').slice(0, 200)}`);
+        return;
       }
 
+      // Hand the browser the presigned URL. Content-Disposition is set on
+      // the URL so the user gets the right filename.
+      const link = document.createElement('a');
+      link.href = data.download_url;
+      link.download = data.filename || filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+
+      completeOperation(opId);
+      success(`Downloading ${data.filename || filename} (${data.file_count} files)`);
+      addNotification(
+        'ZIP Downloaded',
+        `${data.file_count} files packaged as ${data.filename || filename}`,
+        'download', data.s3_key,
+      );
+    } catch (err) {
+      const detail = (err as Error)?.message || String(err);
+      console.error('zipAndDownload error:', err);
+      failOperation(opId, detail);
+      showError(`Failed to build ZIP: ${detail.slice(0, 200)}`);
+    }
+  };
+
+  // Stagger individual downloads to dodge the browser's rapid-fire popup
+  // blocker. Used for small multi-file selections only.
+  const sequentiallyDownload = async (items: FileItem[]) => {
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
       const opId = startOperation('download', item.name, item.size || 0);
       try {
         const result = await getUrl({
           path: item.path,
           options: { expiresIn: 3600 },
         });
-
         const link = document.createElement('a');
         link.href = result.url.toString();
         link.download = item.name;
@@ -753,17 +817,87 @@ function FileBrowser() {
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
+        completeOperation(opId);
+      } catch (err) {
+        const detail = (err as Error)?.message || String(err);
+        failOperation(opId, detail);
+        showError(`Failed to download ${item.name}: ${detail.slice(0, 200)}`);
+      }
+      // Delay between downloads — browsers need a beat between programmatic
+      // navigations to register them as separate user-intended actions.
+      if (i < items.length - 1) {
+        await new Promise(r => setTimeout(r, STAGGER_DELAY_MS));
+      }
+    }
+    addNotification(
+      'Files Downloaded',
+      `${items.length} file${items.length === 1 ? '' : 's'} downloaded`,
+      'download',
+    );
+  };
 
+  // The smart Download button — picks the right path based on selection.
+  const handleDownloadSelected = async () => {
+    if (selectedItems.length === 0) return;
+
+    const hasFolder = selectedItems.some(it => it.type === 'folder');
+    const totalSize = selectedItems.reduce((sum, it) => sum + (it.size || 0), 0);
+    const overSizeLimit = totalSize >= SIZE_THRESHOLD_BYTES;
+
+    // Folder downloads OR oversized selections always zip — there's no
+    // direct-download path for those.
+    if (hasFolder || overSizeLimit) {
+      const folderName = currentPath
+        ? currentPath.replace(/\/$/, '').split('/').pop() || 'download'
+        : 'download';
+      const zipName = selectedItems.length === 1
+        ? `${selectedItems[0].name.replace(/\/$/, '')}.zip`
+        : `${folderName}_${selectedItems.length}_items.zip`;
+      await zipAndDownload(selectedItems, zipName);
+      return;
+    }
+
+    // Single small file — direct download, no stagger needed.
+    if (selectedItems.length === 1) {
+      const item = selectedItems[0];
+      const opId = startOperation('download', item.name, item.size || 0);
+      try {
+        const result = await getUrl({
+          path: item.path,
+          options: { expiresIn: 3600 },
+        });
+        const link = document.createElement('a');
+        link.href = result.url.toString();
+        link.download = item.name;
+        link.target = '_blank';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
         completeOperation(opId);
         success(`Downloading ${item.name}`);
         addNotification('File Downloaded', `${item.name} downloaded`, 'download', item.path);
       } catch (err) {
         const detail = (err as Error)?.message || String(err);
-        console.error('Download error:', err);
         failOperation(opId, detail);
         showError(`Failed to download ${item.name}: ${detail.slice(0, 200)}`);
       }
+      return;
     }
+
+    // Multiple small files — stagger individual downloads.
+    await sequentiallyDownload(selectedItems);
+  };
+
+  // Toolbar dropdown — "Download as ZIP" explicit option, always zips.
+  const handleDownloadAsZip = async () => {
+    if (selectedItems.length === 0) return;
+    const folderName = currentPath
+      ? currentPath.replace(/\/$/, '').split('/').pop() || 'download'
+      : 'download';
+    const zipName = selectedItems.length === 1
+      ? `${selectedItems[0].name.replace(/\/$/, '')}.zip`
+      : `${folderName}_${selectedItems.length}_items.zip`;
+    await zipAndDownload(selectedItems, zipName);
   };
 
   // Upload handler
@@ -1153,6 +1287,7 @@ function FileBrowser() {
             selectedCount={selectedItems.length}
             onUpload={() => fileInputRef.current?.click()}
             onDownload={handleDownloadSelected}
+            onDownloadAsZip={handleDownloadAsZip}
             onDelete={() => setBulkDeleteConfirm(true)}
             onMoveTo={() => setBulkMoveMode('move')}
             onCopyTo={() => setBulkMoveMode('copy')}
@@ -1179,6 +1314,7 @@ function FileBrowser() {
               onPreview={handlePreview}
               onUpload={() => fileInputRef.current?.click()}
               onSelectionChange={handleSelectionChange}
+              onZipDownload={(items, filename) => zipAndDownload(items, filename)}
               refreshKey={refreshKey}
               showToast={showToast}
               addNotification={addNotification}

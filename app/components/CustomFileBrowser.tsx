@@ -42,6 +42,9 @@ interface CustomFileBrowserProps {
   sortOption: SortOption;
   searchScope: SearchScope;
   userEmail?: string; // Current user email for permission filtering
+  // Phase 7: server-side ZIP via Lambda. Used for folder downloads and
+  // anything >= 2 GB. Falls back to per-file presigned URLs when absent.
+  onZipDownload?: (items: FileItem[], filename: string) => void;
 }
 
 // Helper function to check if user can access a file based on all permission types
@@ -61,6 +64,7 @@ export function CustomFileBrowser({
   onPreview,
   onUpload,
   onSelectionChange,
+  onZipDownload,
   refreshKey,
   showToast,
   addNotification,
@@ -341,10 +345,18 @@ export function CustomFileBrowser({
     }
   };
 
-  // Handle download
+  // Handle download — files use the direct presigned URL, folders go
+  // through the server-side ZIP path (Phase 7) because there's no
+  // direct-download primitive for folders.
   const handleDownload = async (item: FileItem) => {
     if (item.type === 'folder') {
-      showToast('Cannot download folders directly', 'info');
+      if (!onZipDownload) {
+        showToast('Folder downloads require ZIP support — please reload', 'error');
+        return;
+      }
+      const baseName = item.name.replace(/\/$/, '') || 'folder';
+      onZipDownload([item], `${baseName}.zip`);
+      showToast(`Building ZIP of ${baseName}…`, 'info');
       return;
     }
     try {
@@ -380,6 +392,12 @@ export function CustomFileBrowser({
         label: 'Open',
         icon: <span>📂</span>,
         onClick: () => onNavigate(item.path),
+      });
+      actions.push({
+        id: 'download',
+        label: 'Download as ZIP',
+        icon: <span>📦</span>,
+        onClick: () => handleDownload(item),
       });
       actions.push({
         id: 'share',

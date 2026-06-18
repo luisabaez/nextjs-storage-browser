@@ -84,6 +84,11 @@ from vbl_group_tracker import (
 # Phase 6.2: File configuration admin (replaces uploading an Excel)
 import file_config_admin
 
+# Phase 7: Server-side zip builder for multi-file / folder downloads
+# (browsers block rapid-fire pop-ups; folders can't be downloaded as a
+# unit any other way without zipping).
+from zip_builder import build_download_zip
+
 # ─── Configuration ────────────────────────────────────────────────────────────
 
 DEFAULT_BUCKET = "hacienda-erp-dev"
@@ -1510,6 +1515,34 @@ def lambda_handler(event, context):
                         "by_status": by_status,
                     }, default=str),
                 }
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
+    if action == "zip_files":
+        # POST { bucket?, paths: [...], filename?, actor? }
+        # Streams the listed S3 objects (and any folders) into a zip in
+        # /tmp, uploads to s3://bucket/_downloads/{uuid}/{filename},
+        # returns a presigned GET URL the browser navigates to. One
+        # download → no popup-blocker issues.
+        try:
+            body = json.loads(event.get("body") or "{}")
+            target_bucket = body.get("bucket") or DEFAULT_BUCKET
+            paths = body.get("paths") or []
+            filename = body.get("filename")
+            actor = body.get("actor", "") or ""
+
+            if not isinstance(paths, list) or not paths:
+                return {"statusCode": 400, "headers": headers,
+                        "body": json.dumps({"ok": False, "error":
+                            "paths must be a non-empty list"})}
+
+            res = build_download_zip(s3_client, target_bucket, paths,
+                                      filename=filename, actor=actor)
+            return {"statusCode": 200 if res.get("ok") else 400,
+                    "headers": headers,
+                    "body": json.dumps(res, default=str)}
         except Exception as e:
             traceback.print_exc()
             return {"statusCode": 500, "headers": headers,
