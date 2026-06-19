@@ -726,22 +726,19 @@ function FileBrowser() {
     }
   };
 
-  // Phase 7 — download routing.
+  // Phase 7.1 — download routing.
   //
-  // Three modes:
-  //   1. Single file: direct presigned URL → browser downloads. Same as before.
-  //   2. Multiple files, total size known and < SIZE_THRESHOLD: stagger individual
-  //      presigned-URL downloads with a 700ms delay between each. Browsers usually
-  //      allow up to ~10 sequential programmatic downloads; the delay gives them
-  //      enough time to register one before the next fires.
-  //   3. Anything else (folder selected, or total size >= threshold, or user clicked
-  //      "Download as ZIP" explicitly): hit the server-side zip Lambda. Returns a
-  //      single presigned URL → single download, no popup-blocker risk.
+  // Two modes only:
+  //   1. Single file: direct presigned URL. The `download` attribute on the <a>
+  //      tells the browser to save it; we DON'T set target=_blank because that
+  //      is what triggers the popup blocker even for a single download.
+  //   2. Anything else (multiple files, any folder, oversized, or the explicit
+  //      "Download as ZIP" option): server-side ZIP via Lambda. One request,
+  //      one download, no popup-blocker risk.
   //
-  // SIZE_THRESHOLD is set to 2 GB per the team's spec ("under 2 GB download files,
-  // over 2 GB zip them").
-  const SIZE_THRESHOLD_BYTES = 2 * 1024 * 1024 * 1024;
-  const STAGGER_DELAY_MS = 700;
+  // We removed the under-2GB sequential-individual-downloads path because some
+  // users have popups disabled at the browser level and every `link.click()`
+  // gets blocked. Zipping is reliable; the sequential path was not.
 
   // Server-side zip path — used for folders, oversized selections, and the
   // explicit "Download as ZIP" option from the toolbar dropdown.
@@ -799,54 +796,14 @@ function FileBrowser() {
     }
   };
 
-  // Stagger individual downloads to dodge the browser's rapid-fire popup
-  // blocker. Used for small multi-file selections only.
-  const sequentiallyDownload = async (items: FileItem[]) => {
-    for (let i = 0; i < items.length; i++) {
-      const item = items[i];
-      const opId = startOperation('download', item.name, item.size || 0);
-      try {
-        const result = await getUrl({
-          path: item.path,
-          options: { expiresIn: 3600 },
-        });
-        const link = document.createElement('a');
-        link.href = result.url.toString();
-        link.download = item.name;
-        link.target = '_blank';
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        completeOperation(opId);
-      } catch (err) {
-        const detail = (err as Error)?.message || String(err);
-        failOperation(opId, detail);
-        showError(`Failed to download ${item.name}: ${detail.slice(0, 200)}`);
-      }
-      // Delay between downloads — browsers need a beat between programmatic
-      // navigations to register them as separate user-intended actions.
-      if (i < items.length - 1) {
-        await new Promise(r => setTimeout(r, STAGGER_DELAY_MS));
-      }
-    }
-    addNotification(
-      'Files Downloaded',
-      `${items.length} file${items.length === 1 ? '' : 's'} downloaded`,
-      'download',
-    );
-  };
-
   // The smart Download button — picks the right path based on selection.
   const handleDownloadSelected = async () => {
     if (selectedItems.length === 0) return;
 
-    const hasFolder = selectedItems.some(it => it.type === 'folder');
-    const totalSize = selectedItems.reduce((sum, it) => sum + (it.size || 0), 0);
-    const overSizeLimit = totalSize >= SIZE_THRESHOLD_BYTES;
-
-    // Folder downloads OR oversized selections always zip — there's no
-    // direct-download path for those.
-    if (hasFolder || overSizeLimit) {
+    // Anything other than a single file routes through the ZIP path so the
+    // browser only sees one download. No popup-per-file, no popup-blocker
+    // ambiguity. The Lambda will reject if the total source exceeds 4 GB.
+    if (selectedItems.length > 1 || selectedItems.some(it => it.type === 'folder')) {
       const folderName = currentPath
         ? currentPath.replace(/\/$/, '').split('/').pop() || 'download'
         : 'download';
@@ -857,35 +814,31 @@ function FileBrowser() {
       return;
     }
 
-    // Single small file — direct download, no stagger needed.
-    if (selectedItems.length === 1) {
-      const item = selectedItems[0];
-      const opId = startOperation('download', item.name, item.size || 0);
-      try {
-        const result = await getUrl({
-          path: item.path,
-          options: { expiresIn: 3600 },
-        });
-        const link = document.createElement('a');
-        link.href = result.url.toString();
-        link.download = item.name;
-        link.target = '_blank';
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        completeOperation(opId);
-        success(`Downloading ${item.name}`);
-        addNotification('File Downloaded', `${item.name} downloaded`, 'download', item.path);
-      } catch (err) {
-        const detail = (err as Error)?.message || String(err);
-        failOperation(opId, detail);
-        showError(`Failed to download ${item.name}: ${detail.slice(0, 200)}`);
-      }
-      return;
+    // Single file path — direct presigned URL. The `download` attribute
+    // on the anchor makes the browser save it directly; we deliberately
+    // skip target='_blank' because that's what some browsers treat as a
+    // popup and block.
+    const item = selectedItems[0];
+    const opId = startOperation('download', item.name, item.size || 0);
+    try {
+      const result = await getUrl({
+        path: item.path,
+        options: { expiresIn: 3600 },
+      });
+      const link = document.createElement('a');
+      link.href = result.url.toString();
+      link.download = item.name;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      completeOperation(opId);
+      success(`Downloading ${item.name}`);
+      addNotification('File Downloaded', `${item.name} downloaded`, 'download', item.path);
+    } catch (err) {
+      const detail = (err as Error)?.message || String(err);
+      failOperation(opId, detail);
+      showError(`Failed to download ${item.name}: ${detail.slice(0, 200)}`);
     }
-
-    // Multiple small files — stagger individual downloads.
-    await sequentiallyDownload(selectedItems);
   };
 
   // Toolbar dropdown — "Download as ZIP" explicit option, always zips.
@@ -1067,7 +1020,8 @@ function FileBrowser() {
       const link = document.createElement('a');
       link.href = result.url.toString();
       link.download = previewFile.name;
-      link.target = '_blank';
+      // No target='_blank' — the `download` attribute saves the file
+      // directly without opening a new window, which avoids popup blockers.
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);

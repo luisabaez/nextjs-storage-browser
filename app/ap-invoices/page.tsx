@@ -1131,7 +1131,9 @@ function DataFileDashboard() {
       const link = document.createElement('a');
       link.href = result.url.toString();
       link.download = previewFile.name;
-      link.target = '_blank';
+      // No target='_blank' — the `download` attribute on its own saves
+      // the file directly without opening a new window, which avoids
+      // triggering the user's popup blocker.
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);

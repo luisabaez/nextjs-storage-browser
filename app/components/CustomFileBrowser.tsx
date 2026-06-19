@@ -365,11 +365,12 @@ export function CustomFileBrowser({
         options: { expiresIn: 3600 },
       });
 
-      // Open download in new tab
+      // Direct save via the `download` attribute. We intentionally do
+      // not set target='_blank' — that's what triggers popup blockers
+      // and isn't needed for a download.
       const link = document.createElement('a');
       link.href = result.url.toString();
       link.download = item.name;
-      link.target = '_blank';
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
