@@ -89,6 +89,9 @@ import file_config_admin
 # unit any other way without zipping).
 from zip_builder import build_download_zip
 
+# Interim record sampling for the conversion validation effort (Validations page).
+import sampling
+
 # ─── Configuration ────────────────────────────────────────────────────────────
 
 DEFAULT_BUCKET = "hacienda-erp-dev"
@@ -1543,6 +1546,54 @@ def lambda_handler(event, context):
             return {"statusCode": 200 if res.get("ok") else 400,
                     "headers": headers,
                     "body": json.dumps(res, default=str)}
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
+    # ─── SAMPLING (Validations page) ───
+    if action == "sampling_targets":
+        # ?action=sampling_targets — target tables + their direct children
+        try:
+            return {"statusCode": 200, "headers": headers,
+                    "body": json.dumps(sampling.list_targets(), default=str)}
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
+    if action == "run_sampling":
+        # POST { target_table, sample_size, bucket?, actor? }
+        # Selects N random records from the target, gathers linked child
+        # records, writes an Excel workbook to Sampling/ and returns a
+        # presigned download URL + summary.
+        try:
+            body = json.loads(event.get("body") or "{}")
+            target_table = (body.get("target_table") or "").strip()
+            sample_size = body.get("sample_size")
+            target_bucket = body.get("bucket") or DEFAULT_BUCKET
+            actor = body.get("actor", "") or ""
+            if not target_table:
+                return {"statusCode": 400, "headers": headers,
+                        "body": json.dumps({"ok": False, "error": "target_table required"})}
+            conn_str = get_connection_string()
+            res = sampling.run_sample(conn_str, s3_client, target_bucket,
+                                      target_table, sample_size, actor=actor)
+            return {"statusCode": 200 if res.get("ok") else 400,
+                    "headers": headers,
+                    "body": json.dumps(res, default=str)}
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
+    if action == "sampling_runs":
+        # ?action=sampling_runs[&bucket=...] — recent sampling runs (history)
+        try:
+            p = event.get("queryStringParameters") or {}
+            target_bucket = p.get("bucket") or DEFAULT_BUCKET
+            return {"statusCode": 200, "headers": headers,
+                    "body": json.dumps(sampling.list_runs(s3_client, target_bucket), default=str)}
         except Exception as e:
             traceback.print_exc()
             return {"statusCode": 500, "headers": headers,

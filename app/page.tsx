@@ -123,6 +123,7 @@ const folders = [
   { path: 'ProcessedFiles/', name: 'Processed Files', icon: '✅', type: 'conversion' },
   { path: 'FailedInvoices/', name: 'Failed Files', icon: '❌', type: 'error' },
   { path: 'FailedUnmatchedFilenames/', name: 'Unmatched Filenames', icon: '❓', type: 'error' },
+  { path: 'Sampling/', name: 'Sampling', icon: '🎯', type: 'validation' },
 ];
 
 // Default quick links
@@ -1069,6 +1070,10 @@ function FileBrowser() {
           <Link href="/ap-invoices" className="admin-link" title="File Processing Dashboard">
             <span className="admin-icon">📋</span>
             <span className="admin-text">File Processing</span>
+          </Link>
+          <Link href="/validations" className="admin-link" title="Validations & Sampling">
+            <span className="admin-icon">✅</span>
+            <span className="admin-text">Validations</span>
           </Link>
           {isAdmin && (
             <Link href="/admin" className="admin-link" title="Admin Dashboard">
