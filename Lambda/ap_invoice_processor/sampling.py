@@ -31,6 +31,14 @@ MAX_SAMPLE_SIZE = 5000          # guardrail
 IN_CHUNK = 1000                 # values per IN(...) batch (SQL Server 2100 param cap)
 URL_TTL_SECONDS = 3600
 
+# The consolidated MOCK*_VW_TBL tables live in the Hacienda_ERP database, NOT
+# the Hacienda_ERP_Test database the Lambda's connection string points at. The
+# Lambda's SQL login has read access to it, so we reach the tables with
+# database-qualified names ([Hacienda_ERP].[schema].[table]) rather than
+# changing the global connection (which other actions need for _Test). A
+# request may override this via source_db.
+SOURCE_DATABASE = "Hacienda_ERP"
+
 # ── Config generated from "Sampling Tables Relationship.xlsx" ──────────────────
 TARGET_TABLES = [
     'FIN_911_BUDGET_BALANCE_MOCK14_VW_TBL',
@@ -148,13 +156,24 @@ def _normalize(s):
     return re.sub(r'[^a-z0-9]', '', (s or '').lower())
 
 
-def _table_columns(cursor, table):
+def _object_meta(cursor, db, table):
+    """
+    (schema, [columns]) for a table/view in `db`, via that database's
+    INFORMATION_SCHEMA. Returns (None, []) when the object is not present.
+    """
     cursor.execute(
-        "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = ? "
-        "ORDER BY ORDINAL_POSITION",
+        f"SELECT TABLE_SCHEMA, COLUMN_NAME FROM [{db}].INFORMATION_SCHEMA.COLUMNS "
+        "WHERE TABLE_NAME = ? ORDER BY ORDINAL_POSITION",
         (table,),
     )
-    return [r[0] for r in cursor.fetchall()]
+    rows = cursor.fetchall()
+    if not rows:
+        return None, []
+    return rows[0][0], [r[1] for r in rows]
+
+
+def _qualified(db, schema, table):
+    return f"[{db}].[{schema}].[{table}]"
 
 
 def resolve_link_column(columns, link_field):
@@ -223,11 +242,15 @@ def _add_sheet(wb, title, cols, rows):
 
 # ── Main entry point ───────────────────────────────────────────────────────────
 
-def run_sample(conn_str, s3, bucket, target_table, sample_size, actor=""):
+def run_sample(conn_str, s3, bucket, target_table, sample_size, actor="", source_db=None):
     """
     Select `sample_size` random records from `target_table`, gather direct child
     records linked via each relationship's business key, write an Excel workbook
     to Sampling/ and return a summary + presigned download URL.
+
+    Tables are read from `source_db` (default SOURCE_DATABASE) using
+    database-qualified names, so the Lambda's _Test connection can reach the
+    consolidated tables that live in Hacienda_ERP.
     """
     if target_table not in _TARGET_SET:
         return {"ok": False, "error": f"'{target_table}' is not a configured sampling target table."}
@@ -238,21 +261,23 @@ def run_sample(conn_str, s3, bucket, target_table, sample_size, actor=""):
     if sample_size < 1:
         return {"ok": False, "error": "sample_size must be at least 1."}
     sample_size = min(sample_size, MAX_SAMPLE_SIZE)
+    db = source_db or SOURCE_DATABASE
 
     with pyodbc.connect(conn_str) as conn:
         cur = conn.cursor()
 
-        target_cols = _table_columns(cur, target_table)
+        t_schema, target_cols = _object_meta(cur, db, target_table)
         if not target_cols:
-            return {"ok": False, "error": f"Target table {target_table} not found in the database."}
+            return {"ok": False, "error": f"Target table {target_table} not found in database {db}."}
+        target_fq = _qualified(db, t_schema, target_table)
 
         # Total population (for context in the summary)
-        cur.execute(f"SELECT COUNT(*) FROM [{target_table}]")
+        cur.execute(f"SELECT COUNT(*) FROM {target_fq}")
         population = cur.fetchone()[0]
 
         # Random N rows
         p_cols, p_rows = _fetch(
-            cur, f"SELECT TOP ({sample_size}) * FROM [{target_table}] ORDER BY NEWID()"
+            cur, f"SELECT TOP ({sample_size}) * FROM {target_fq} ORDER BY NEWID()"
         )
         col_idx = {c: i for i, c in enumerate(p_cols)}
 
@@ -264,10 +289,10 @@ def run_sample(conn_str, s3, bucket, target_table, sample_size, actor=""):
         child_summaries = []
         unresolved = []
         for child, link_field in _children_of(target_table):
-            child_cols = _table_columns(cur, child)
+            c_schema, child_cols = _object_meta(cur, db, child)
             if not child_cols:
                 unresolved.append({"child": child, "link_field": link_field,
-                                   "reason": "child table not found"})
+                                   "reason": f"child table not found in {db}"})
                 continue
             p_link = resolve_link_column(p_cols, link_field)
             c_link = resolve_link_column(child_cols, link_field)
@@ -284,13 +309,14 @@ def run_sample(conn_str, s3, bucket, target_table, sample_size, actor=""):
                 if row[col_idx[p_link]] is not None
             }, key=lambda x: str(x))
 
+            child_fq = _qualified(db, c_schema, child)
             child_rows, ch_cols = [], child_cols
             for i in range(0, len(key_values), IN_CHUNK):
                 batch = key_values[i:i + IN_CHUNK]
                 placeholders = ",".join("?" * len(batch))
                 ch_cols, rows = _fetch(
                     cur,
-                    f"SELECT * FROM [{child}] WHERE [{c_link}] IN ({placeholders})",
+                    f"SELECT * FROM {child_fq} WHERE [{c_link}] IN ({placeholders})",
                     batch,
                 )
                 child_rows.extend(rows)
@@ -319,6 +345,7 @@ def run_sample(conn_str, s3, bucket, target_table, sample_size, actor=""):
     manifest = {
         "target_table": target_table,
         "target_display": _short_name(target_table),
+        "source_db": db,
         "requested_sample_size": sample_size,
         "selected_count": len(p_rows),
         "population": population,

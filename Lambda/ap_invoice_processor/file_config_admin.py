@@ -17,6 +17,7 @@ re-uploading a Conversion Plan Excel:
 
 Every function returns a JSON-ready dict. Never raises.
 """
+import re
 from datetime import datetime
 from typing import Optional
 
@@ -369,17 +370,23 @@ def list_sql_tables(connection_str: str, prefix: Optional[str] = None) -> dict:
         return {"ok": False, "error": str(e)}
 
 
-def get_sql_table_columns(connection_str: str, table: str) -> dict:
-    """Column metadata for the column mapping UI."""
+def get_sql_table_columns(connection_str: str, table: str, db: Optional[str] = None) -> dict:
+    """Column metadata for the column mapping UI. Optionally read from another
+    database via its INFORMATION_SCHEMA (db must be a bare identifier)."""
+    info_schema = "INFORMATION_SCHEMA.COLUMNS"
+    if db:
+        if not re.match(r'^[A-Za-z0-9_]+$', db):
+            return {"ok": False, "error": f"Invalid database name: {db}"}
+        info_schema = f"[{db}].INFORMATION_SCHEMA.COLUMNS"
     try:
         with pyodbc.connect(connection_str) as conn:
             cur = conn.cursor()
             cur.execute(
-                """
+                f"""
                 SELECT COLUMN_NAME, DATA_TYPE,
                        CHARACTER_MAXIMUM_LENGTH, NUMERIC_PRECISION, NUMERIC_SCALE,
                        IS_NULLABLE, ORDINAL_POSITION
-                FROM INFORMATION_SCHEMA.COLUMNS
+                FROM {info_schema}
                 WHERE TABLE_NAME = ?
                 ORDER BY ORDINAL_POSITION
                 """,

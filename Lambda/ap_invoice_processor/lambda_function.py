@@ -1205,11 +1205,11 @@ def lambda_handler(event, context):
                     "body": json.dumps({"ok": False, "error": str(e)})}
 
     if action == "sql_table_columns":
-        # ?action=sql_table_columns&table=...
+        # ?action=sql_table_columns&table=...[&db=Hacienda_ERP]
         try:
             p = event.get("queryStringParameters") or {}
             conn_str = get_connection_string()
-            res = file_config_admin.get_sql_table_columns(conn_str, p.get("table", ""))
+            res = file_config_admin.get_sql_table_columns(conn_str, p.get("table", ""), p.get("db") or None)
             return {"statusCode": 200 if res.get("ok") else 400,
                     "headers": headers,
                     "body": json.dumps(res, default=str)}
@@ -1573,12 +1573,14 @@ def lambda_handler(event, context):
             sample_size = body.get("sample_size")
             target_bucket = body.get("bucket") or DEFAULT_BUCKET
             actor = body.get("actor", "") or ""
+            source_db = body.get("source_db") or None
             if not target_table:
                 return {"statusCode": 400, "headers": headers,
                         "body": json.dumps({"ok": False, "error": "target_table required"})}
             conn_str = get_connection_string()
             res = sampling.run_sample(conn_str, s3_client, target_bucket,
-                                      target_table, sample_size, actor=actor)
+                                      target_table, sample_size, actor=actor,
+                                      source_db=source_db)
             return {"statusCode": 200 if res.get("ok") else 400,
                     "headers": headers,
                     "body": json.dumps(res, default=str)}
@@ -1594,6 +1596,45 @@ def lambda_handler(event, context):
             target_bucket = p.get("bucket") or DEFAULT_BUCKET
             return {"statusCode": 200, "headers": headers,
                     "body": json.dumps(sampling.list_runs(s3_client, target_bucket), default=str)}
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
+    if action == "sql_locate":
+        # ?action=sql_locate&name=OBJECT_NAME — DIAGNOSTIC (metadata only, no row data).
+        # Reports the connection's current DB/server, the user databases the
+        # login can see, and which of those databases contain an object matching
+        # `name` (exact + LIKE). Helps pin down cross-database table location.
+        try:
+            p = event.get("queryStringParameters") or {}
+            name = (p.get("name") or "").strip()
+            conn_str = get_connection_string()
+            with pyodbc.connect(conn_str) as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT DB_NAME(), @@SERVERNAME")
+                current_db, server_name = cur.fetchone()
+                cur.execute("SELECT name FROM sys.databases WHERE database_id > 4 ORDER BY name")
+                user_dbs = [r[0] for r in cur.fetchall()]
+                located = []
+                if name:
+                    search_dbs = sorted(set(user_dbs) | {current_db})
+                    like = f"%{name}%"
+                    for db in search_dbs:
+                        try:
+                            cur.execute(
+                                f"SELECT name, type_desc FROM [{db}].sys.objects "
+                                "WHERE name = ? OR name LIKE ?",
+                                (name, like),
+                            )
+                            for nm, td in cur.fetchall():
+                                located.append({"database": db, "object": nm, "type": td})
+                        except Exception as db_err:
+                            located.append({"database": db, "error": str(db_err)[:120]})
+            return {"statusCode": 200, "headers": headers,
+                    "body": json.dumps({"ok": True, "current_db": current_db,
+                                        "server": server_name, "user_databases": user_dbs,
+                                        "searched_for": name, "located": located}, default=str)}
         except Exception as e:
             traceback.print_exc()
             return {"statusCode": 500, "headers": headers,
