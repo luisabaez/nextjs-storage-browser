@@ -16,6 +16,7 @@ Amplify.configure(config);
 const LAMBDA_URL = 'https://5ahxjcxhrcopng5hjgc2n6utxq0rwcmm.lambda-url.us-east-1.on.aws/';
 
 const SAMPLING_FOLDER = 'Sampling/';
+const DEFAULT_SIZE = '56';
 
 interface ChildRel {
   table: string;
@@ -49,6 +50,7 @@ interface SampleRun {
   ok?: boolean;
   target_table: string;
   target_display: string;
+  source_db?: string;
   requested_sample_size: number;
   selected_count: number;
   population: number;
@@ -64,23 +66,33 @@ interface SampleRun {
   error?: string;
 }
 
+type RunState = 'idle' | 'running' | 'done' | 'error';
+interface RunCell {
+  state: RunState;
+  result?: SampleRun;
+  error?: string;
+}
+
 type TabId = 'sampling';
 
 function ValidationsPage() {
   const [userEmail, setUserEmail] = useState('');
   const [activeTab] = useState<TabId>('sampling');
 
-  // Sampling state
   const [targets, setTargets] = useState<TargetInfo[]>([]);
   const [targetsLoading, setTargetsLoading] = useState(true);
-  const [selectedTable, setSelectedTable] = useState('');
-  const [sampleSize, setSampleSize] = useState('56');
-  const [running, setRunning] = useState(false);
-  const [result, setResult] = useState<SampleRun | null>(null);
   const [error, setError] = useState('');
-  const [recentRuns, setRecentRuns] = useState<SampleRun[]>([]);
 
-  const selectedTarget = targets.find(t => t.table === selectedTable) || null;
+  // Per-target form + run state, keyed by target table name
+  const [sizes, setSizes] = useState<Record<string, string>>({});
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [runStatus, setRunStatus] = useState<Record<string, RunCell>>({});
+  const [batch, setBatch] = useState<{ running: boolean; done: number; total: number }>({
+    running: false, done: 0, total: 0,
+  });
+  const [setAllValue, setSetAllValue] = useState(DEFAULT_SIZE);
+
+  const [recentRuns, setRecentRuns] = useState<SampleRun[]>([]);
 
   useEffect(() => {
     (async () => {
@@ -93,15 +105,20 @@ function ValidationsPage() {
     })();
   }, []);
 
-  // Load target tables
+  // Load target tables and seed each with the default sample size
   useEffect(() => {
     (async () => {
       setTargetsLoading(true);
       try {
         const resp = await fetch(`${LAMBDA_URL}?action=sampling_targets`);
         const data = await resp.json();
-        if (data.ok) setTargets(data.targets || []);
-        else setError(data.error || 'Failed to load target tables');
+        if (data.ok) {
+          const list: TargetInfo[] = data.targets || [];
+          setTargets(list);
+          setSizes(Object.fromEntries(list.map(t => [t.table, DEFAULT_SIZE])));
+        } else {
+          setError(data.error || 'Failed to load target tables');
+        }
       } catch (e) {
         setError(`Failed to load target tables: ${e instanceof Error ? e.message : String(e)}`);
       } finally {
@@ -133,36 +150,67 @@ function ValidationsPage() {
     document.body.removeChild(a);
   };
 
-  const runSampling = async () => {
-    setError('');
-    setResult(null);
-    const size = parseInt(sampleSize, 10);
-    if (!selectedTable) { setError('Pick a target table first.'); return; }
-    if (!Number.isFinite(size) || size < 1) { setError('Enter a sample size of 1 or more.'); return; }
+  const toggleExpand = (table: string) =>
+    setExpanded(prev => ({ ...prev, [table]: !prev[table] }));
 
-    setRunning(true);
+  const applySetAll = () => {
+    const v = setAllValue.trim();
+    setSizes(prev => Object.fromEntries(Object.keys(prev).map(k => [k, v])));
+  };
+
+  // Run a single target. Returns true on success. Updates per-row status.
+  const runOne = useCallback(async (target: string): Promise<boolean> => {
+    const size = parseInt(sizes[target] ?? '', 10);
+    if (!Number.isFinite(size) || size < 1) {
+      setRunStatus(prev => ({ ...prev, [target]: { state: 'error', error: 'No sample size' } }));
+      return false;
+    }
+    setRunStatus(prev => ({ ...prev, [target]: { state: 'running' } }));
     try {
       const resp = await fetch(`${LAMBDA_URL}?action=run_sampling`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          target_table: selectedTable,
-          sample_size: size,
-          actor: userEmail,
-        }),
+        body: JSON.stringify({ target_table: target, sample_size: size, actor: userEmail }),
       });
       const data: SampleRun = await resp.json();
       if (!data.ok) {
-        setError(data.error || 'Sampling failed.');
-      } else {
-        setResult(data);
-        loadRecentRuns();
+        setRunStatus(prev => ({ ...prev, [target]: { state: 'error', error: data.error || 'Failed' } }));
+        return false;
       }
+      setRunStatus(prev => ({ ...prev, [target]: { state: 'done', result: data } }));
+      return true;
     } catch (e) {
-      setError(`Sampling failed: ${e instanceof Error ? e.message : String(e)}`);
-    } finally {
-      setRunning(false);
+      setRunStatus(prev => ({ ...prev, [target]: { state: 'error', error: e instanceof Error ? e.message : String(e) } }));
+      return false;
     }
+  }, [sizes, userEmail]);
+
+  // Run every target that has a valid size, one at a time, with live progress.
+  const runAll = async () => {
+    setError('');
+    const queue = targets
+      .map(t => t.table)
+      .filter(tbl => {
+        const n = parseInt(sizes[tbl] ?? '', 10);
+        return Number.isFinite(n) && n >= 1;
+      });
+    if (queue.length === 0) {
+      setError('Enter a sample size of 1 or more for at least one target.');
+      return;
+    }
+    setBatch({ running: true, done: 0, total: queue.length });
+    for (let i = 0; i < queue.length; i++) {
+      await runOne(queue[i]);
+      setBatch(prev => ({ ...prev, done: i + 1 }));
+    }
+    setBatch(prev => ({ ...prev, running: false }));
+    loadRecentRuns();
+  };
+
+  const runSingle = async (target: string) => {
+    setError('');
+    await runOne(target);
+    loadRecentRuns();
   };
 
   const fmtDate = (iso: string) => {
@@ -170,6 +218,8 @@ function ValidationsPage() {
     const d = new Date(iso);
     return isNaN(d.getTime()) ? iso : d.toLocaleString();
   };
+
+  const anyRunning = batch.running;
 
   return (
     <div className="val-page">
@@ -190,7 +240,6 @@ function ValidationsPage() {
         </div>
       </header>
 
-      {/* Tabs (room to grow — Sampling is the first) */}
       <div className="val-tabs">
         <button className={`val-tab-btn ${activeTab === 'sampling' ? 'active' : ''}`}>
           Sampling
@@ -202,141 +251,162 @@ function ValidationsPage() {
           <div className="val-intro">
             <h2>Record Sampling</h2>
             <p>
-              Pick a target table and a sample size. The system selects that many
-              records at random, gathers the child records linked to them, and
-              writes the full sample set to an Excel workbook in the{' '}
+              Set a sample size for each target table and run them all at once. For
+              each target the system selects that many records at random, gathers the
+              linked child records, and writes an Excel workbook per target to the{' '}
               <Link href={`/?path=${encodeURIComponent(SAMPLING_FOLDER)}`}>Sampling folder</Link>.
+              Expand a row to see which children get gathered.
             </p>
             <div className="val-note">
-              <strong>Interim version.</strong> Pending confirmation of Ethree&rsquo;s
-              sizing methodology, the sample size is a manual input, selection is
-              random (not yet reproducible), and only the target&rsquo;s direct
-              children are gathered.
+              <strong>Interim version.</strong> Sample size is a manual input (pending
+              Ethree&rsquo;s methodology), selection is random (not yet reproducible),
+              and only each target&rsquo;s direct children are gathered. A blank or 0
+              size skips that target.
             </div>
           </div>
 
           {error && <div className="val-error">{error}</div>}
 
-          <div className="val-form">
-            <div className="val-field">
-              <label htmlFor="target">Target table</label>
-              <select
-                id="target"
-                value={selectedTable}
-                onChange={e => { setSelectedTable(e.target.value); setResult(null); }}
-                disabled={targetsLoading}
-              >
-                <option value="">
-                  {targetsLoading ? 'Loading target tables…' : '— Select a target table —'}
-                </option>
-                {targets.map(t => (
-                  <option key={t.table} value={t.table}>
-                    {t.display} ({t.child_count} child{t.child_count === 1 ? '' : 'ren'})
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div className="val-field val-field-size">
-              <label htmlFor="size">Sample size</label>
+          {/* Batch toolbar */}
+          <div className="val-toolbar">
+            <div className="val-setall">
+              <label htmlFor="setall">Set all sizes to</label>
               <input
-                id="size"
+                id="setall"
                 type="number"
                 min={1}
-                value={sampleSize}
-                onChange={e => setSampleSize(e.target.value)}
-                placeholder="e.g. 56"
+                value={setAllValue}
+                onChange={e => setSetAllValue(e.target.value)}
+                disabled={anyRunning}
               />
+              <button className="val-btn-secondary" onClick={applySetAll} disabled={anyRunning}>
+                Apply to all
+              </button>
             </div>
-
-            <button className="val-run-btn" onClick={runSampling} disabled={running || !selectedTable}>
-              {running ? <><span className="val-spinner" /> Selecting sample…</> : 'Run Sampling'}
-            </button>
+            <div className="val-toolbar-right">
+              {batch.running && (
+                <span className="val-progress">
+                  <span className="val-spinner" /> Running {batch.done} / {batch.total}…
+                </span>
+              )}
+              <button className="val-run-btn" onClick={runAll} disabled={anyRunning || targetsLoading}>
+                {batch.running ? 'Running…' : '▶ Run All'}
+              </button>
+            </div>
           </div>
 
-          {/* Children that will be gathered */}
-          {selectedTarget && (
-            <div className="val-children-preview">
-              <h3>Linked children gathered with each sampled record</h3>
-              {selectedTarget.children.length === 0 ? (
-                <p className="val-muted">This target has no child tables — only its own records are sampled.</p>
-              ) : (
-                <table className="val-table">
-                  <thead>
-                    <tr><th>Child table</th><th>Link field</th></tr>
-                  </thead>
-                  <tbody>
-                    {selectedTarget.children.map(c => (
-                      <tr key={c.table}>
-                        <td>{c.display}</td>
-                        <td>{c.link_field}</td>
+          {/* Targets table */}
+          {targetsLoading ? (
+            <div className="val-loading"><span className="val-spinner" /> Loading target tables…</div>
+          ) : (
+            <table className="val-table val-targets">
+              <thead>
+                <tr>
+                  <th className="val-col-caret"></th>
+                  <th>Target table</th>
+                  <th className="val-col-children">Children</th>
+                  <th className="val-col-size">Sample size</th>
+                  <th className="val-col-status">Status</th>
+                  <th className="val-col-result">Result</th>
+                </tr>
+              </thead>
+              <tbody>
+                {targets.map(t => {
+                  const cell = runStatus[t.table] || { state: 'idle' as RunState };
+                  const isOpen = !!expanded[t.table];
+                  return (
+                    <React.Fragment key={t.table}>
+                      <tr className="val-target-row">
+                        <td className="val-col-caret">
+                          {t.child_count > 0 && (
+                            <button
+                              className="val-caret"
+                              onClick={() => toggleExpand(t.table)}
+                              aria-label={isOpen ? 'Collapse' : 'Expand'}
+                            >
+                              {isOpen ? '▾' : '▸'}
+                            </button>
+                          )}
+                        </td>
+                        <td className="val-target-name">{t.display}</td>
+                        <td className="val-col-children">
+                          {t.child_count > 0 ? (
+                            <button className="val-children-link" onClick={() => toggleExpand(t.table)}>
+                              {t.child_count}
+                            </button>
+                          ) : <span className="val-muted">0</span>}
+                        </td>
+                        <td className="val-col-size">
+                          <input
+                            type="number"
+                            min={1}
+                            value={sizes[t.table] ?? ''}
+                            onChange={e => setSizes(prev => ({ ...prev, [t.table]: e.target.value }))}
+                            disabled={anyRunning}
+                          />
+                        </td>
+                        <td className="val-col-status">
+                          {cell.state === 'running' && <span className="val-status running"><span className="val-spinner" /> Running…</span>}
+                          {cell.state === 'done' && (
+                            <span className="val-status done">
+                              ✓ {cell.result!.selected_count.toLocaleString()} sel
+                              {cell.result!.population ? ` / ${cell.result!.population.toLocaleString()}` : ''}
+                            </span>
+                          )}
+                          {cell.state === 'error' && <span className="val-status error" title={cell.error}>✕ {cell.error}</span>}
+                          {cell.state === 'idle' && (
+                            <button className="val-btn-row" onClick={() => runSingle(t.table)} disabled={anyRunning}>
+                              Run
+                            </button>
+                          )}
+                        </td>
+                        <td className="val-col-result">
+                          {cell.state === 'done' && cell.result && (
+                            <div className="val-row-result">
+                              <span className="val-muted">{cell.result.child_total_rows.toLocaleString()} child rows</span>
+                              {cell.result.download_url && (
+                                <button
+                                  className="val-download-sm"
+                                  onClick={() => triggerDownload(cell.result!.download_url!, cell.result!.filename)}
+                                >
+                                  ⬇
+                                </button>
+                              )}
+                              {cell.result.unresolved_links.length > 0 && (
+                                <span className="val-unresolved-badge" title={cell.result.unresolved_links.map(u => `${u.child}: ${u.reason}`).join('\n')}>
+                                  ⚠ {cell.result.unresolved_links.length} unresolved
+                                </span>
+                              )}
+                            </div>
+                          )}
+                        </td>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-            </div>
-          )}
-
-          {/* Result */}
-          {result && (
-            <div className="val-result">
-              <div className="val-result-head">
-                <h3>Sample created: {result.target_display}</h3>
-                {result.download_url && (
-                  <button
-                    className="val-download-btn"
-                    onClick={() => triggerDownload(result.download_url!, result.filename)}
-                  >
-                    ⬇ Download workbook
-                  </button>
-                )}
-              </div>
-              <div className="val-result-stats">
-                <div className="val-stat">
-                  <span className="val-stat-num">{result.selected_count.toLocaleString()}</span>
-                  <span className="val-stat-label">records selected{result.population ? ` of ${result.population.toLocaleString()}` : ''}</span>
-                </div>
-                <div className="val-stat">
-                  <span className="val-stat-num">{result.children.length}</span>
-                  <span className="val-stat-label">child tables gathered</span>
-                </div>
-                <div className="val-stat">
-                  <span className="val-stat-num">{result.child_total_rows.toLocaleString()}</span>
-                  <span className="val-stat-label">child rows total</span>
-                </div>
-              </div>
-
-              {result.children.length > 0 && (
-                <table className="val-table">
-                  <thead>
-                    <tr><th>Child table</th><th>Link field</th><th>Matched column</th><th>Rows</th></tr>
-                  </thead>
-                  <tbody>
-                    {result.children.map(c => (
-                      <tr key={c.child}>
-                        <td>{c.display}</td>
-                        <td>{c.link_field}</td>
-                        <td><code>{c.parent_column} → {c.child_column}</code></td>
-                        <td>{c.row_count.toLocaleString()}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-
-              {result.unresolved_links.length > 0 && (
-                <div className="val-warn">
-                  <strong>{result.unresolved_links.length} link field(s) could not be resolved</strong> and were
-                  skipped — these need the field-name → column mapping confirmed:
-                  <ul>
-                    {result.unresolved_links.map((u, i) => (
-                      <li key={i}><code>{u.child}</code> — &ldquo;{u.link_field}&rdquo; ({u.reason})</li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-            </div>
+                      {isOpen && t.children.length > 0 && (
+                        <tr className="val-children-row">
+                          <td></td>
+                          <td colSpan={5}>
+                            <div className="val-children-box">
+                              <div className="val-children-title">Children gathered with each sampled record:</div>
+                              <table className="val-child-table">
+                                <thead><tr><th>Child table</th><th>Link field</th></tr></thead>
+                                <tbody>
+                                  {t.children.map(c => (
+                                    <tr key={c.table}>
+                                      <td>{c.display}</td>
+                                      <td>{c.link_field}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
           )}
 
           {/* Recent runs */}

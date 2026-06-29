@@ -204,3 +204,89 @@
 
 .val-link-sm { font-size: 12px; color: #2563eb; text-decoration: none; }
 .val-link-sm:hover { text-decoration: underline; }
+
+/* Batch toolbar */
+.val-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  padding: 12px 16px;
+  margin: 18px 0;
+}
+.val-setall { display: flex; align-items: center; gap: 8px; }
+.val-setall label { font-size: 13px; font-weight: 600; color: #374151; }
+.val-setall input {
+  width: 90px; height: 36px; padding: 0 10px;
+  border: 1px solid #d1d5db; border-radius: 8px; font-size: 14px;
+}
+.val-toolbar-right { display: flex; align-items: center; gap: 14px; }
+.val-progress { font-size: 13px; color: #6b7280; display: inline-flex; align-items: center; gap: 6px; }
+.val-btn-secondary {
+  height: 36px; padding: 0 14px; border: 1px solid #d1d5db; border-radius: 8px;
+  background: #fff; color: #374151; font-size: 13px; font-weight: 600; cursor: pointer;
+}
+.val-btn-secondary:hover:not(:disabled) { background: #f3f4f6; }
+.val-btn-secondary:disabled { opacity: .6; cursor: not-allowed; }
+
+.val-loading { padding: 30px 0; color: #6b7280; display: flex; align-items: center; gap: 8px; }
+
+/* Targets table */
+.val-targets { table-layout: auto; }
+.val-targets td { vertical-align: middle; }
+.val-col-caret { width: 28px; }
+.val-col-children { width: 80px; text-align: center; }
+.val-col-size { width: 110px; }
+.val-col-status { width: 170px; }
+.val-col-result { width: 220px; }
+.val-target-row:hover { background: #fafafa; }
+.val-target-name { font-weight: 600; color: #1f2937; font-family: var(--font-geist-mono, monospace); font-size: 12.5px; }
+
+.val-caret {
+  border: none; background: none; cursor: pointer; color: #6b7280;
+  font-size: 12px; padding: 2px 4px;
+}
+.val-children-link {
+  border: none; background: none; cursor: pointer; color: #2563eb;
+  font-size: 13px; font-weight: 600; text-decoration: underline;
+}
+.val-col-size input {
+  width: 80px; height: 32px; padding: 0 8px;
+  border: 1px solid #d1d5db; border-radius: 6px; font-size: 13px;
+}
+.val-col-size input:focus { outline: none; border-color: #2563eb; box-shadow: 0 0 0 2px rgba(37,99,235,.15); }
+
+.val-btn-row {
+  height: 30px; padding: 0 14px; border: 1px solid #2563eb; border-radius: 6px;
+  background: #fff; color: #2563eb; font-size: 12px; font-weight: 600; cursor: pointer;
+}
+.val-btn-row:hover:not(:disabled) { background: #eff6ff; }
+.val-btn-row:disabled { opacity: .5; cursor: not-allowed; }
+
+.val-status { font-size: 12px; display: inline-flex; align-items: center; gap: 6px; }
+.val-status.running { color: #6b7280; }
+.val-status.done { color: #047857; font-weight: 600; }
+.val-status.error { color: #b91c1c; font-weight: 600; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* spinner is light-on-blue by default; recolor for the neutral status row */
+.val-status .val-spinner { border-color: rgba(107,114,128,.35); border-top-color: #6b7280; }
+
+.val-row-result { display: flex; align-items: center; gap: 8px; }
+.val-download-sm {
+  border: none; border-radius: 6px; background: #059669; color: #fff;
+  font-size: 13px; padding: 4px 9px; cursor: pointer;
+}
+.val-download-sm:hover { background: #047857; }
+.val-unresolved-badge { font-size: 11px; color: #92400e; background: #fffbeb; border: 1px solid #fde68a; border-radius: 4px; padding: 1px 5px; cursor: help; }
+
+/* Expanded children */
+.val-children-row td { background: #f9fafb; padding: 0; }
+.val-children-box { padding: 10px 16px 14px; }
+.val-children-title { font-size: 12px; font-weight: 600; color: #6b7280; margin-bottom: 6px; }
+.val-child-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.val-child-table th, .val-child-table td { text-align: left; padding: 5px 10px; border-bottom: 1px solid #eee; }
+.val-child-table th { color: #9ca3af; font-weight: 600; }
+.val-child-table td:first-child { font-family: var(--font-geist-mono, monospace); font-size: 12px; }
