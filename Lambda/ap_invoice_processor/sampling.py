@@ -19,6 +19,7 @@ import io
 import json
 import re
 import uuid
+from collections import defaultdict
 from datetime import datetime, date
 from decimal import Decimal
 
@@ -240,6 +241,63 @@ def _add_sheet(wb, title, cols, rows):
     return ws
 
 
+def _combine(parent_cols, parent_rows, p_link, child_cols, child_rows, c_link):
+    """
+    Flatten a parent/child relationship into one wide table joined on the link
+    (unique-identifier) column. Child columns whose name already exists on the
+    parent are dropped — repeating data is ignored so the shared key/fields show
+    once — and exact-duplicate rows are collapsed. Parent rows with no matching
+    child appear once with the child columns blank (left join), so the sampled
+    records are never lost.
+
+    Returns (combined_columns, combined_rows).
+    """
+    def _idx(cols, name):
+        nl = name.lower()
+        for i, c in enumerate(cols):
+            if c.lower() == nl:
+                return i
+        return None
+
+    p_idx = _idx(parent_cols, p_link)
+    c_idx = _idx(child_cols, c_link)
+    if p_idx is None or c_idx is None:
+        # Links were already resolved; fail safe to parent-only if not found.
+        return list(parent_cols), [list(r) for r in parent_rows]
+
+    pset = {c.lower() for c in parent_cols}
+    extra = [(i, c) for i, c in enumerate(child_cols) if c.lower() not in pset]
+    combined_cols = list(parent_cols) + [c for _, c in extra]
+
+    pmap = defaultdict(list)
+    for pr in parent_rows:
+        pmap[pr[p_idx]].append(pr)
+
+    rows, matched = [], set()
+    for cr in child_rows:
+        parents = pmap.get(cr[c_idx])
+        if not parents:
+            continue
+        matched.add(cr[c_idx])
+        tail = [cr[i] for i, _ in extra]
+        for pr in parents:
+            rows.append(list(pr) + tail)
+
+    blanks = [None] * len(extra)
+    for pr in parent_rows:
+        if pr[p_idx] not in matched:
+            rows.append(list(pr) + blanks)
+
+    seen, out = set(), []
+    for r in rows:
+        k = tuple('' if v is None else str(v) for v in r)
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(r)
+    return combined_cols, out
+
+
 # ── Main entry point ───────────────────────────────────────────────────────────
 
 def run_sample(conn_str, s3, bucket, target_table, sample_size, actor="", source_db=None):
@@ -284,49 +342,68 @@ def run_sample(conn_str, s3, bucket, target_table, sample_size, actor="", source
         wb = openpyxl.Workbook()
         wb.remove(wb.active)  # drop default sheet
         used_sheets = set()
-        _add_sheet(wb, _sheet_name(_short_name(target_table), used_sheets), p_cols, p_rows)
 
         child_summaries = []
         unresolved = []
-        for child, link_field in _children_of(target_table):
-            c_schema, child_cols = _object_meta(cur, db, child)
-            if not child_cols:
-                unresolved.append({"child": child, "link_field": link_field,
-                                   "reason": f"child table not found in {db}"})
-                continue
-            p_link = resolve_link_column(p_cols, link_field)
-            c_link = resolve_link_column(child_cols, link_field)
-            if not p_link or not c_link:
-                unresolved.append({
-                    "child": child, "link_field": link_field,
-                    "reason": "could not resolve link column on "
-                              + ("parent" if not p_link else "child"),
-                })
-                continue
+        children = _children_of(target_table)
 
-            key_values = sorted({
-                row[col_idx[p_link]] for row in p_rows
-                if row[col_idx[p_link]] is not None
-            }, key=lambda x: str(x))
+        if not children:
+            # Standalone target (no children) — just its own records, like the
+            # example workbook's "Budget Balance MC2" sheet.
+            _add_sheet(wb, _sheet_name(_short_name(target_table), used_sheets), p_cols, p_rows)
+        else:
+            # One combined, flattened sheet per child: the parent's columns
+            # joined to that child's columns on the unique identifier. Shared
+            # columns appear once and duplicate rows are collapsed (per the
+            # client's "if data is repeating, ignore" instruction).
+            for child, link_field in children:
+                c_schema, child_cols = _object_meta(cur, db, child)
+                if not child_cols:
+                    unresolved.append({"child": child, "link_field": link_field,
+                                       "reason": f"child table not found in {db}"})
+                    continue
+                p_link = resolve_link_column(p_cols, link_field)
+                c_link = resolve_link_column(child_cols, link_field)
+                if not p_link or not c_link:
+                    unresolved.append({
+                        "child": child, "link_field": link_field,
+                        "reason": "could not resolve link column on "
+                                  + ("parent" if not p_link else "child"),
+                    })
+                    continue
 
-            child_fq = _qualified(db, c_schema, child)
-            child_rows, ch_cols = [], child_cols
-            for i in range(0, len(key_values), IN_CHUNK):
-                batch = key_values[i:i + IN_CHUNK]
-                placeholders = ",".join("?" * len(batch))
-                ch_cols, rows = _fetch(
-                    cur,
-                    f"SELECT * FROM {child_fq} WHERE [{c_link}] IN ({placeholders})",
-                    batch,
+                key_values = sorted({
+                    row[col_idx[p_link]] for row in p_rows
+                    if row[col_idx[p_link]] is not None
+                }, key=lambda x: str(x))
+
+                child_fq = _qualified(db, c_schema, child)
+                child_rows, ch_cols = [], child_cols
+                for i in range(0, len(key_values), IN_CHUNK):
+                    batch = key_values[i:i + IN_CHUNK]
+                    placeholders = ",".join("?" * len(batch))
+                    ch_cols, rows = _fetch(
+                        cur,
+                        f"SELECT * FROM {child_fq} WHERE [{c_link}] IN ({placeholders})",
+                        batch,
+                    )
+                    child_rows.extend(rows)
+
+                comb_cols, comb_rows = _combine(
+                    p_cols, p_rows, p_link, ch_cols, child_rows, c_link
                 )
-                child_rows.extend(rows)
+                _add_sheet(wb, _sheet_name(_short_name(child), used_sheets), comb_cols, comb_rows)
+                child_summaries.append({
+                    "child": child, "display": _short_name(child),
+                    "link_field": link_field, "parent_column": p_link,
+                    "child_column": c_link, "row_count": len(child_rows),
+                    "combined_row_count": len(comb_rows),
+                })
 
-            _add_sheet(wb, _sheet_name(_short_name(child), used_sheets), ch_cols, child_rows)
-            child_summaries.append({
-                "child": child, "display": _short_name(child),
-                "link_field": link_field, "parent_column": p_link,
-                "child_column": c_link, "row_count": len(child_rows),
-            })
+            # If every child was unresolved, still write the parent sample so the
+            # workbook isn't empty and the selection isn't lost.
+            if not wb.sheetnames:
+                _add_sheet(wb, _sheet_name(_short_name(target_table), used_sheets), p_cols, p_rows)
 
     # ── Write workbook + manifest to S3 ──
     stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
