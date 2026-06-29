@@ -298,9 +298,97 @@ def _combine(parent_cols, parent_rows, p_link, child_cols, child_rows, c_link):
     return combined_cols, out
 
 
+def _combine_all(parent_cols, parent_rows, children_data):
+    """
+    Merge the parent and ALL its children into a single flattened sheet so the
+    client can sort/filter every related record in one place. Each child record
+    becomes one row carrying its parent's columns alongside; a leading "Source"
+    column names the originating child table. Columns shared with the parent (and
+    each child's link column) appear once — duplicated data is ignored — and
+    child columns are unioned by name. Parents with no children at all are kept
+    as a "(parent only)" row, and exact-duplicate rows are collapsed.
+
+    children_data: list of (display, p_link, child_cols, child_rows, c_link).
+    Returns (master_columns, master_rows).
+    """
+    def _idx(cols, name):
+        nl = (name or "").lower()
+        for i, c in enumerate(cols):
+            if c.lower() == nl:
+                return i
+        return None
+
+    pset = {c.lower() for c in parent_cols}
+    master_cols = ["Source"] + list(parent_cols)
+    seen_cols = {c.lower() for c in master_cols}
+    for disp, p_link, ch_cols, ch_rows, c_link in children_data:
+        cl_link = (c_link or "").lower()
+        for c in ch_cols:
+            cl = c.lower()
+            if cl in pset or cl == cl_link or cl in seen_cols:
+                continue
+            master_cols.append(c)
+            seen_cols.add(cl)
+
+    pos = {c.lower(): i for i, c in enumerate(master_cols)}
+    width = len(master_cols)
+    n_parent = len(parent_cols)
+
+    pmaps = {}
+    def _pmap(p_idx):
+        if p_idx not in pmaps:
+            m = defaultdict(list)
+            for ri, pr in enumerate(parent_rows):
+                m[pr[p_idx]].append(ri)
+            pmaps[p_idx] = m
+        return pmaps[p_idx]
+
+    rows, matched = [], set()
+    for disp, p_link, ch_cols, ch_rows, c_link in children_data:
+        p_idx = _idx(parent_cols, p_link)
+        c_idx = _idx(ch_cols, c_link)
+        if p_idx is None or c_idx is None:
+            continue
+        m = _pmap(p_idx)
+        for cr in ch_rows:
+            pris = m.get(cr[c_idx])
+            if not pris:
+                continue
+            for ri in pris:
+                matched.add(ri)
+                pr = parent_rows[ri]
+                row = [None] * width
+                row[0] = disp
+                for j in range(n_parent):
+                    row[1 + j] = pr[j]
+                for k, c in enumerate(ch_cols):
+                    p = pos.get(c.lower())
+                    if p is not None and p > n_parent:  # child-union cols only
+                        row[p] = cr[k]
+                rows.append(row)
+
+    for ri, pr in enumerate(parent_rows):
+        if ri not in matched:
+            row = [None] * width
+            row[0] = "(parent only)"
+            for j in range(n_parent):
+                row[1 + j] = pr[j]
+            rows.append(row)
+
+    seen_rows, out = set(), []
+    for r in rows:
+        k = tuple('' if v is None else str(v) for v in r)
+        if k in seen_rows:
+            continue
+        seen_rows.add(k)
+        out.append(r)
+    return master_cols, out
+
+
 # ── Main entry point ───────────────────────────────────────────────────────────
 
-def run_sample(conn_str, s3, bucket, target_table, sample_size, actor="", source_db=None):
+def run_sample(conn_str, s3, bucket, target_table, sample_size, actor="",
+               source_db=None, combine_all=False):
     """
     Select `sample_size` random records from `target_table`, gather direct child
     records linked via each relationship's business key, write an Excel workbook
@@ -352,10 +440,9 @@ def run_sample(conn_str, s3, bucket, target_table, sample_size, actor="", source
             # example workbook's "Budget Balance MC2" sheet.
             _add_sheet(wb, _sheet_name(_short_name(target_table), used_sheets), p_cols, p_rows)
         else:
-            # One combined, flattened sheet per child: the parent's columns
-            # joined to that child's columns on the unique identifier. Shared
-            # columns appear once and duplicate rows are collapsed (per the
-            # client's "if data is repeating, ignore" instruction).
+            # Resolve + fetch every child once, then render either one combined
+            # sheet per child, or (combine_all) a single merged master sheet.
+            resolved = []
             for child, link_field in children:
                 c_schema, child_cols = _object_meta(cur, db, child)
                 if not child_cols:
@@ -389,16 +476,31 @@ def run_sample(conn_str, s3, bucket, target_table, sample_size, actor="", source
                     )
                     child_rows.extend(rows)
 
-                comb_cols, comb_rows = _combine(
-                    p_cols, p_rows, p_link, ch_cols, child_rows, c_link
-                )
-                _add_sheet(wb, _sheet_name(_short_name(child), used_sheets), comb_cols, comb_rows)
+                resolved.append({
+                    "child": child, "display": _short_name(child),
+                    "link_field": link_field, "p_link": p_link, "c_link": c_link,
+                    "ch_cols": ch_cols, "child_rows": child_rows,
+                })
                 child_summaries.append({
                     "child": child, "display": _short_name(child),
                     "link_field": link_field, "parent_column": p_link,
                     "child_column": c_link, "row_count": len(child_rows),
-                    "combined_row_count": len(comb_rows),
                 })
+
+            if combine_all and resolved:
+                # One master sheet: parent + all children unioned on the link
+                # field, so the client can sort/filter all data in one place.
+                children_data = [(r["display"], r["p_link"], r["ch_cols"],
+                                  r["child_rows"], r["c_link"]) for r in resolved]
+                m_cols, m_rows = _combine_all(p_cols, p_rows, children_data)
+                _add_sheet(wb, _sheet_name(_short_name(target_table), used_sheets), m_cols, m_rows)
+            else:
+                # One combined, flattened sheet per child.
+                for r in resolved:
+                    comb_cols, comb_rows = _combine(
+                        p_cols, p_rows, r["p_link"], r["ch_cols"], r["child_rows"], r["c_link"]
+                    )
+                    _add_sheet(wb, _sheet_name(r["display"], used_sheets), comb_cols, comb_rows)
 
             # If every child was unresolved, still write the parent sample so the
             # workbook isn't empty and the selection isn't lost.
@@ -423,6 +525,7 @@ def run_sample(conn_str, s3, bucket, target_table, sample_size, actor="", source
         "target_table": target_table,
         "target_display": _short_name(target_table),
         "source_db": db,
+        "combine_all": bool(combine_all),
         "requested_sample_size": sample_size,
         "selected_count": len(p_rows),
         "population": population,

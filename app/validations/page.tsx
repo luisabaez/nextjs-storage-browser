@@ -91,6 +91,7 @@ function ValidationsPage() {
     running: false, done: 0, total: 0,
   });
   const [setAllValue, setSetAllValue] = useState(DEFAULT_SIZE);
+  const [combineAll, setCombineAll] = useState(true);
 
   const [recentRuns, setRecentRuns] = useState<SampleRun[]>([]);
 
@@ -170,7 +171,7 @@ function ValidationsPage() {
       const resp = await fetch(`${LAMBDA_URL}?action=run_sampling`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ target_table: target, sample_size: size, actor: userEmail }),
+        body: JSON.stringify({ target_table: target, sample_size: size, actor: userEmail, combine_all: combineAll }),
       });
       const data: SampleRun = await resp.json();
       if (!data.ok) {
@@ -183,7 +184,7 @@ function ValidationsPage() {
       setRunStatus(prev => ({ ...prev, [target]: { state: 'error', error: e instanceof Error ? e.message : String(e) } }));
       return false;
     }
-  }, [sizes, userEmail]);
+  }, [sizes, userEmail, combineAll]);
 
   // Run every target that has a valid size, one at a time, with live progress.
   const runAll = async () => {
@@ -255,7 +256,10 @@ function ValidationsPage() {
               each target the system selects that many records at random, gathers the
               linked child records, and writes an Excel workbook per target to the{' '}
               <Link href={`/?path=${encodeURIComponent(SAMPLING_FOLDER)}`}>Sampling folder</Link>.
-              Expand a row to see which children get gathered.
+              Expand a row to see which children get gathered. With <em>Combine all data
+              into one sheet</em> on, the parent and every child are merged onto a single
+              sheet (joined on the link field) so all records are sortable and filterable
+              together.
             </p>
             <div className="val-note">
               <strong>Interim version.</strong> Sample size is a manual input (pending
@@ -269,19 +273,30 @@ function ValidationsPage() {
 
           {/* Batch toolbar */}
           <div className="val-toolbar">
-            <div className="val-setall">
-              <label htmlFor="setall">Set all sizes to</label>
-              <input
-                id="setall"
-                type="number"
-                min={1}
-                value={setAllValue}
-                onChange={e => setSetAllValue(e.target.value)}
-                disabled={anyRunning}
-              />
-              <button className="val-btn-secondary" onClick={applySetAll} disabled={anyRunning}>
-                Apply to all
-              </button>
+            <div className="val-toolbar-left">
+              <div className="val-setall">
+                <label htmlFor="setall">Set all sizes to</label>
+                <input
+                  id="setall"
+                  type="number"
+                  min={1}
+                  value={setAllValue}
+                  onChange={e => setSetAllValue(e.target.value)}
+                  disabled={anyRunning}
+                />
+                <button className="val-btn-secondary" onClick={applySetAll} disabled={anyRunning}>
+                  Apply to all
+                </button>
+              </div>
+              <label className="val-checkbox" title="Merge the parent and all child tables into one sheet, joined on the link field, so all data is sortable/filterable in one place.">
+                <input
+                  type="checkbox"
+                  checked={combineAll}
+                  onChange={e => setCombineAll(e.target.checked)}
+                  disabled={anyRunning}
+                />
+                Combine all data into one sheet
+              </label>
             </div>
             <div className="val-toolbar-right">
               {batch.running && (

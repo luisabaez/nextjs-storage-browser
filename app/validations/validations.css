@@ -218,7 +218,10 @@
   padding: 12px 16px;
   margin: 18px 0;
 }
+.val-toolbar-left { display: flex; flex-direction: column; gap: 10px; }
 .val-setall { display: flex; align-items: center; gap: 8px; }
+.val-checkbox { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 600; color: #374151; cursor: pointer; }
+.val-checkbox input { width: 15px; height: 15px; cursor: pointer; }
 .val-setall label { font-size: 13px; font-weight: 600; color: #374151; }
 .val-setall input {
   width: 90px; height: 36px; padding: 0 10px;

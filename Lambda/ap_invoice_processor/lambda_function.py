@@ -1574,13 +1574,14 @@ def lambda_handler(event, context):
             target_bucket = body.get("bucket") or DEFAULT_BUCKET
             actor = body.get("actor", "") or ""
             source_db = body.get("source_db") or None
+            combine_all = bool(body.get("combine_all"))
             if not target_table:
                 return {"statusCode": 400, "headers": headers,
                         "body": json.dumps({"ok": False, "error": "target_table required"})}
             conn_str = get_connection_string()
             res = sampling.run_sample(conn_str, s3_client, target_bucket,
                                       target_table, sample_size, actor=actor,
-                                      source_db=source_db)
+                                      source_db=source_db, combine_all=combine_all)
             return {"statusCode": 200 if res.get("ok") else 400,
                     "headers": headers,
                     "body": json.dumps(res, default=str)}
