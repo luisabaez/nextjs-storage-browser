@@ -205,6 +205,56 @@
 .val-link-sm { font-size: 12px; color: #2563eb; text-decoration: none; }
 .val-link-sm:hover { text-decoration: underline; }
 
+/* ── File-based sampling ── */
+.val-dropzone {
+  border: 2px dashed #cbd5e1;
+  border-radius: 12px;
+  padding: 30px 20px;
+  text-align: center;
+  cursor: pointer;
+  background: #f9fafb;
+  margin: 18px 0;
+  transition: border-color .15s, background .15s;
+}
+.val-dropzone:hover { border-color: #2563eb; background: #f5f8ff; }
+.val-dropzone.drag-over { border-color: #2563eb; background: #eff6ff; }
+.val-dropzone-icon { font-size: 32px; display: block; margin-bottom: 6px; }
+.val-dropzone p { margin: 2px 0; font-size: 14px; color: #374151; }
+.val-dropzone-hint { color: #9ca3af; font-size: 12.5px; }
+
+.val-files td { vertical-align: middle; }
+.val-files select, .val-files input {
+  height: 32px; padding: 0 8px; border: 1px solid #d1d5db;
+  border-radius: 6px; font-size: 13px; background: #fff; max-width: 100%;
+}
+.val-files select { min-width: 190px; }
+.val-select-empty { border-color: #f59e0b !important; background: #fffbeb !important; }
+.val-col-agency { width: 90px; }
+.val-col-agency input { width: 74px; }
+.val-col-num { width: 110px; text-align: right; font-variant-numeric: tabular-nums; }
+.val-col-class { width: 100px; text-align: center; }
+.val-col-gen { width: 190px; }
+.val-n { font-weight: 700; color: #065f46; }
+.val-file-name { font-size: 12.5px; font-family: var(--font-geist-mono, monospace); max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
+.val-file-err { color: #b91c1c; font-size: 11px; font-family: inherit; margin-top: 3px; }
+.val-gen-note { font-size: 11px; color: #6b7280; margin-top: 4px; }
+.val-remove { border: none; background: none; color: #9ca3af; font-size: 18px; cursor: pointer; line-height: 1; }
+.val-remove:hover { color: #b91c1c; }
+
+.val-spinner-dark { border-color: rgba(107,114,128,.35); border-top-color: #6b7280; margin-left: 8px; vertical-align: middle; }
+
+/* classification badges */
+.val-class { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 999px; letter-spacing: .02em; }
+.val-class-high { background: #fee2e2; color: #991b1b; }
+.val-class-moderate { background: #ffedd5; color: #9a3412; }
+.val-class-low { background: #dbeafe; color: #1e40af; }
+.val-class-auto { background: #dcfce7; color: #166534; }
+
+.val-framework { margin-top: 30px; }
+.val-framework h3 { font-size: 14px; font-weight: 700; margin: 0 0 6px; color: #374151; }
+.val-tiers td, .val-tiers th { font-size: 12.5px; }
+.val-tiers td:nth-child(n+2):nth-child(-n+5) { text-align: center; font-variant-numeric: tabular-nums; }
+
 /* Batch toolbar */
 .val-toolbar {
   display: flex;

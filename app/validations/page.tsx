@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Amplify } from 'aws-amplify';
 import { fetchUserAttributes } from 'aws-amplify/auth';
 import { withAuthenticator } from '@aws-amplify/ui-react';
@@ -9,91 +9,48 @@ import '../components/enhanced-file-browser.css';
 import './validations.css';
 import config from '../../amplify_outputs.json';
 import Link from 'next/link';
+import {
+  ENTITY_NAMES,
+  ENTITY_CLASSIFICATION,
+  TIERS,
+  tierForEntity,
+  computeSampleSize,
+  parseFilename,
+  selectSample,
+  readWorkbook,
+  buildAndDownload,
+  FileData,
+} from './sampling';
 
 Amplify.configure(config);
 
-// Same Lambda Function URL the rest of the app uses (AP-Invoice-Processor)
-const LAMBDA_URL = 'https://5ahxjcxhrcopng5hjgc2n6utxq0rwcmm.lambda-url.us-east-1.on.aws/';
-
 const SAMPLING_FOLDER = 'Sampling/';
-const DEFAULT_SIZE = '56';
-
-interface ChildRel {
-  table: string;
-  display: string;
-  link_field: string;
-}
-
-interface TargetInfo {
-  table: string;
-  display: string;
-  child_count: number;
-  children: ChildRel[];
-}
-
-interface ChildSummary {
-  child: string;
-  display: string;
-  link_field: string;
-  parent_column: string;
-  child_column: string;
-  row_count: number;
-}
-
-interface UnresolvedLink {
-  child: string;
-  link_field: string;
-  reason: string;
-}
-
-interface SampleRun {
-  ok?: boolean;
-  target_table: string;
-  target_display: string;
-  source_db?: string;
-  requested_sample_size: number;
-  selected_count: number;
-  population: number;
-  children: ChildSummary[];
-  unresolved_links: UnresolvedLink[];
-  child_total_rows: number;
-  actor: string;
-  created_at: string;
-  xlsx_key: string;
-  filename: string;
-  method: string;
-  download_url?: string;
-  error?: string;
-}
-
-type RunState = 'idle' | 'running' | 'done' | 'error';
-interface RunCell {
-  state: RunState;
-  result?: SampleRun;
-  error?: string;
-}
 
 type TabId = 'sampling';
+
+interface FileEntry {
+  id: string;
+  fileName: string;
+  entity: string; // entity key from ENTITY_CLASSIFICATION, or '' if unknown
+  agency: string;
+  N: number;
+  loading: boolean;
+  error: string;
+  data: FileData | null;
+  generated: { seed: number; n: number; at: string } | null;
+}
+
+function pad(n: number) { return n < 10 ? `0${n}` : `${n}`; }
+function stamp(d: Date) {
+  return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+}
 
 function ValidationsPage() {
   const [userEmail, setUserEmail] = useState('');
   const [activeTab] = useState<TabId>('sampling');
-
-  const [targets, setTargets] = useState<TargetInfo[]>([]);
-  const [targetsLoading, setTargetsLoading] = useState(true);
-  const [error, setError] = useState('');
-
-  // Per-target form + run state, keyed by target table name
-  const [sizes, setSizes] = useState<Record<string, string>>({});
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
-  const [runStatus, setRunStatus] = useState<Record<string, RunCell>>({});
-  const [batch, setBatch] = useState<{ running: boolean; done: number; total: number }>({
-    running: false, done: 0, total: 0,
-  });
-  const [setAllValue, setSetAllValue] = useState(DEFAULT_SIZE);
-  const [combineAll, setCombineAll] = useState(true);
-
-  const [recentRuns, setRecentRuns] = useState<SampleRun[]>([]);
+  const [entries, setEntries] = useState<FileEntry[]>([]);
+  const [isDragOver, setIsDragOver] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     (async () => {
@@ -106,121 +63,57 @@ function ValidationsPage() {
     })();
   }, []);
 
-  // Load target tables and seed each with the default sample size
-  useEffect(() => {
-    (async () => {
-      setTargetsLoading(true);
+  const patch = useCallback((id: string, p: Partial<FileEntry>) => {
+    setEntries(prev => prev.map(e => (e.id === id ? { ...e, ...p } : e)));
+  }, []);
+
+  const addFiles = useCallback(async (files: FileList | File[]) => {
+    const list = Array.from(files).filter(f => /\.(xlsx|xlsm|xls)$/i.test(f.name));
+    for (const file of list) {
+      const id = `f-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const parsed = parseFilename(file.name);
+      setEntries(prev => [...prev, {
+        id, fileName: file.name,
+        entity: parsed.entity || '', agency: parsed.agency,
+        N: 0, loading: true, error: '', data: null, generated: null,
+      }]);
       try {
-        const resp = await fetch(`${LAMBDA_URL}?action=sampling_targets`);
-        const data = await resp.json();
-        if (data.ok) {
-          const list: TargetInfo[] = data.targets || [];
-          setTargets(list);
-          setSizes(Object.fromEntries(list.map(t => [t.table, DEFAULT_SIZE])));
-        } else {
-          setError(data.error || 'Failed to load target tables');
-        }
-      } catch (e) {
-        setError(`Failed to load target tables: ${e instanceof Error ? e.message : String(e)}`);
-      } finally {
-        setTargetsLoading(false);
+        const data = await readWorkbook(file);
+        patch(id, { data, N: data.rows.length, loading: false });
+      } catch (err) {
+        patch(id, { loading: false, error: err instanceof Error ? err.message : String(err) });
       }
-    })();
-  }, []);
-
-  const loadRecentRuns = useCallback(async () => {
-    try {
-      const resp = await fetch(`${LAMBDA_URL}?action=sampling_runs`);
-      const data = await resp.json();
-      if (data.ok) setRecentRuns(data.runs || []);
-    } catch (e) {
-      console.error('Failed to load recent runs', e);
     }
-  }, []);
+  }, [patch]);
 
-  useEffect(() => { loadRecentRuns(); }, [loadRecentRuns]);
-
-  const triggerDownload = (url: string, filename: string) => {
-    // Single user-initiated download. ResponseContentDisposition on the
-    // presigned URL forces the attachment; no target=_blank (popup-blocker safe).
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+  const onDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragOver(false);
+    if (e.dataTransfer.files?.length) addFiles(e.dataTransfer.files);
   };
 
-  const toggleExpand = (table: string) =>
-    setExpanded(prev => ({ ...prev, [table]: !prev[table] }));
-
-  const applySetAll = () => {
-    const v = setAllValue.trim();
-    setSizes(prev => Object.fromEntries(Object.keys(prev).map(k => [k, v])));
+  const generate = (entry: FileEntry) => {
+    if (!entry.data || !entry.entity) return;
+    const tier = tierForEntity(entry.entity);
+    if (!tier) return;
+    const n = computeSampleSize(entry.N, tier);
+    const seed = Math.floor(Math.random() * 2 ** 32) >>> 0;
+    const selectedIndices = selectSample(entry.N, n, seed);
+    const now = new Date();
+    const agency = entry.agency || 'NA';
+    const fname = `${entry.entity.replace(/\s+/g, '_')}_${agency}_Sample_${stamp(now)}.xlsx`;
+    buildAndDownload(entry.data, {
+      entity: entry.entity, agency, tier, N: entry.N, n, seed,
+      generatedAt: now.toISOString(), generatedBy: userEmail, selectedIndices,
+    }, fname);
+    patch(entry.id, { generated: { seed, n, at: now.toLocaleString() } });
   };
 
-  // Run a single target. Returns true on success. Updates per-row status.
-  const runOne = useCallback(async (target: string): Promise<boolean> => {
-    const size = parseInt(sizes[target] ?? '', 10);
-    if (!Number.isFinite(size) || size < 1) {
-      setRunStatus(prev => ({ ...prev, [target]: { state: 'error', error: 'No sample size' } }));
-      return false;
-    }
-    setRunStatus(prev => ({ ...prev, [target]: { state: 'running' } }));
-    try {
-      const resp = await fetch(`${LAMBDA_URL}?action=run_sampling`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ target_table: target, sample_size: size, actor: userEmail, combine_all: combineAll }),
-      });
-      const data: SampleRun = await resp.json();
-      if (!data.ok) {
-        setRunStatus(prev => ({ ...prev, [target]: { state: 'error', error: data.error || 'Failed' } }));
-        return false;
-      }
-      setRunStatus(prev => ({ ...prev, [target]: { state: 'done', result: data } }));
-      return true;
-    } catch (e) {
-      setRunStatus(prev => ({ ...prev, [target]: { state: 'error', error: e instanceof Error ? e.message : String(e) } }));
-      return false;
-    }
-  }, [sizes, userEmail, combineAll]);
-
-  // Run every target that has a valid size, one at a time, with live progress.
-  const runAll = async () => {
-    setError('');
-    const queue = targets
-      .map(t => t.table)
-      .filter(tbl => {
-        const n = parseInt(sizes[tbl] ?? '', 10);
-        return Number.isFinite(n) && n >= 1;
-      });
-    if (queue.length === 0) {
-      setError('Enter a sample size of 1 or more for at least one target.');
-      return;
-    }
-    setBatch({ running: true, done: 0, total: queue.length });
-    for (let i = 0; i < queue.length; i++) {
-      await runOne(queue[i]);
-      setBatch(prev => ({ ...prev, done: i + 1 }));
-    }
-    setBatch(prev => ({ ...prev, running: false }));
-    loadRecentRuns();
+  const nFor = (entry: FileEntry): number | null => {
+    const tier = entry.entity ? tierForEntity(entry.entity) : null;
+    if (!tier || !entry.N) return null;
+    return computeSampleSize(entry.N, tier);
   };
-
-  const runSingle = async (target: string) => {
-    setError('');
-    await runOne(target);
-    loadRecentRuns();
-  };
-
-  const fmtDate = (iso: string) => {
-    if (!iso) return '';
-    const d = new Date(iso);
-    return isNaN(d.getTime()) ? iso : d.toLocaleString();
-  };
-
-  const anyRunning = batch.running;
 
   return (
     <div className="val-page">
@@ -252,206 +145,142 @@ function ValidationsPage() {
           <div className="val-intro">
             <h2>Record Sampling</h2>
             <p>
-              Set a sample size for each target table and run them all at once. For
-              each target the system selects that many records at random, gathers the
-              linked child records, and writes an Excel workbook per target to the{' '}
-              <Link href={`/?path=${encodeURIComponent(SAMPLING_FOLDER)}`}>Sampling folder</Link>.
-              Expand a row to see which children get gathered. With <em>Combine all data
-              into one sheet</em> on, the parent and every child are merged onto a single
-              sheet (joined on the link field) so all records are sortable and filterable
-              together.
+              Drop one or more consolidated master files (one per agency). Each file&rsquo;s
+              population is sized with the Data Validation Framework V2 formula for its entity
+              classification, a simple random sample is drawn, and a workbook with the{' '}
+              <strong>Sample</strong>, full <strong>Population</strong>, and a{' '}
+              <strong>Sizing/Evidence</strong> sheet is produced. Files are read and sampled in
+              your browser — the data never leaves your machine.
             </p>
             <div className="val-note">
-              <strong>Interim version.</strong> Sample size is a manual input (pending
-              Ethree&rsquo;s methodology), selection is random (not yet reproducible),
-              and only each target&rsquo;s direct children are gathered. A blank or 0
-              size skips that target.
+              n = N·Z²·p·(1−p) / [ e²·(N−1) + Z²·p·(1−p) ], rounded up. Classification tiers:
+              {' '}HIGH 99% · MODERATE 95% · LOW 90% · AUTO 85%. Selection uses a recorded random
+              seed so any sample can be reproduced.
             </div>
           </div>
 
-          {error && <div className="val-error">{error}</div>}
-
-          {/* Batch toolbar */}
-          <div className="val-toolbar">
-            <div className="val-toolbar-left">
-              <div className="val-setall">
-                <label htmlFor="setall">Set all sizes to</label>
-                <input
-                  id="setall"
-                  type="number"
-                  min={1}
-                  value={setAllValue}
-                  onChange={e => setSetAllValue(e.target.value)}
-                  disabled={anyRunning}
-                />
-                <button className="val-btn-secondary" onClick={applySetAll} disabled={anyRunning}>
-                  Apply to all
-                </button>
-              </div>
-              <label className="val-checkbox" title="Merge the parent and all child tables into one sheet, joined on the link field, so all data is sortable/filterable in one place.">
-                <input
-                  type="checkbox"
-                  checked={combineAll}
-                  onChange={e => setCombineAll(e.target.checked)}
-                  disabled={anyRunning}
-                />
-                Combine all data into one sheet
-              </label>
-            </div>
-            <div className="val-toolbar-right">
-              {batch.running && (
-                <span className="val-progress">
-                  <span className="val-spinner" /> Running {batch.done} / {batch.total}…
-                </span>
-              )}
-              <button className="val-run-btn" onClick={runAll} disabled={anyRunning || targetsLoading}>
-                {batch.running ? 'Running…' : '▶ Run All'}
-              </button>
-            </div>
+          {/* Drop zone */}
+          <div
+            className={`val-dropzone ${isDragOver ? 'drag-over' : ''}`}
+            onDragOver={e => { e.preventDefault(); setIsDragOver(true); }}
+            onDragLeave={() => setIsDragOver(false)}
+            onDrop={onDrop}
+            onClick={() => fileInputRef.current?.click()}
+          >
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".xlsx,.xlsm,.xls"
+              multiple
+              style={{ display: 'none' }}
+              onChange={e => { if (e.target.files) addFiles(e.target.files); e.target.value = ''; }}
+            />
+            <span className="val-dropzone-icon">📥</span>
+            <p><strong>Drop consolidated master files here</strong> or click to browse</p>
+            <p className="val-dropzone-hint">.xlsx — one file per agency (e.g. Consolidated_Suppliers_015.xlsx)</p>
           </div>
 
-          {/* Targets table */}
-          {targetsLoading ? (
-            <div className="val-loading"><span className="val-spinner" /> Loading target tables…</div>
-          ) : (
-            <table className="val-table val-targets">
+          {/* Files table */}
+          {entries.length > 0 && (
+            <table className="val-table val-files">
               <thead>
                 <tr>
+                  <th>File</th>
+                  <th>Entity</th>
+                  <th className="val-col-agency">Agency</th>
+                  <th className="val-col-num">Population (N)</th>
+                  <th className="val-col-class">Class</th>
+                  <th className="val-col-num">Sample (n)</th>
+                  <th className="val-col-gen">Action</th>
                   <th className="val-col-caret"></th>
-                  <th>Target table</th>
-                  <th className="val-col-children">Children</th>
-                  <th className="val-col-size">Sample size</th>
-                  <th className="val-col-status">Status</th>
-                  <th className="val-col-result">Result</th>
                 </tr>
               </thead>
               <tbody>
-                {targets.map(t => {
-                  const cell = runStatus[t.table] || { state: 'idle' as RunState };
-                  const isOpen = !!expanded[t.table];
+                {entries.map(entry => {
+                  const cls = entry.entity ? ENTITY_CLASSIFICATION[entry.entity] : null;
+                  const n = nFor(entry);
                   return (
-                    <React.Fragment key={t.table}>
-                      <tr className="val-target-row">
-                        <td className="val-col-caret">
-                          {t.child_count > 0 && (
-                            <button
-                              className="val-caret"
-                              onClick={() => toggleExpand(t.table)}
-                              aria-label={isOpen ? 'Collapse' : 'Expand'}
-                            >
-                              {isOpen ? '▾' : '▸'}
-                            </button>
-                          )}
-                        </td>
-                        <td className="val-target-name">{t.display}</td>
-                        <td className="val-col-children">
-                          {t.child_count > 0 ? (
-                            <button className="val-children-link" onClick={() => toggleExpand(t.table)}>
-                              {t.child_count}
-                            </button>
-                          ) : <span className="val-muted">0</span>}
-                        </td>
-                        <td className="val-col-size">
-                          <input
-                            type="number"
-                            min={1}
-                            value={sizes[t.table] ?? ''}
-                            onChange={e => setSizes(prev => ({ ...prev, [t.table]: e.target.value }))}
-                            disabled={anyRunning}
-                          />
-                        </td>
-                        <td className="val-col-status">
-                          {cell.state === 'running' && <span className="val-status running"><span className="val-spinner" /> Running…</span>}
-                          {cell.state === 'done' && (
-                            <span className="val-status done">
-                              ✓ {cell.result!.selected_count.toLocaleString()} sel
-                              {cell.result!.population ? ` / ${cell.result!.population.toLocaleString()}` : ''}
-                            </span>
-                          )}
-                          {cell.state === 'error' && <span className="val-status error" title={cell.error}>✕ {cell.error}</span>}
-                          {cell.state === 'idle' && (
-                            <button className="val-btn-row" onClick={() => runSingle(t.table)} disabled={anyRunning}>
-                              Run
-                            </button>
-                          )}
-                        </td>
-                        <td className="val-col-result">
-                          {cell.state === 'done' && cell.result && (
-                            <div className="val-row-result">
-                              <span className="val-muted">{cell.result.child_total_rows.toLocaleString()} child rows</span>
-                              {cell.result.download_url && (
-                                <button
-                                  className="val-download-sm"
-                                  onClick={() => triggerDownload(cell.result!.download_url!, cell.result!.filename)}
-                                >
-                                  ⬇
-                                </button>
-                              )}
-                              {cell.result.unresolved_links.length > 0 && (
-                                <span className="val-unresolved-badge" title={cell.result.unresolved_links.map(u => `${u.child}: ${u.reason}`).join('\n')}>
-                                  ⚠ {cell.result.unresolved_links.length} unresolved
-                                </span>
-                              )}
-                            </div>
-                          )}
-                        </td>
-                      </tr>
-                      {isOpen && t.children.length > 0 && (
-                        <tr className="val-children-row">
-                          <td></td>
-                          <td colSpan={5}>
-                            <div className="val-children-box">
-                              <div className="val-children-title">Children gathered with each sampled record:</div>
-                              <table className="val-child-table">
-                                <thead><tr><th>Child table</th><th>Link field</th></tr></thead>
-                                <tbody>
-                                  {t.children.map(c => (
-                                    <tr key={c.table}>
-                                      <td>{c.display}</td>
-                                      <td>{c.link_field}</td>
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </table>
-                            </div>
-                          </td>
-                        </tr>
-                      )}
-                    </React.Fragment>
+                    <tr key={entry.id}>
+                      <td className="val-file-name" title={entry.fileName}>
+                        {entry.fileName}
+                        {entry.loading && <span className="val-spinner val-spinner-dark" />}
+                        {entry.error && <div className="val-file-err">{entry.error}</div>}
+                      </td>
+                      <td>
+                        <select
+                          value={entry.entity}
+                          onChange={e => patch(entry.id, { entity: e.target.value, generated: null })}
+                          className={entry.entity ? '' : 'val-select-empty'}
+                        >
+                          <option value="">— select entity —</option>
+                          {ENTITY_NAMES.map(name => (
+                            <option key={name} value={name}>{name}</option>
+                          ))}
+                        </select>
+                      </td>
+                      <td className="val-col-agency">
+                        <input
+                          type="text"
+                          value={entry.agency}
+                          onChange={e => patch(entry.id, { agency: e.target.value })}
+                          placeholder="—"
+                        />
+                      </td>
+                      <td className="val-col-num">{entry.N ? entry.N.toLocaleString() : (entry.loading ? '…' : '0')}</td>
+                      <td className="val-col-class">
+                        {cls ? <span className={`val-class val-class-${cls.toLowerCase()}`}>{cls}</span> : <span className="val-muted">—</span>}
+                      </td>
+                      <td className="val-col-num val-n">{n ?? '—'}</td>
+                      <td className="val-col-gen">
+                        <button
+                          className="val-btn-row"
+                          disabled={!entry.data || !entry.entity || !entry.N}
+                          onClick={() => generate(entry)}
+                        >
+                          {entry.generated ? '↻ Re-generate' : '⬇ Generate'}
+                        </button>
+                        {entry.generated && (
+                          <div className="val-gen-note" title={`seed ${entry.generated.seed}`}>
+                            {entry.generated.n} rows · seed {entry.generated.seed}
+                          </div>
+                        )}
+                      </td>
+                      <td className="val-col-caret">
+                        <button
+                          className="val-remove"
+                          onClick={() => setEntries(prev => prev.filter(e => e.id !== entry.id))}
+                          aria-label="Remove"
+                        >×</button>
+                      </td>
+                    </tr>
                   );
                 })}
               </tbody>
             </table>
           )}
 
-          {/* Recent runs */}
-          <div className="val-recent">
-            <h3>Recent sampling runs</h3>
-            {recentRuns.length === 0 ? (
-              <p className="val-muted">No sampling runs yet.</p>
-            ) : (
-              <table className="val-table">
-                <thead>
-                  <tr><th>When</th><th>Target</th><th>Selected</th><th>Children</th><th>By</th><th></th></tr>
-                </thead>
-                <tbody>
-                  {recentRuns.map(r => (
-                    <tr key={r.xlsx_key}>
-                      <td>{fmtDate(r.created_at)}</td>
-                      <td>{r.target_display}</td>
-                      <td>{(r.selected_count ?? 0).toLocaleString()}</td>
-                      <td>{(r.child_total_rows ?? 0).toLocaleString()} rows / {r.children?.length ?? 0} tables</td>
-                      <td className="val-muted">{r.actor || '—'}</td>
-                      <td>
-                        <Link href={`/?path=${encodeURIComponent(SAMPLING_FOLDER)}`} className="val-link-sm">
-                          View in folder
-                        </Link>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
+          {/* Framework reference */}
+          <div className="val-framework">
+            <h3>Framework V2 — classification parameters</h3>
+            <table className="val-table val-tiers">
+              <thead>
+                <tr><th>Class</th><th>Confidence</th><th>Z</th><th>Margin (e)</th><th>Expected error (p)</th><th>Entities</th></tr>
+              </thead>
+              <tbody>
+                {Object.values(TIERS).map(t => (
+                  <tr key={t.name}>
+                    <td><span className={`val-class val-class-${t.name.toLowerCase()}`}>{t.name}</span></td>
+                    <td>{Math.round(t.confidence * 100)}%</td>
+                    <td>{t.Z}</td>
+                    <td>{(t.e * 100).toFixed(t.e < 0.1 ? 0 : 0)}%</td>
+                    <td>{(t.p * 100).toFixed(2)}%</td>
+                    <td className="val-muted">
+                      {ENTITY_NAMES.filter(e => ENTITY_CLASSIFICATION[e] === t.name).map(e => e.toLowerCase()).join(', ')}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </div>
       )}
