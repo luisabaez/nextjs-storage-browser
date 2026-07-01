@@ -22,9 +22,11 @@ import {
   buildWorkbook,
   workbookToArray,
   downloadWorkbook,
+  matchEntity,
   FileData,
 } from './sampling';
 import { parseAgencyReport, AgencyReport, buildGroups } from './dashboard';
+import { RawFile, MergeResult, groupRawFiles, mergeGroup, resultToFileData, downloadMaster } from './merge';
 
 Amplify.configure(config);
 
@@ -49,6 +51,7 @@ interface FileEntry {
   genStatus: GenStatus;
   genError: string;
   generated: { seed: number; n: number; at: string } | null;
+  merged: MergeResult | null;
 }
 
 function pad(n: number) { return n < 10 ? `0${n}` : `${n}`; }
@@ -133,7 +136,7 @@ function ValidationsPage() {
         id, fileName: file.name,
         entity: parsed.entity || '', agency: parsed.agency,
         N: 0, loading: true, error: '', data: null,
-        genStatus: 'idle', genError: '', generated: null,
+        genStatus: 'idle', genError: '', generated: null, merged: null,
       }]);
       try {
         const data = await readWorkbook(file);
@@ -148,6 +151,43 @@ function ValidationsPage() {
     e.preventDefault();
     setIsDragOver(false);
     if (e.dataTransfer.files?.length) addFiles(e.dataTransfer.files);
+  };
+
+  // ── Merge raw parent + child files → master, added straight to the sampling list ──
+  const [isRawDragOver, setIsRawDragOver] = useState(false);
+  const rawInputRef = useRef<HTMLInputElement>(null);
+
+  const addRawFiles = useCallback(async (files: FileList | File[]) => {
+    const list = Array.from(files).filter(f => /\.(xlsx|xlsm|xls)$/i.test(f.name));
+    if (!list.length) return;
+    const raws: RawFile[] = [];
+    for (const file of list) {
+      try { raws.push({ name: file.name, data: await readWorkbook(file) }); }
+      catch (e) { console.error('read failed', file.name, e); }
+    }
+    for (const g of groupRawFiles(raws)) {
+      try {
+        const result = mergeGroup(g);
+        const id = `m-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        setEntries(prev => [...prev, {
+          id,
+          fileName: `Consolidated_${result.entityToken}_${result.bu || 'NA'}`,
+          entity: matchEntity(result.entityToken) || '',
+          agency: result.bu,
+          N: result.recordCount,
+          loading: false, error: '', data: resultToFileData(result),
+          genStatus: 'idle', genError: '', generated: null, merged: result,
+        }]);
+      } catch (e) {
+        console.error('merge failed', e);
+      }
+    }
+  }, []);
+
+  const onRawDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsRawDragOver(false);
+    if (e.dataTransfer.files?.length) addRawFiles(e.dataTransfer.files);
   };
 
   // ── Sampling: generate → upload to Local (full) + Client (no Sizing) + local download ──
@@ -313,6 +353,26 @@ function ValidationsPage() {
             <p className="val-dropzone-hint">.xlsx — one file per agency (e.g. Consolidated_Suppliers_015.xlsx)</p>
           </div>
 
+          <div
+            className={`val-dropzone val-dropzone-alt ${isRawDragOver ? 'drag-over' : ''}`}
+            onDragOver={e => { e.preventDefault(); setIsRawDragOver(true); }}
+            onDragLeave={() => setIsRawDragOver(false)}
+            onDrop={onRawDrop}
+            onClick={() => rawInputRef.current?.click()}
+          >
+            <input
+              ref={rawInputRef}
+              type="file"
+              accept=".xlsx,.xlsm,.xls"
+              multiple
+              style={{ display: 'none' }}
+              onChange={e => { if (e.target.files) addRawFiles(e.target.files); e.target.value = ''; }}
+            />
+            <span className="val-dropzone-icon">🧩</span>
+            <p><strong>Or drop the raw parent + child files</strong> — they&rsquo;ll be merged into a master on the common identifier</p>
+            <p className="val-dropzone-hint">e.g. the CV_SCM_SUPPLIER_… set for one agency; grouped by agency automatically</p>
+          </div>
+
           {entries.length > 0 && (
             <table className="val-table val-files">
               <thead>
@@ -337,6 +397,16 @@ function ValidationsPage() {
                         {entry.fileName}
                         {entry.loading && <span className="val-spinner val-spinner-dark" />}
                         {entry.error && <div className="val-file-err">{entry.error}</div>}
+                        {entry.merged && (
+                          <div className="val-merged-note">
+                            merged {entry.merged.children.length + 1} files ·{' '}
+                            {entry.merged.children.map(c => `${c.label}${c.strategy === 'aggregate' ? '∑' : ''}`).join(', ') || 'parent only'}
+                            <button
+                              className="val-link-btn"
+                              onClick={() => downloadMaster(entry.merged!, `${entry.fileName}.xlsx`)}
+                            >⬇ master</button>
+                          </div>
+                        )}
                       </td>
                       <td>
                         <select

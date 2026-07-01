@@ -221,6 +221,13 @@
 .val-dropzone-icon { font-size: 32px; display: block; margin-bottom: 6px; }
 .val-dropzone p { margin: 2px 0; font-size: 14px; color: #374151; }
 .val-dropzone-hint { color: #9ca3af; font-size: 12.5px; }
+.val-dropzone-alt { margin-top: -6px; border-style: dashed; border-color: #d8b4fe; background: #faf5ff; }
+.val-dropzone-alt:hover { border-color: #9333ea; background: #f5ecff; }
+.val-dropzone-alt.drag-over { border-color: #9333ea; background: #f3e8ff; }
+
+.val-merged-note { font-size: 11px; color: #6b7280; margin-top: 4px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.val-link-btn { border: none; background: none; color: #2563eb; font-size: 11px; font-weight: 600; cursor: pointer; padding: 0; }
+.val-link-btn:hover { text-decoration: underline; }
 
 .val-files td { vertical-align: middle; }
 .val-files select, .val-files input {
