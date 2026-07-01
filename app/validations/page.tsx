@@ -24,7 +24,7 @@ import {
   downloadWorkbook,
   FileData,
 } from './sampling';
-import { parseAgencyReport, AgencyReport } from './dashboard';
+import { parseAgencyReport, AgencyReport, buildGroups } from './dashboard';
 
 Amplify.configure(config);
 
@@ -236,15 +236,15 @@ function ValidationsPage() {
     return 'val-st-other';
   };
 
-  const filteredBUs = report
-    ? report.bus
-        .filter(b => {
-          const q = filter.trim().toLowerCase();
-          return !q || b.unit.toLowerCase().includes(q) || b.name.toLowerCase().includes(q);
-        })
-        .slice()
-        .sort((a, b) => a.pct - b.pct || a.unit.localeCompare(b.unit))
-    : [];
+  const groups = report ? buildGroups(report.bus) : [];
+  const filteredGroups = groups
+    .filter(g => {
+      const q = filter.trim().toLowerCase();
+      if (!q) return true;
+      return g.code.toLowerCase().includes(q) || g.name.toLowerCase().includes(q) ||
+        g.members.some(m => m.unit.toLowerCase().includes(q) || m.name.toLowerCase().includes(q));
+    })
+    .sort((a, b) => a.pct - b.pct || a.code.localeCompare(b.code));
 
   return (
     <div className="val-page">
@@ -445,7 +445,7 @@ function ValidationsPage() {
                     <span className="val-legend-item"><i className="val-dot val-dot-pending" /> Pending <b>{report.totals.pending}</b></span>
                   </div>
                   <div className="val-cards">
-                    <div className="val-card"><span className="val-card-num">{report.bus.length}</span><span className="val-card-label">Business Units</span></div>
+                    <div className="val-card"><span className="val-card-num">{groups.length}</span><span className="val-card-label">Business Units</span></div>
                     <div className="val-card"><span className="val-card-num">{report.totals.attached}</span><span className="val-card-label">Entities attached</span></div>
                     <div className="val-card"><span className="val-card-num">{Math.round(report.totals.pct * 100)}%</span><span className="val-card-label">Overall complete</span></div>
                   </div>
@@ -457,7 +457,7 @@ function ValidationsPage() {
 
               <div className="val-dash-controls">
                 <input className="val-search" placeholder="Filter by BU number or name…" value={filter} onChange={e => setFilter(e.target.value)} />
-                <span className="val-muted">{filteredBUs.length} of {report.bus.length} · sorted by least complete</span>
+                <span className="val-muted">{filteredGroups.length} of {groups.length} · sorted by least complete</span>
               </div>
 
               <table className="val-table val-bu">
@@ -474,40 +474,53 @@ function ValidationsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredBUs.map(bu => {
-                    const open = !!expanded[bu.unit];
-                    const pct = Math.round(bu.pct * 100);
+                  {filteredGroups.map(g => {
+                    const open = !!expanded[g.code];
+                    const pct = Math.round(g.pct * 100);
                     return (
-                      <React.Fragment key={bu.unit}>
-                        <tr className="val-bu-row" onClick={() => setExpanded(p => ({ ...p, [bu.unit]: !p[bu.unit] }))}>
+                      <React.Fragment key={g.code}>
+                        <tr className="val-bu-row" onClick={() => setExpanded(p => ({ ...p, [g.code]: !p[g.code] }))}>
                           <td className="val-col-caret"><span className="val-caret">{open ? '▾' : '▸'}</span></td>
-                          <td className="val-bu-unit">{bu.unit}</td>
-                          <td className="val-bu-name" title={bu.name}>{bu.name}</td>
+                          <td className="val-bu-unit">
+                            {g.code}
+                            {g.multi && <span className="val-multi-badge" title={`${g.members.length} codes grouped`}>+{g.members.length - 1}</span>}
+                          </td>
+                          <td className="val-bu-name" title={g.name}>{g.name}</td>
                           <td className="val-col-progress">
                             <div className="val-progress"><div className={`val-progress-bar ${pct === 100 ? 'full' : ''}`} style={{ width: `${pct}%` }} /></div>
                             <span className="val-progress-pct">{pct}%</span>
                           </td>
-                          <td className="val-col-num">{bu.completed}</td>
-                          <td className="val-col-num">{bu.partial || ''}</td>
-                          <td className="val-col-num">{bu.pending ? <span className="val-pending-count">{bu.pending}</span> : ''}</td>
-                          <td className="val-col-num">{bu.total}</td>
+                          <td className="val-col-num">{g.completed}</td>
+                          <td className="val-col-num">{g.partial || ''}</td>
+                          <td className="val-col-num">{g.pending ? <span className="val-pending-count">{g.pending}</span> : ''}</td>
+                          <td className="val-col-num">{g.total}</td>
                         </tr>
                         {open && (
                           <tr className="val-bu-detail-row">
                             <td></td>
                             <td colSpan={7}>
-                              <div className="val-entity-grid">
-                                {report.entities.filter(e => bu.statuses[e]).map(e => (
-                                  <span key={e} className={`val-entity-badge ${statusClass(bu.statuses[e])}`}>
-                                    {e}<span className="val-entity-status">{bu.statuses[e]}</span>
-                                  </span>
-                                ))}
-                              </div>
-                              {bu.completed < bu.total && (
-                                <div className="val-missing">
-                                  Outstanding: {report.entities.filter(e => bu.statuses[e] && bu.statuses[e].toLowerCase() !== 'completed').join(', ')}
+                              {g.members.map(m => (
+                                <div key={m.unit} className="val-member">
+                                  {g.multi && (
+                                    <div className="val-member-head">
+                                      <span className="val-member-code">{m.unit}</span> {m.name}
+                                      <span className="val-member-pct">{Math.round(m.pct * 100)}% · {m.completed}/{m.total}</span>
+                                    </div>
+                                  )}
+                                  <div className="val-entity-grid">
+                                    {report.entities.filter(e => m.statuses[e]).map(e => (
+                                      <span key={e} className={`val-entity-badge ${statusClass(m.statuses[e])}`}>
+                                        {e}<span className="val-entity-status">{m.statuses[e]}</span>
+                                      </span>
+                                    ))}
+                                  </div>
+                                  {m.completed < m.total && (
+                                    <div className="val-missing">
+                                      Outstanding: {report.entities.filter(e => m.statuses[e] && m.statuses[e].toLowerCase() !== 'completed').join(', ')}
+                                    </div>
+                                  )}
                                 </div>
-                              )}
+                              ))}
                             </td>
                           </tr>
                         )}

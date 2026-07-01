@@ -23,6 +23,59 @@ export interface AgencyReport {
   totals: { attached: number; completed: number; partial: number; pending: number; pct: number };
 }
 
+// Codes that are the same Business Unit under a different source system or
+// division, mapped to their parent BU. Extend as future reports add more.
+export const BU_ALIASES: Record<string, string> = {
+  '5001': '050',   // Recursos Naturales (FIMAS) -> DRNA (050)
+  '450121': '045', // DSP - Negociado 911 (division) -> DSP (045)
+};
+
+export interface BUGroup {
+  code: string; // parent BU code
+  name: string;
+  members: BURow[]; // parent row first, then aliased rows
+  completed: number;
+  partial: number;
+  pending: number;
+  total: number;
+  pct: number;
+  multi: boolean;
+}
+
+// Group BU rows so aliased codes roll up under their parent. Totals are the sum
+// across members (rows are kept, nothing is merged/deduped).
+export function buildGroups(bus: BURow[], aliases: Record<string, string> = BU_ALIASES): BUGroup[] {
+  const byCode = new Map<string, BURow>();
+  bus.forEach(b => byCode.set(b.unit, b));
+  const parentOf = (code: string) => aliases[code] || code;
+
+  const groups = new Map<string, BURow[]>();
+  for (const b of bus) {
+    const p = parentOf(b.unit);
+    if (!groups.has(p)) groups.set(p, []);
+    groups.get(p)!.push(b);
+  }
+
+  const result: BUGroup[] = [];
+  groups.forEach((membersRaw, code) => {
+    const members = membersRaw.slice().sort((a, b) =>
+      a.unit === code ? -1 : b.unit === code ? 1 : a.unit.localeCompare(b.unit));
+    const parent = byCode.get(code);
+    const completed = members.reduce((s, m) => s + m.completed, 0);
+    const partial = members.reduce((s, m) => s + m.partial, 0);
+    const pending = members.reduce((s, m) => s + m.pending, 0);
+    const total = members.reduce((s, m) => s + m.total, 0);
+    result.push({
+      code,
+      name: parent?.name || members[0].name,
+      members, completed, partial, pending, total,
+      pct: total ? completed / total : 0,
+      multi: members.length > 1,
+    });
+  });
+  return result;
+}
+
 const ENTITY_START = 2; // column C (0-based)
 
 export function parseAgencyReport(buf: ArrayBuffer): AgencyReport {
