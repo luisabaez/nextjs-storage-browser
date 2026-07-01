@@ -255,6 +255,57 @@
 .val-tiers td, .val-tiers th { font-size: 12.5px; }
 .val-tiers td:nth-child(n+2):nth-child(-n+5) { text-align: center; font-variant-numeric: tabular-nums; }
 
+/* ── BU Dashboard ── */
+.val-dash-top {
+  display: flex; gap: 28px; align-items: center; flex-wrap: wrap;
+  background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 12px;
+  padding: 20px 24px; margin: 6px 0 18px;
+}
+.val-donut { width: 150px; height: 150px; }
+.val-donut-pct { font-size: 34px; font-weight: 800; fill: #111827; }
+.val-donut-sub { font-size: 13px; fill: #6b7280; }
+.val-dash-stats { flex: 1; display: flex; flex-direction: column; gap: 12px; min-width: 260px; }
+.val-legend { display: flex; gap: 18px; flex-wrap: wrap; font-size: 13px; color: #374151; }
+.val-legend-item { display: inline-flex; align-items: center; gap: 6px; }
+.val-legend-item b { font-variant-numeric: tabular-nums; }
+.val-dot { width: 11px; height: 11px; border-radius: 3px; display: inline-block; }
+.val-dot-completed { background: #059669; }
+.val-dot-partial { background: #f59e0b; }
+.val-dot-pending { background: #ef4444; }
+.val-cards { display: flex; gap: 28px; flex-wrap: wrap; }
+.val-card { display: flex; flex-direction: column; }
+.val-card-num { font-size: 26px; font-weight: 700; color: #111827; line-height: 1.1; }
+.val-card-label { font-size: 12px; color: #6b7280; }
+
+.val-dash-controls { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; flex-wrap: wrap; }
+.val-search { height: 36px; padding: 0 12px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 13px; min-width: 280px; }
+.val-search:focus { outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37,99,235,.15); }
+
+.val-bu td { vertical-align: middle; }
+.val-bu-row { cursor: pointer; }
+.val-bu-row:hover { background: #f5f8ff; }
+.val-bu-unit { font-family: var(--font-geist-mono, monospace); font-weight: 600; font-size: 12.5px; }
+.val-bu-name { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #374151; }
+.val-col-progress { width: 200px; }
+.val-progress { display: inline-block; width: 130px; height: 8px; background: #eceff3; border-radius: 999px; overflow: hidden; vertical-align: middle; }
+.val-progress-bar { height: 100%; background: #2563eb; border-radius: 999px; }
+.val-progress-bar.full { background: #059669; }
+.val-progress-pct { font-size: 12px; color: #6b7280; margin-left: 8px; font-variant-numeric: tabular-nums; }
+.val-pending-count { color: #b91c1c; font-weight: 700; }
+
+.val-bu-detail-row td { background: #f9fafb; }
+.val-entity-grid { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 4px 6px; }
+.val-entity-badge {
+  display: inline-flex; align-items: center; gap: 6px; font-size: 12px;
+  padding: 4px 10px; border-radius: 999px; border: 1px solid transparent;
+}
+.val-entity-status { font-size: 10px; text-transform: uppercase; letter-spacing: .03em; font-weight: 700; opacity: .8; }
+.val-st-completed { background: #ecfdf5; color: #065f46; border-color: #a7f3d0; }
+.val-st-partial { background: #fffbeb; color: #92400e; border-color: #fde68a; }
+.val-st-pending { background: #fef2f2; color: #991b1b; border-color: #fecaca; }
+.val-st-other { background: #f3f4f6; color: #374151; border-color: #e5e7eb; }
+.val-missing { font-size: 12px; color: #92400e; padding: 4px 6px 10px; }
+
 /* Batch toolbar */
 .val-toolbar {
   display: flex;
