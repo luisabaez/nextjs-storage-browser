@@ -20,6 +20,8 @@ import {
   addDynamicBusinessUnitTag,
   getUserPermissions,
   saveUserFullPermissions,
+  pushPermissionsToBackend,
+  fetchPermissionsFromBackend,
 } from '../../types';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
@@ -106,8 +108,10 @@ function UserDetailPage() {
           const approvedEmails = (data.approvedEmails || []).map((e: string) => e.toLowerCase());
           setIsApproved(approvedEmails.includes(foundUser.email.toLowerCase()));
 
-          // Load existing permissions
-          const permissions = getUserPermissions(foundUser.email);
+          // Load existing permissions — prefer the backend (source of truth),
+          // fall back to the local cache if the backend has no record yet.
+          const permissions =
+            (await fetchPermissionsFromBackend(foundUser.email)) || getUserPermissions(foundUser.email);
           if (permissions) {
             setSelectedIsAdmin(!!permissions.isAdmin);
             setSelectedSources(permissions.allowedSources || []);
@@ -228,26 +232,26 @@ function UserDetailPage() {
     setSaveMessage(null);
 
     try {
-      saveUserFullPermissions(
-        user.email,
-        {
-          isAdmin: selectedIsAdmin,
-          allowedSources: selectedSources,
-          allowedEntities: selectedEntities,
-          allowedMocks: selectedMocks,
-          allowedBusinessUnits: selectedBusinessUnits,
-        },
-        adminEmail
-      );
+      const perms = {
+        isAdmin: selectedIsAdmin,
+        allowedSources: selectedSources,
+        allowedEntities: selectedEntities,
+        allowedMocks: selectedMocks,
+        allowedBusinessUnits: selectedBusinessUnits,
+      };
+      // Write to the backend (source of truth, cross-device) first, then cache locally.
+      const ok = await pushPermissionsToBackend(user.email, perms, adminEmail);
+      if (!ok) throw new Error('backend write failed');
+      saveUserFullPermissions(user.email, perms, adminEmail);
       setSaveMessage({
         type: 'success',
         text: selectedIsAdmin
-          ? 'User saved as admin — they now have full access.'
-          : 'All permissions saved successfully!',
+          ? 'User saved as admin — they now have full access on any device the next time they sign in.'
+          : 'Permissions saved. They apply on the user’s next sign-in, on any device.',
       });
     } catch (error) {
       console.error('Error saving permissions:', error);
-      setSaveMessage({ type: 'error', text: 'Failed to save permissions. Please try again.' });
+      setSaveMessage({ type: 'error', text: 'Failed to save permissions to the server. Please try again.' });
     } finally {
       setIsSaving(false);
     }

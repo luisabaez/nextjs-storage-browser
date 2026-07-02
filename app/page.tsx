@@ -8,7 +8,7 @@ import './components/enhanced-file-browser.css';
 import config from '../amplify_outputs.json';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
-import { isAdminUser } from './admin/types';
+import { isAdminUser, syncCurrentUserPermissions } from './admin/types';
 
 // Components
 import { CustomFileBrowser, FileItem } from './components/CustomFileBrowser';
@@ -281,6 +281,12 @@ function FileBrowser() {
         const email = attributes.email || '';
         setUserEmail(email);
         setIsAdmin(isAdminUser(email));
+        // Pull this user's permissions from the backend (source of truth) into
+        // the local cache, then re-evaluate admin + refresh the file listing so
+        // access reflects what an admin set — on any device.
+        await syncCurrentUserPermissions(email);
+        setIsAdmin(isAdminUser(email));
+        setRefreshKey(prev => prev + 1);
       } catch (error) {
         console.error('Error fetching user attributes', error);
       }

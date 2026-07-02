@@ -383,6 +383,86 @@ export function saveUserPermissions(
 }
 
 // ============================================
+// BACKEND PERMISSION STORE (DynamoDB via user-approval-handler Lambda)
+// ============================================
+// Permissions live in DynamoDB (source of truth) so they apply cross-device.
+// localStorage is treated as a local cache: seeded on login, written through on
+// save, so the synchronous checks above keep working unchanged.
+const PERMISSION_HANDLER_URL = 'https://w47wliqar3ka27qsezzckqpoza0kkmbt.lambda-url.us-east-1.on.aws/';
+const PERMISSION_TOKEN = 'hacienda-erp-approval-2024';
+
+function cacheUserPermissions(perm: UserPermissions): void {
+  if (typeof window === 'undefined' || !perm?.email) return;
+  const all = getAllUserPermissions();
+  all[perm.email.toLowerCase()] = perm;
+  localStorage.setItem(USER_PERMISSIONS_KEY, JSON.stringify(all));
+}
+
+export async function fetchPermissionsFromBackend(email: string): Promise<UserPermissions | null> {
+  try {
+    const url = `${PERMISSION_HANDLER_URL}?action=get_permissions&token=${encodeURIComponent(PERMISSION_TOKEN)}&email=${encodeURIComponent(email)}`;
+    const data = await (await fetch(url)).json();
+    return data?.ok ? (data.permissions as UserPermissions | null) : null;
+  } catch (e) {
+    console.error('fetchPermissionsFromBackend failed', e);
+    return null;
+  }
+}
+
+export async function pushPermissionsToBackend(
+  email: string,
+  permissions: {
+    isAdmin?: boolean;
+    allowedSources: SourceTag[];
+    allowedEntities: string[];
+    allowedMocks: string[];
+    allowedBusinessUnits: string[];
+  },
+  actor: string
+): Promise<boolean> {
+  try {
+    const payload = { email: email.toLowerCase(), permissions, actor };
+    const url = `${PERMISSION_HANDLER_URL}?action=set_permissions&token=${encodeURIComponent(PERMISSION_TOKEN)}&data=${encodeURIComponent(JSON.stringify(payload))}`;
+    const data = await (await fetch(url)).json();
+    return !!data?.ok;
+  } catch (e) {
+    console.error('pushPermissionsToBackend failed', e);
+    return false;
+  }
+}
+
+export async function fetchAllPermissionsFromBackend(): Promise<UserPermissions[]> {
+  try {
+    const url = `${PERMISSION_HANDLER_URL}?action=list_permissions&token=${encodeURIComponent(PERMISSION_TOKEN)}`;
+    const data = await (await fetch(url)).json();
+    return data?.ok && Array.isArray(data.permissions) ? (data.permissions as UserPermissions[]) : [];
+  } catch (e) {
+    console.error('fetchAllPermissionsFromBackend failed', e);
+    return [];
+  }
+}
+
+// Fetch the current user's permissions from the backend and cache them locally,
+// so the synchronous checks read backend-sourced data. Returns whether admin.
+export async function syncCurrentUserPermissions(email: string): Promise<UserPermissions | null> {
+  if (!email) return null;
+  const perm = await fetchPermissionsFromBackend(email);
+  if (perm) cacheUserPermissions(perm);
+  return perm;
+}
+
+// Seed the local cache from all backend permissions (admin dashboard/list).
+export async function syncAllPermissions(): Promise<UserPermissions[]> {
+  const all = await fetchAllPermissionsFromBackend();
+  if (typeof window !== 'undefined' && all.length) {
+    const map = getAllUserPermissions();
+    for (const p of all) if (p?.email) map[p.email.toLowerCase()] = p;
+    localStorage.setItem(USER_PERMISSIONS_KEY, JSON.stringify(map));
+  }
+  return all;
+}
+
+// ============================================
 // ACCESS CHECKING
 // ============================================
 // Check if user can access a source

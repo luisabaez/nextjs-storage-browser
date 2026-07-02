@@ -8,7 +8,7 @@ import '@aws-amplify/ui-react/styles.css';
 import '../components/enhanced-file-browser.css';
 import './admin.css';
 import config from '../../amplify_outputs.json';
-import { isAdminUser, CognitoUser, ApprovalAction, ADMIN_EMAILS } from './types';
+import { isAdminUser, CognitoUser, ApprovalAction, ADMIN_EMAILS, syncCurrentUserPermissions, syncAllPermissions } from './types';
 import Link from 'next/link';
 
 Amplify.configure(config);
@@ -51,6 +51,8 @@ function AdminDashboard() {
         const attributes = await fetchUserAttributes();
         const email = attributes.email || '';
         setUserEmail(email);
+        // Sync this user's permissions from the backend, then evaluate admin.
+        await syncCurrentUserPermissions(email);
         setIsAdmin(isAdminUser(email));
       } catch (error) {
         console.error('Error checking admin status:', error);
@@ -76,6 +78,9 @@ function AdminDashboard() {
   // Fetch users and approved emails
   const fetchData = useCallback(async () => {
     try {
+      // Seed the local cache from the backend so admin badges/permissions in the
+      // user list reflect what's stored server-side, not just this browser.
+      await syncAllPermissions();
       const response = await fetch(
         `${APPROVAL_HANDLER_URL}?action=list&token=${encodeURIComponent(APPROVAL_TOKEN)}`
       );
