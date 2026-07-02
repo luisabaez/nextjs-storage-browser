@@ -297,6 +297,7 @@ function ValidationsPage() {
   const [genListError, setGenListError] = useState('');
   const [genLoading, setGenLoading] = useState<Record<string, { done: number; total: number }>>({});
   const [genNote, setGenNote] = useState('');
+  const [showFlags, setShowFlags] = useState(false);
   const samplingTargetsRef = useRef<SamplingTarget[] | null>(null);
   const relationshipEdgesRef = useRef<RelEdge[] | null>(null);
   const compositeOverridesRef = useRef<Map<string, string[]> | null>(null);
@@ -663,6 +664,25 @@ function ValidationsPage() {
             </div>
             {genListError && <div className="val-file-err">{genListError}</div>}
             {genNote && <div className="val-gen-note-inline">{genNote}</div>}
+            {(() => {
+              const flags = entries.flatMap(e => (e.merged?.warnings || []).map(w => ({ master: e.fileName, w })));
+              if (!flags.length) return null;
+              const masters = new Set(flags.map(f => f.master)).size;
+              return (
+                <div className="val-flags">
+                  <button className="val-flags-toggle" onClick={() => setShowFlags(s => !s)}>
+                    {showFlags ? '▾' : '▸'} ⚠ {flags.length} flagged file{flags.length !== 1 ? 's' : ''} across {masters} master{masters !== 1 ? 's' : ''} — {showFlags ? 'hide' : 'show to diagnose'}
+                  </button>
+                  {showFlags && (
+                    <div className="val-flags-list">
+                      {flags.map((f, i) => (
+                        <div key={i} className="val-flags-item"><code>{f.master}</code> — {f.w}</div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
             {genList && genList.length === 0 && !genListLoading && (
               <div className="val-muted val-generated-empty">No generated files yet — generate them from the Entity Files tab.</div>
             )}
@@ -1026,17 +1046,19 @@ function ValidationsPage() {
                                 );
                               })()}
                               <table className="val-child-table">
-                                <thead><tr><th>Source</th><th>BU</th><th>Conversion table</th><th>Rows</th><th>Imported</th></tr></thead>
+                                <thead><tr><th>SubEntity</th><th>Source</th><th>BU</th><th>Conversion table</th><th>Source file</th><th>Rows</th><th>Imported</th></tr></thead>
                                 <tbody>
                                   {g.files.map((f, i) => (
                                     <tr key={i}>
+                                      <td>{f.SubEntity || '—'}</td>
                                       <td>{f.SOURCE || '—'}</td>
-                                      <td>{f.BU || '—'}</td>
+                                      <td>{f.BU || <span className="val-muted">—</span>}</td>
                                       <td><code>{f.CONVERSION_TABLE_BU}</code></td>
+                                      <td className="val-src-file" title={f.SourceFileName}>{f.SourceFileName || <span className="val-muted">—</span>}</td>
                                       <td>{f.tableRows === null ? <span className="val-ready val-ready-blocked">no table</span>
                                         : typeof f.tableRows === 'number' ? f.tableRows.toLocaleString()
                                         : <span className="val-muted">…</span>}</td>
-                                      <td>{String(f.FileImportStatus).toUpperCase() === 'Y' ? '✓' : ''}</td>
+                                      <td>{String(f.FileImportStatus).toUpperCase() === 'Y' ? <span className="val-comp-ok">✓</span> : <span className="val-comp-missing" title="not imported">✗</span>}</td>
                                     </tr>
                                   ))}
                                 </tbody>
