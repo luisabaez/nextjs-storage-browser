@@ -238,6 +238,21 @@
 .val-gen-load { margin-left: 8px; }
 .val-gen-note-inline { margin-top: 10px; font-size: 12.5px; color: #0f766e; background: #f0fdfa; border: 1px solid #99f6e4; border-radius: 8px; padding: 7px 10px; }
 
+/* Completeness tab — validation report vs generated */
+.val-repstatus { font-size: 11px; font-weight: 700; padding: 1px 8px; border-radius: 999px; white-space: nowrap; }
+.val-rep-clean { background: #ecfdf5; color: #065f46; border: 1px solid #a7f3d0; }
+.val-rep-partial { background: #fffbeb; color: #92400e; border: 1px solid #fde68a; }
+.val-rep-orphans { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
+.val-rep-standalone { background: #eef2ff; color: #3730a3; border: 1px solid #c7d2fe; }
+.val-rep-other { background: #f3f4f6; color: #6b7280; border: 1px solid #e5e7eb; }
+.val-comp-ok { color: #059669; font-weight: 700; }
+.val-comp-warn { color: #b45309; font-weight: 700; }
+.val-comp-missing { color: #dc2626; font-weight: 700; }
+.val-comp-links, .val-comp-notes, .val-comp-verdict { font-size: 12px; color: #4b5563; margin: 8px 2px 2px; }
+.val-comp-verdict { font-style: italic; color: #6b7280; }
+.val-comp-matrix, .val-comp-integrity { margin-top: 6px; }
+.val-comp-integrity { margin-top: 12px; }
+
 .val-merged-note { font-size: 11px; color: #6b7280; margin-top: 4px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .val-link-btn { border: none; background: none; color: #2563eb; font-size: 11px; font-weight: 600; cursor: pointer; padding: 0; }
 .val-link-btn:hover { text-decoration: underline; }

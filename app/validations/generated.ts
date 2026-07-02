@@ -93,6 +93,39 @@ export async function readEntityManifests(mock: string, entity: string): Promise
   return out;
 }
 
+export interface ManifestFileRow extends ManifestEntry { entity: string; file: string; }
+
+// Read every generation manifest under a mock → flat rows (entity, file, table,
+// source, bu, rows). Used by the completeness check to see what's actually been
+// generated vs what the validation report expects. Newest run wins per file.
+export async function readAllManifests(mock: string): Promise<ManifestFileRow[]> {
+  const base = `${GENERATED_PREFIX}_manifests/${mock}/`;
+  let res;
+  try { res = await list({ path: base, options: { listAll: true } }); }
+  catch { return []; }
+  const jsons = res.items
+    .filter(it => it.path.endsWith('.json'))
+    .sort((a, b) => (+new Date(a.lastModified || 0)) - (+new Date(b.lastModified || 0)));
+  const byKey = new Map<string, ManifestFileRow>(); // entity|file -> newest row
+  for (const it of jsons) {
+    try {
+      const { url } = await getUrl({ path: it.path, options: { expiresIn: 3600 } });
+      const resp = await fetch(url.toString());
+      if (!resp.ok) continue;
+      const m = await resp.json();
+      const entity = String(m.entity ?? '');
+      for (const gf of (m.generated || [])) {
+        if (!gf.file) continue;
+        byKey.set(`${entity}|${gf.file}`, {
+          entity, file: gf.file, table: gf.table || '',
+          source: String(gf.source ?? ''), bu: String(gf.bu ?? ''), rows: gf.rows || 0,
+        });
+      }
+    } catch { /* skip */ }
+  }
+  return Array.from(byKey.values());
+}
+
 // Download an entity's generated files, parse them, and tag each with its real
 // (table, source, bu) from the manifest so the relationship-aware merge can use it.
 export async function loadGeneratedTagged(

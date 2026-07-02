@@ -28,7 +28,8 @@ import {
 import { parseAgencyReport, AgencyReport, buildGroups } from './dashboard';
 import { RawFile, MergeResult, SamplingTarget, groupRawFiles, mergeGroup, mergeByRelationships, resultToFileData, downloadMaster, appendValidationSheets } from './merge';
 import { PlanRow, EntityGroup, groupEntityPlan, READINESS_LABEL } from './entityFiles';
-import { GeneratedEntity, listGeneratedEntities, loadGeneratedTagged, readEntityManifests, fetchSamplingTargets, safeName } from './generated';
+import { GeneratedEntity, ManifestFileRow, listGeneratedEntities, loadGeneratedTagged, readEntityManifests, readAllManifests, fetchSamplingTargets, safeName } from './generated';
+import { ValidationReport, EntityValidation, parseValidationReport, fileMatchesTable, buildCompositeKeyOverrides } from './validationReport';
 
 Amplify.configure(config);
 
@@ -36,10 +37,11 @@ const SAMPLING_FOLDER = 'Sampling/';
 const LOCAL_FOLDER = 'Sampling/Local/';
 const CLIENT_FOLDER = 'Sampling/Client/';
 const REPORT_PATH = 'Sampling/_status/agency_report.xlsx';
+const VALIDATION_REPORT_PATH = 'Sampling/_status/entity_validation_report.xlsx';
 const XLSX_CT = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 const LAMBDA_URL = 'https://5ahxjcxhrcopng5hjgc2n6utxq0rwcmm.lambda-url.us-east-1.on.aws/';
 
-type TabId = 'sampling' | 'dashboard' | 'entities';
+type TabId = 'sampling' | 'dashboard' | 'entities' | 'completeness';
 type GenStatus = 'idle' | 'working' | 'done' | 'error';
 
 interface FileEntry {
@@ -55,6 +57,33 @@ interface FileEntry {
   genError: string;
   generated: { seed: number; n: number; at: string } | null;
   merged: MergeResult | null;
+}
+
+// Is a report file present among the generated manifests for an agency? Matches
+// by agency (source or bu) and table-name (file label tokens ⊆ table name).
+function presentFor(mans: ManifestFileRow[], label: string, agency: string) {
+  const hits = mans.filter(m => (m.source === agency || m.bu === agency) && fileMatchesTable(label, m.table));
+  return { present: hits.length > 0, rows: hits.reduce((s, r) => s + r.rows, 0), tables: Array.from(new Set(hits.map(h => h.table))) };
+}
+
+const normStr = (s: string) => s.toUpperCase().replace(/[^A-Z0-9]/g, '');
+// Match a generated-entity folder name (e.g. "Supplier", "AR_Invoices") to a
+// report entity ("Suppliers", "AR Invoices").
+function matchReportEntity(rep: ValidationReport, folder: string): EntityValidation | null {
+  const nf = normStr(folder);
+  return rep.entities.find(e => {
+    const a = normStr(e.tab), b = normStr(e.entity);
+    return a.includes(nf) || nf.includes(a) || b.includes(nf) || nf.includes(b);
+  }) || null;
+}
+
+function repStatusClass(status: string): string {
+  const l = (status || '').toUpperCase();
+  if (l.includes('CLEAN')) return 'val-rep-clean';
+  if (l.includes('ORPHAN')) return 'val-rep-orphans';
+  if (l.includes('PARTIAL')) return 'val-rep-partial';
+  if (l.includes('STANDALONE')) return 'val-rep-standalone';
+  return 'val-rep-other';
 }
 
 function pad(n: number) { return n < 10 ? `0${n}` : `${n}`; }
@@ -269,6 +298,25 @@ function ValidationsPage() {
   const [genLoading, setGenLoading] = useState<Record<string, { done: number; total: number }>>({});
   const [genNote, setGenNote] = useState('');
   const samplingTargetsRef = useRef<SamplingTarget[] | null>(null);
+  const compositeOverridesRef = useRef<Map<string, string[]> | null>(null);
+  const valReportRef = useRef<ValidationReport | null>(null);
+  const valManifestsRef = useRef<ManifestFileRow[] | null>(null);
+
+  // "N/M expected files present" for a generated entity, per the validation report.
+  const completenessNote = useCallback((folder: string): string => {
+    const rep = valReportRef.current, mans = valManifestsRef.current;
+    if (!rep || !mans) return '';
+    const e = matchReportEntity(rep, folder);
+    if (!e) return '';
+    let total = 0, present = 0;
+    for (const f of e.files) for (const ag of e.agencies) {
+      const c = f.counts[ag];
+      if (!c || c === 'N/A') continue;
+      total++;
+      if (presentFor(mans, f.label, ag).present) present++;
+    }
+    return total ? `completeness ${present}/${total} expected files present` : '';
+  }, []);
 
   const refreshGenerated = useCallback(async (): Promise<GeneratedEntity[]> => {
     setGenListLoading(true);
@@ -302,11 +350,13 @@ function ValidationsPage() {
       const label = g.entity.replace(/_/g, ' ');
       const targets = samplingTargetsRef.current || [];
       if (targets.length && manifest.size) {
-        // Relationship-aware: group by real source, join on the configured link field.
-        const results = mergeByRelationships(tagged, targets);
+        // Relationship-aware: group by real source, join on the configured link
+        // field (composite key from the validation report when we have one).
+        const results = mergeByRelationships(tagged, targets, compositeOverridesRef.current || undefined);
         addMergeResults(results);
         const flagged = results.reduce((s, r) => s + r.warnings.length, 0);
-        setGenNote(`${label}: relationship-aware merge · ${results.length} master${results.length !== 1 ? 's' : ''}${flagged ? ` · ${flagged} file(s) flagged (not a direct child — see the ⚠ note)` : ''}.`);
+        const complete = completenessNote(g.entity);
+        setGenNote(`${label}: relationship-aware merge · ${results.length} master${results.length !== 1 ? 's' : ''}${flagged ? ` · ${flagged} file(s) flagged` : ''}${complete ? ` · ${complete}` : ''}.`);
       } else {
         // No manifest (older generation) → fall back to filename grouping.
         addRawResults(tagged);
@@ -318,7 +368,7 @@ function ValidationsPage() {
     } finally {
       setGenLoading(p => { const n = { ...p }; delete n[g.entity]; return n; });
     }
-  }, [addMergeResults, addRawResults]);
+  }, [addMergeResults, addRawResults, completenessNote]);
 
   // Jump from the Entity Files tab to Sampling and load that entity's files.
   const loadGeneratedByEntity = useCallback(async (entity: string) => {
@@ -328,6 +378,63 @@ function ValidationsPage() {
     if (g) loadFromGenerated(g);
     else setGenListError(`No generated files found for ${entity} yet — run Generate first.`);
   }, [genList, refreshGenerated, loadFromGenerated]);
+
+  // ── Completeness: validation report (expected files) vs what's generated ──
+  const [valReport, setValReport] = useState<ValidationReport | null>(null);
+  const [valLoading, setValLoading] = useState(false);
+  const [valError, setValError] = useState('');
+  const [valLoaded, setValLoaded] = useState(false);
+  const [valExpanded, setValExpanded] = useState<Record<string, boolean>>({});
+  const [valManifests, setValManifests] = useState<ManifestFileRow[]>([]);
+  const valReportInputRef = useRef<HTMLInputElement>(null);
+
+  const applyReport = useCallback((report: ValidationReport, manifests: ManifestFileRow[]) => {
+    setValReport(report); valReportRef.current = report;
+    setValManifests(manifests); valManifestsRef.current = manifests;
+    compositeOverridesRef.current = buildCompositeKeyOverrides(report, samplingTargetsRef.current || []);
+  }, []);
+
+  const ensureTargets = useCallback(async () => {
+    if (!samplingTargetsRef.current) {
+      try { samplingTargetsRef.current = await fetchSamplingTargets(LAMBDA_URL); }
+      catch { samplingTargetsRef.current = []; }
+    }
+  }, []);
+
+  const loadValReport = useCallback(async () => {
+    setValLoading(true); setValError('');
+    try {
+      await ensureTargets();
+      const manifests = await readAllManifests(PLAN_MOCK).catch(() => [] as ManifestFileRow[]);
+      const { url } = await getUrl({ path: VALIDATION_REPORT_PATH, options: { validateObjectExistence: true } });
+      const resp = await fetch(url.toString());
+      if (!resp.ok) throw new Error('fetch failed');
+      applyReport(parseValidationReport(await resp.arrayBuffer()), manifests);
+    } catch {
+      setValReport(null); // not uploaded yet — prompt to upload
+    } finally {
+      setValLoading(false); setValLoaded(true);
+    }
+  }, [applyReport, ensureTargets, PLAN_MOCK]);
+
+  const uploadValReport = useCallback(async (file: File) => {
+    setValLoading(true); setValError('');
+    try {
+      const buf = await file.arrayBuffer();
+      await uploadData({ path: VALIDATION_REPORT_PATH, data: new Blob([buf], { type: XLSX_CT }), options: { contentType: XLSX_CT } }).result;
+      await ensureTargets();
+      const manifests = await readAllManifests(PLAN_MOCK).catch(() => [] as ManifestFileRow[]);
+      applyReport(parseValidationReport(buf), manifests);
+    } catch (e) {
+      setValError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setValLoading(false); setValLoaded(true);
+    }
+  }, [applyReport, ensureTargets, PLAN_MOCK]);
+
+  useEffect(() => {
+    if (activeTab === 'completeness' && !valLoaded) loadValReport();
+  }, [activeTab, valLoaded, loadValReport]);
 
   const onRawDrop = (e: React.DragEvent) => {
     e.preventDefault();
@@ -471,6 +578,9 @@ function ValidationsPage() {
         </button>
         <button className={`val-tab-btn ${activeTab === 'entities' ? 'active' : ''}`} onClick={() => setActiveTab('entities')}>
           Entity Files
+        </button>
+        <button className={`val-tab-btn ${activeTab === 'completeness' ? 'active' : ''}`} onClick={() => setActiveTab('completeness')}>
+          Completeness
         </button>
       </div>
 
@@ -933,6 +1043,147 @@ function ValidationsPage() {
               </table>
             </>
           )}
+        </div>
+      )}
+
+      {activeTab === 'completeness' && (
+        <div className="val-tab-content">
+          <div className="val-intro">
+            <h2>File Completeness ({PLAN_MOCK})</h2>
+            <p>
+              Expected master + child files per entity and agency, from the Multi-Agency Entity
+              Validation Report, checked against what has been generated to Sampling/Generated.
+              Confirm every expected file is present (and the counts line up) before sampling.
+              {valReport && <> Agencies in scope: {valReport.agencies.join(', ')}.</>}
+            </p>
+          </div>
+
+          {valError && <div className="val-error">{valError}</div>}
+          {valLoading && <div className="val-loading"><span className="val-spinner val-spinner-dark" /> Loading validation report…</div>}
+
+          {!valLoading && !valReport && (
+            <div className="val-dropzone" onClick={() => valReportInputRef.current?.click()}>
+              <input ref={valReportInputRef} type="file" accept=".xlsx,.xlsm,.xls" style={{ display: 'none' }}
+                onChange={e => { if (e.target.files?.[0]) uploadValReport(e.target.files[0]); e.target.value = ''; }} />
+              <span className="val-dropzone-icon">📋</span>
+              <p><strong>Upload the Entity Validation Report</strong> to load the completeness view</p>
+              <p className="val-dropzone-hint">Entity_Validation_Report_*.xlsx — it will be saved and auto-load next time</p>
+            </div>
+          )}
+
+          {!valLoading && valReport && (() => {
+            const mans = valManifests;
+            let totExp = 0, totPresent = 0;
+            valReport.entities.forEach(e => e.files.forEach(f => e.agencies.forEach(ag => {
+              const c = f.counts[ag]; if (!c || c === 'N/A') return; totExp++;
+              if (presentFor(mans, f.label, ag).present) totPresent++;
+            })));
+            return (
+              <>
+                <div className="val-cards" style={{ margin: '4px 0 14px' }}>
+                  <div className="val-card"><span className="val-card-num">{valReport.entities.length}</span><span className="val-card-label">Entities</span></div>
+                  <div className="val-card"><span className="val-card-num">{valReport.agencies.length}</span><span className="val-card-label">Agencies</span></div>
+                  <div className="val-card"><span className="val-card-num">{totExp}</span><span className="val-card-label">Expected files</span></div>
+                  <div className="val-card"><span className="val-card-num">{totPresent}/{totExp}</span><span className="val-card-label">Present (generated)</span></div>
+                </div>
+
+                <div className="val-dash-controls">
+                  <span className="val-muted">Expand an entity for expected files vs generated, per agency.</span>
+                  <button className="val-btn-secondary" onClick={() => valReportInputRef.current?.click()}>Update report</button>
+                  <input ref={valReportInputRef} type="file" accept=".xlsx,.xlsm,.xls" style={{ display: 'none' }}
+                    onChange={e => { if (e.target.files?.[0]) uploadValReport(e.target.files[0]); e.target.value = ''; }} />
+                </div>
+
+                <table className="val-table val-bu">
+                  <thead>
+                    <tr>
+                      <th className="val-col-caret"></th>
+                      <th>Entity</th>
+                      <th>Linking key</th>
+                      <th>Agencies</th>
+                      <th>Status</th>
+                      <th className="val-col-num">Expected</th>
+                      <th className="val-col-num">Present</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {valReport.entities.map(e => {
+                      const open = !!valExpanded[e.tab];
+                      let exp = 0, pres = 0;
+                      e.files.forEach(f => e.agencies.forEach(ag => { const c = f.counts[ag]; if (!c || c === 'N/A') return; exp++; if (presentFor(mans, f.label, ag).present) pres++; }));
+                      return (
+                        <React.Fragment key={e.tab}>
+                          <tr className="val-bu-row" onClick={() => setValExpanded(p => ({ ...p, [e.tab]: !p[e.tab] }))}>
+                            <td className="val-col-caret"><span className="val-caret">{open ? '▾' : '▸'}</span></td>
+                            <td className="val-bu-unit">{e.entity}</td>
+                            <td className="val-muted" title={e.howItLinks}>{e.key}</td>
+                            <td className="val-muted">{e.agencies.join(', ')}</td>
+                            <td><span className={`val-repstatus ${repStatusClass(e.status)}`}>{e.status}</span></td>
+                            <td className="val-col-num">{exp}</td>
+                            <td className="val-col-num">{pres < exp ? <span className="val-pending-count">{pres}/{exp}</span> : `${pres}/${exp}`}</td>
+                          </tr>
+                          {open && (
+                            <tr className="val-bu-detail-row">
+                              <td></td>
+                              <td colSpan={6}>
+                                {e.howItLinks && <div className="val-comp-links"><b>How it links:</b> {e.howItLinks}</div>}
+                                <table className="val-child-table val-comp-matrix">
+                                  <thead>
+                                    <tr><th>Expected file</th><th></th>{e.agencies.map(a => <th key={a} className="val-col-num">{a}</th>)}</tr>
+                                  </thead>
+                                  <tbody>
+                                    {e.files.map((f, fi) => (
+                                      <tr key={fi}>
+                                        <td>{f.label}</td>
+                                        <td className="val-muted">{f.role}</td>
+                                        {e.agencies.map(ag => {
+                                          const c = f.counts[ag];
+                                          if (!c || c === 'N/A') return <td key={ag} className="val-col-num val-muted">—</td>;
+                                          const st = presentFor(mans, f.label, ag);
+                                          const exact = st.present && st.rows === c.rows;
+                                          return (
+                                            <td key={ag} className="val-col-num"
+                                              title={st.present ? `generated: ${st.rows.toLocaleString()} rows (${st.tables.join(', ')})` : 'not found in Sampling/Generated'}>
+                                              {c.rows.toLocaleString()}{' '}
+                                              <span className={st.present ? (exact ? 'val-comp-ok' : 'val-comp-warn') : 'val-comp-missing'}>
+                                                {st.present ? (exact ? '✓' : '≠') : '✗'}
+                                              </span>
+                                            </td>
+                                          );
+                                        })}
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                                {e.integrity.length > 0 && (
+                                  <table className="val-child-table val-comp-integrity">
+                                    <thead>
+                                      <tr><th>Child integrity (orphans / missing)</th>{e.agencies.map(a => <th key={a} className="val-col-num">{a}</th>)}<th>Status</th></tr>
+                                    </thead>
+                                    <tbody>
+                                      {e.integrity.map((ir, ii) => (
+                                        <tr key={ii}>
+                                          <td>{ir.child}</td>
+                                          {e.agencies.map(ag => { const v = ir.perAgency[ag]; return <td key={ag} className="val-col-num">{v ? `${v.orphans} / ${v.missing}` : '—'}</td>; })}
+                                          <td><span className={`val-repstatus ${repStatusClass(ir.status)}`}>{ir.status}</span></td>
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                )}
+                                {e.notes.length > 0 && <div className="val-comp-notes"><b>Notes:</b> {e.notes.join(' · ')}</div>}
+                                {e.verdict && <div className="val-comp-verdict">{e.verdict}</div>}
+                              </td>
+                            </tr>
+                          )}
+                        </React.Fragment>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </>
+            );
+          })()}
         </div>
       )}
     </div>
