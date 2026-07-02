@@ -26,7 +26,7 @@ import {
   FileData,
 } from './sampling';
 import { parseAgencyReport, AgencyReport, buildGroups } from './dashboard';
-import { RawFile, MergeResult, groupRawFiles, mergeGroup, resultToFileData, downloadMaster } from './merge';
+import { RawFile, MergeResult, groupRawFiles, mergeGroup, resultToFileData, downloadMaster, appendValidationSheets } from './merge';
 
 Amplify.configure(config);
 
@@ -210,6 +210,18 @@ function ValidationsPage() {
     try {
       const full = buildWorkbook(entry.data, meta, true);
       const client = buildWorkbook(entry.data, meta, false);
+      // If this came from a raw-file merge, add the Data Integrity sheet and the
+      // sampled parents' child detail to both copies.
+      if (entry.merged) {
+        const keyIdx = entry.data.headers.findIndex(
+          h => String(h ?? '').trim().toLowerCase() === entry.merged!.key.toLowerCase()
+        );
+        const selectedKeys = keyIdx >= 0
+          ? new Set(selectedIndices.map(i => String(entry.data!.rows[i]?.[keyIdx] ?? '').trim()))
+          : undefined;
+        appendValidationSheets(full, entry.merged, selectedKeys);
+        appendValidationSheets(client, entry.merged, selectedKeys);
+      }
       await uploadData({
         path: `${LOCAL_FOLDER}${base}.xlsx`,
         data: new Blob([workbookToArray(full)], { type: XLSX_CT }),
@@ -397,16 +409,30 @@ function ValidationsPage() {
                         {entry.fileName}
                         {entry.loading && <span className="val-spinner val-spinner-dark" />}
                         {entry.error && <div className="val-file-err">{entry.error}</div>}
-                        {entry.merged && (
-                          <div className="val-merged-note">
-                            merged {entry.merged.children.length + 1} files ·{' '}
-                            {entry.merged.children.map(c => `${c.label}${c.strategy === 'aggregate' ? '∑' : ''}`).join(', ') || 'parent only'}
-                            <button
-                              className="val-link-btn"
-                              onClick={() => downloadMaster(entry.merged!, `${entry.fileName}.xlsx`)}
-                            >⬇ master</button>
-                          </div>
-                        )}
+                        {entry.merged && (() => {
+                          const orphans = entry.merged.integrity.reduce((s, i) => s + i.orphans, 0);
+                          return (
+                            <div className="val-merged-note">
+                              merged {entry.merged.children.length + 1} files ·{' '}
+                              {entry.merged.children.map(c => `${c.label}${c.strategy === 'aggregate' ? '∑' : ''}`).join(', ') || 'parent only'}
+                              <span
+                                className={`val-integrity ${orphans === 0 ? 'clean' : 'issues'}`}
+                                title={entry.merged.integrity.map(i => `${i.child}: ${i.orphans} orphan(s), ${i.gaps} gap(s)`).join('\n')}
+                              >
+                                {orphans === 0 ? '✓ integrity clean' : `⚠ ${orphans} orphans`}
+                              </span>
+                              {entry.merged.warnings.length > 0 && (
+                                <span className="val-integrity issues" title={entry.merged.warnings.join('\n')}>
+                                  ⚠ {entry.merged.warnings.length} warning{entry.merged.warnings.length !== 1 ? 's' : ''}
+                                </span>
+                              )}
+                              <button
+                                className="val-link-btn"
+                                onClick={() => downloadMaster(entry.merged!, `${entry.fileName}.xlsx`)}
+                              >⬇ master</button>
+                            </div>
+                          );
+                        })()}
                       </td>
                       <td>
                         <select

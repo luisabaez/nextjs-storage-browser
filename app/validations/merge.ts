@@ -23,6 +23,27 @@ export interface ChildInfo {
   rowCount: number;
 }
 
+// Full retained child data (for detail sheets + coverage), keyed on the parent key.
+export interface ChildDetail {
+  label: string;
+  headers: string[];
+  rows: unknown[][];
+  keyIdx: number;              // index of the link column in headers
+  strategy: 'join' | 'aggregate';
+}
+
+// Parent/child integrity + coverage for one child (automates the manual
+// validation summary: orphans should be 0; gaps = parents with no child row).
+export interface ChildIntegrity {
+  child: string;
+  rows: number;
+  orphans: number;            // child rows whose key isn't in the parent
+  parentsCovered: number;     // parents that have >= 1 row in this child
+  parentsTotal: number;
+  gaps: number;               // parents with no row in this child
+  status: 'CLEAN' | 'ORPHANS';
+}
+
 export interface MergeResult {
   bu: string;
   entityToken: string;
@@ -31,6 +52,9 @@ export interface MergeResult {
   headers: string[];
   rows: unknown[][];
   children: ChildInfo[];
+  childrenData: ChildDetail[];
+  integrity: ChildIntegrity[];
+  warnings: string[];
   recordCount: number;
 }
 
@@ -106,6 +130,8 @@ export function mergeGroup(group: RawFile[]): MergeResult {
     keep: { h: string; i: number }[];
     map: Map<string, unknown[][]>;
     total: number;
+    kIdx: number;
+    child: RawFile;
   }
   const cms: CM[] = children.map(c => {
     const kIdx = c.data.headers.findIndex(h => lc(h) === keyLc);
@@ -121,7 +147,7 @@ export function mergeGroup(group: RawFile[]): MergeResult {
     const suffix = tokenOf(c.name).slice(pTok.length).replace(/^_/, '');
     const label = LABEL_MAP[suffix.toUpperCase()] || titleize(suffix);
     const keep = c.data.headers.map((h, i) => ({ h: String(h), i })).filter(x => !dropSet.has(lc(x.h)));
-    return { label, strategy: maxPer <= 1 ? 'join' : 'aggregate', keep, map, total };
+    return { label, strategy: (maxPer <= 1 ? 'join' : 'aggregate') as 'join' | 'aggregate', keep, map, total, kIdx, child: c };
   });
 
   const joins = cms.filter(m => m.strategy === 'join');
@@ -152,6 +178,45 @@ export function mergeGroup(group: RawFile[]): MergeResult {
     rows.push(row);
   }
 
+  // Parent key set for orphan/coverage checks.
+  const parentKeys = new Set<string>();
+  for (const pr of parent.data.rows) {
+    const kv = String(pr[pKeyIdx] ?? '').trim();
+    if (kv) parentKeys.add(kv);
+  }
+
+  const integrity: ChildIntegrity[] = cms.map(m => {
+    let orphans = 0;
+    const childKeys = Array.from(m.map.keys());
+    childKeys.forEach(kv => { if (!parentKeys.has(kv)) orphans += m.map.get(kv)!.length; });
+    const covered = childKeys.filter(kv => parentKeys.has(kv)).length;
+    return {
+      child: m.label,
+      rows: m.total,
+      orphans,
+      parentsCovered: covered,
+      parentsTotal: parentKeys.size,
+      gaps: parentKeys.size - covered,
+      status: orphans === 0 ? 'CLEAN' : 'ORPHANS',
+    };
+  });
+
+  const childrenData: ChildDetail[] = cms.map(m => ({
+    label: m.label,
+    headers: m.child.data.headers.map(String),
+    rows: m.child.data.rows,
+    keyIdx: m.kIdx,
+    strategy: m.strategy,
+  }));
+
+  const warnings: string[] = [];
+  const totalChildRows = cms.reduce((s, m) => s + m.total, 0);
+  if (totalChildRows > 250000) {
+    warnings.push(`Large dataset: ~${totalChildRows.toLocaleString()} child rows — the workbook may be slow to build.`);
+  }
+  const badLabels = cms.filter(m => /ocation|nubmer|adress|contect/i.test(m.label));
+  badLabels.forEach(m => warnings.push(`Possible filename typo in child "${m.label}".`));
+
   return {
     bu: buOf(parent.name),
     entityToken: pTok,
@@ -159,6 +224,9 @@ export function mergeGroup(group: RawFile[]): MergeResult {
     key,
     headers, rows,
     children: cms.map(m => ({ label: m.label, strategy: m.strategy, keptCols: m.keep.length, rowCount: m.total })),
+    childrenData,
+    integrity,
+    warnings,
     recordCount: rows.length,
   };
 }
@@ -167,8 +235,77 @@ export function resultToFileData(r: MergeResult): FileData {
   return { headers: r.headers, rows: r.rows, sheetName: 'Consolidated' };
 }
 
-export function downloadMaster(r: MergeResult, filename: string): void {
+const SHEET_BAD = /[\\/?*[\]:]/g;
+function safeSheetName(base: string, used: Set<string>): string {
+  const name = (base.replace(SHEET_BAD, '_').slice(0, 31) || 'Sheet');
+  let candidate = name, i = 1;
+  while (used.has(candidate.toLowerCase())) {
+    const suf = `_${i++}`;
+    candidate = name.slice(0, 31 - suf.length) + suf;
+  }
+  used.add(candidate.toLowerCase());
+  return candidate;
+}
+
+export interface ValidationWorkbookOpts {
+  // If set (sampling), master + detail sheets are filtered to these parent keys.
+  selectedKeys?: Set<string>;
+  masterSheetName?: string; // 'Master' for a merge download, 'Sample' for sampling
+}
+
+// Append a Data Integrity & Coverage sheet plus a detail sheet per many-row
+// (aggregate) child to an existing workbook. When `selectedKeys` is given (a
+// sampling run), the detail sheets are filtered to the sampled parents.
+export function appendValidationSheets(
+  wb: XLSX.WorkBook,
+  r: MergeResult,
+  selectedKeys?: Set<string>,
+  used: Set<string> = new Set(wb.SheetNames.map(n => n.toLowerCase()))
+): void {
+  const allClean = r.integrity.every(i => i.status === 'CLEAN');
+  const info: unknown[][] = [
+    ['Data Integrity & Coverage'],
+    ['Parent', r.entityToken, 'Agency', r.bu, 'Records', r.recordCount],
+    [],
+    ['Child', 'Rows', 'Orphans', 'Parents covered', 'Parents total', 'Gaps (no child row)', 'Status'],
+    ...r.integrity.map(i => [i.child, i.rows, i.orphans, i.parentsCovered, i.parentsTotal, i.gaps, i.status]),
+    [],
+    ['Verdict', allClean ? 'CLEAN — no orphan child records' : 'ISSUES — child records reference a missing parent (see Orphans)'],
+    ['Note', 'Gaps = parent records with no row in that child (e.g. projects with no budget line) — informational, not always an error.'],
+    ...r.warnings.map(w => ['Warning', w]),
+  ];
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(info), safeSheetName('Data Integrity', used));
+
+  for (const c of r.childrenData) {
+    if (c.strategy !== 'aggregate') continue; // 1:1 children are already in the master
+    const rows = selectedKeys
+      ? c.rows.filter(row => selectedKeys.has(String(row[c.keyIdx] ?? '').trim()))
+      : c.rows;
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([c.headers, ...rows]), safeSheetName(c.label, used));
+  }
+}
+
+// Build a validation-ready workbook: the flattened master, a Data Integrity &
+// Coverage sheet, and a detail sheet for each many-row child.
+export function buildValidationWorkbook(r: MergeResult, opts: ValidationWorkbookOpts = {}): XLSX.WorkBook {
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([r.headers, ...r.rows]), 'Consolidated');
-  XLSX.writeFile(wb, filename);
+  const used = new Set<string>();
+  const sel = opts.selectedKeys;
+  const masterKeyIdx = r.headers.findIndex(h => lc(h) === lc(r.key));
+
+  const masterRows = sel && masterKeyIdx >= 0
+    ? r.rows.filter(row => sel.has(String(row[masterKeyIdx] ?? '').trim()))
+    : r.rows;
+  XLSX.utils.book_append_sheet(
+    wb,
+    XLSX.utils.aoa_to_sheet([r.headers, ...masterRows]),
+    safeSheetName(opts.masterSheetName || 'Master', used)
+  );
+
+  appendValidationSheets(wb, r, sel, used);
+  return wb;
+}
+
+export function downloadMaster(r: MergeResult, filename: string): void {
+  XLSX.writeFile(buildValidationWorkbook(r, { masterSheetName: 'Master' }), filename);
 }
