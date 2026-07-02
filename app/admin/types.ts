@@ -240,6 +240,7 @@ export const ADMIN_EMAILS = [
   'mrichcreek@elitebco.com',
   'lbaez@elitebco.com',
   'jvelilla@elitebco.com',
+  'flockwood@elitebco.com',
 ];
 
 // Folders that are publicly accessible to all users regardless of permissions.
