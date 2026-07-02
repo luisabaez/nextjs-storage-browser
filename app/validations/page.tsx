@@ -27,6 +27,7 @@ import {
 } from './sampling';
 import { parseAgencyReport, AgencyReport, buildGroups } from './dashboard';
 import { RawFile, MergeResult, groupRawFiles, mergeGroup, resultToFileData, downloadMaster, appendValidationSheets } from './merge';
+import { PlanRow, EntityGroup, groupEntityPlan, READINESS_LABEL } from './entityFiles';
 
 Amplify.configure(config);
 
@@ -35,8 +36,9 @@ const LOCAL_FOLDER = 'Sampling/Local/';
 const CLIENT_FOLDER = 'Sampling/Client/';
 const REPORT_PATH = 'Sampling/_status/agency_report.xlsx';
 const XLSX_CT = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+const LAMBDA_URL = 'https://5ahxjcxhrcopng5hjgc2n6utxq0rwcmm.lambda-url.us-east-1.on.aws/';
 
-type TabId = 'sampling' | 'dashboard';
+type TabId = 'sampling' | 'dashboard' | 'entities';
 type GenStatus = 'idle' | 'working' | 'done' | 'error';
 
 interface FileEntry {
@@ -110,6 +112,56 @@ function ValidationsPage() {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [filter, setFilter] = useState('');
   const reportInputRef = useRef<HTMLInputElement>(null);
+
+  // ── Entity Files state ──
+  const [planRows, setPlanRows] = useState<PlanRow[]>([]);
+  const [planLoading, setPlanLoading] = useState(false);
+  const [planError, setPlanError] = useState('');
+  const [planLoaded, setPlanLoaded] = useState(false);
+  const [countsLoading, setCountsLoading] = useState(false);
+  const [planExpanded, setPlanExpanded] = useState<Record<string, boolean>>({});
+  const [planFilter, setPlanFilter] = useState('');
+  const PLAN_MOCK = 'MOCK14';
+
+  const loadPlan = useCallback(async () => {
+    setPlanLoading(true);
+    setPlanError('');
+    try {
+      // Fast: plan rows without row counts.
+      const resp = await fetch(`${LAMBDA_URL}?action=entity_plan&mock=${PLAN_MOCK}`);
+      const data = await resp.json();
+      if (!data.ok) { setPlanError(data.error || 'Failed to load the conversion plan'); return; }
+      setPlanRows(data.rows || []);
+      setPlanLoaded(true);
+      // Background: conversion-table row counts (slow ~20s), merged in when ready.
+      setCountsLoading(true);
+      fetch(`${LAMBDA_URL}?action=entity_plan&mock=${PLAN_MOCK}&counts=1`)
+        .then(r => r.json())
+        .then(d => { if (d.ok) setPlanRows(d.rows || []); })
+        .catch(() => {})
+        .finally(() => setCountsLoading(false));
+    } catch (e) {
+      setPlanError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPlanLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activeTab === 'entities' && !planLoaded) loadPlan();
+  }, [activeTab, planLoaded, loadPlan]);
+
+  const entityGroups: EntityGroup[] = planRows.length ? groupEntityPlan(planRows) : [];
+  const filteredEntities = entityGroups.filter(g => {
+    const q = planFilter.trim().toLowerCase();
+    return !q || g.entity.toLowerCase().includes(q) || g.module.toLowerCase().includes(q) || g.pillar.toLowerCase().includes(q);
+  });
+  const planTotals = {
+    entities: entityGroups.length,
+    expected: planRows.length,
+    imported: planRows.filter(r => String(r.FileImportStatus).toUpperCase() === 'Y').length,
+    populated: planRows.filter(r => typeof r.tableRows === 'number' && r.tableRows > 0).length,
+  };
 
   useEffect(() => {
     (async () => {
@@ -323,6 +375,9 @@ function ValidationsPage() {
         </button>
         <button className={`val-tab-btn ${activeTab === 'dashboard' ? 'active' : ''}`} onClick={() => setActiveTab('dashboard')}>
           BU Dashboard
+        </button>
+        <button className={`val-tab-btn ${activeTab === 'entities' ? 'active' : ''}`} onClick={() => setActiveTab('entities')}>
+          Entity Files
         </button>
       </div>
 
@@ -617,6 +672,105 @@ function ValidationsPage() {
                                   )}
                                 </div>
                               ))}
+                            </td>
+                          </tr>
+                        )}
+                      </React.Fragment>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </>
+          )}
+        </div>
+      )}
+
+      {activeTab === 'entities' && (
+        <div className="val-tab-content">
+          <div className="val-intro">
+            <h2>Entity Files ({PLAN_MOCK})</h2>
+            <p>
+              The entity files expected for sampling, from the conversion plan. For each
+              entity it shows how many files are expected, how many are imported, and how many
+              of their conversion tables are populated with rows. Readiness reflects the PM&rsquo;s
+              latest email. Expand an entity to see each file.
+            </p>
+          </div>
+
+          {planError && <div className="val-error">{planError}</div>}
+          {planLoading && <div className="val-loading"><span className="val-spinner val-spinner-dark" /> Loading conversion plan…</div>}
+
+          {!planLoading && planLoaded && (
+            <>
+              <div className="val-cards" style={{ margin: '4px 0 14px' }}>
+                <div className="val-card"><span className="val-card-num">{planTotals.entities}</span><span className="val-card-label">Entities</span></div>
+                <div className="val-card"><span className="val-card-num">{planTotals.expected.toLocaleString()}</span><span className="val-card-label">Expected files</span></div>
+                <div className="val-card"><span className="val-card-num">{planTotals.imported.toLocaleString()}</span><span className="val-card-label">Imported</span></div>
+                <div className="val-card">
+                  <span className="val-card-num">{countsLoading ? '…' : planTotals.populated.toLocaleString()}</span>
+                  <span className="val-card-label">Tables populated</span>
+                </div>
+              </div>
+
+              <div className="val-dash-controls">
+                <input className="val-search" placeholder="Filter by entity, module or pillar…" value={planFilter} onChange={e => setPlanFilter(e.target.value)} />
+                <span className="val-muted">
+                  {filteredEntities.length} of {entityGroups.length} entities
+                  {countsLoading && <> · <span className="val-spinner val-spinner-dark" /> loading table counts…</>}
+                </span>
+              </div>
+
+              <table className="val-table val-bu">
+                <thead>
+                  <tr>
+                    <th className="val-col-caret"></th>
+                    <th>Entity</th>
+                    <th>Pillar / Module</th>
+                    <th>Readiness</th>
+                    <th className="val-col-num">Expected</th>
+                    <th className="val-col-num">Imported</th>
+                    <th className="val-col-num">Populated</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredEntities.map(g => {
+                    const gkey = `${g.pillar}|${g.module}|${g.entity}`;
+                    const open = !!planExpanded[gkey];
+                    return (
+                      <React.Fragment key={gkey}>
+                        <tr className="val-bu-row" onClick={() => setPlanExpanded(p => ({ ...p, [gkey]: !p[gkey] }))}>
+                          <td className="val-col-caret"><span className="val-caret">{open ? '▾' : '▸'}</span></td>
+                          <td className="val-bu-unit">{g.entity}</td>
+                          <td className="val-muted">{g.pillar} / {g.module}</td>
+                          <td><span className={`val-ready val-ready-${g.readiness}`}>{READINESS_LABEL[g.readiness]}</span></td>
+                          <td className="val-col-num">{g.expected}</td>
+                          <td className="val-col-num">{g.imported || ''}</td>
+                          <td className="val-col-num">
+                            {g.countsLoaded
+                              ? <span title={`${g.empty} empty, ${g.missingTable} table not built`}>{g.populated}/{g.expected}</span>
+                              : <span className="val-muted">…</span>}
+                          </td>
+                        </tr>
+                        {open && (
+                          <tr className="val-bu-detail-row">
+                            <td></td>
+                            <td colSpan={6}>
+                              <table className="val-child-table">
+                                <thead><tr><th>Source</th><th>BU</th><th>Conversion table</th><th>Rows</th><th>Imported</th></tr></thead>
+                                <tbody>
+                                  {g.files.map((f, i) => (
+                                    <tr key={i}>
+                                      <td>{f.SOURCE || '—'}</td>
+                                      <td>{f.BU || '—'}</td>
+                                      <td><code>{f.CONVERSION_TABLE_BU}</code></td>
+                                      <td>{f.tableRows === null ? <span className="val-ready val-ready-blocked">no table</span>
+                                        : typeof f.tableRows === 'number' ? f.tableRows.toLocaleString()
+                                        : <span className="val-muted">…</span>}</td>
+                                      <td>{String(f.FileImportStatus).toUpperCase() === 'Y' ? '✓' : ''}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
                             </td>
                           </tr>
                         )}
