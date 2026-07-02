@@ -86,9 +86,14 @@ export function CustomFileBrowser({
 
   // Track whether initial load has completed
   const hasLoadedOnce = useRef(false);
+  // Monotonic request id: when a deep-link changes the path mid-flight, an
+  // earlier list() (e.g. root) can resolve AFTER the newer one and overwrite it.
+  // Only the latest request is allowed to apply its results.
+  const requestSeq = useRef(0);
 
   // Fetch files and folders
   const fetchItems = useCallback(async () => {
+    const seq = ++requestSeq.current;
     // Only show loading spinner on the very first load, not on refetches.
     // This prevents the file list from disappearing and scroll position from resetting.
     if (!hasLoadedOnce.current) {
@@ -158,13 +163,18 @@ export function CustomFileBrowser({
         }
       }
 
+      // Ignore results from a superseded request (stale path).
+      if (seq !== requestSeq.current) return;
       setItems(fileItems);
       hasLoadedOnce.current = true;
     } catch (error) {
+      if (seq !== requestSeq.current) return;
       console.error('Error fetching items:', error);
       showToastRef.current('Failed to load files', 'error');
     } finally {
-      setLoading(false);
+      if (seq === requestSeq.current) {
+        setLoading(false);
+      }
     }
   }, [currentPath, userEmail]);
 
