@@ -222,18 +222,25 @@ function FileBrowser() {
   } = useNotifications();
   const searchParams = useSearchParams();
 
-  // Handle URL query parameters for shared links (path and preview)
+  // Handle URL query parameters for shared links (path and preview).
+  // Applied exactly once on mount: set the deep-linked folder (and force a
+  // clean reload, like a sidebar click), then clean the URL. The once-guard
+  // stops it from re-processing after replaceState — which previously left the
+  // breadcrumb on the folder while the listing snapped back to root.
+  const urlBootstrappedRef = React.useRef(false);
   useEffect(() => {
+    if (urlBootstrappedRef.current) return;
     const pathParam = searchParams.get('path');
     const previewParam = searchParams.get('preview');
+    if (!pathParam && !previewParam) return;
+    urlBootstrappedRef.current = true;
 
     if (pathParam) {
-      // Set the current path from URL parameter
       setCurrentPath(decodeURIComponent(pathParam));
+      setRefreshKey(prev => prev + 1);
     }
 
     if (previewParam) {
-      // Create a FileItem for preview from the path
       const filePath = decodeURIComponent(previewParam);
       const fileName = filePath.split('/').pop() || filePath;
       const previewItem: FileItem = {
@@ -242,16 +249,11 @@ function FileBrowser() {
         type: 'file',
         path: filePath,
       };
-      // Small delay to ensure the page has loaded
-      setTimeout(() => {
-        setPreviewFile(previewItem);
-      }, 500);
+      setTimeout(() => setPreviewFile(previewItem), 500);
     }
 
-    // Clear the URL parameters after processing (optional - keeps URL clean)
-    if (pathParam || previewParam) {
-      window.history.replaceState({}, '', '/');
-    }
+    // Clean the URL after applying, without re-triggering navigation.
+    window.history.replaceState(null, '', '/');
   }, [searchParams]);
 
   // Load quick links from localStorage on mount
