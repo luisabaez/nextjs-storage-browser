@@ -149,8 +149,8 @@ export interface FileData {
   sheetName: string;
 }
 
-export async function readWorkbook(file: File): Promise<FileData> {
-  const buf = await file.arrayBuffer();
+// Parse spreadsheet bytes (from a File or an S3 download) into a FileData.
+export function parseWorkbookBuffer(buf: ArrayBuffer): FileData {
   const wb = XLSX.read(buf, { type: 'array', cellDates: true });
   const sheetName = wb.SheetNames[0];
   const ws = wb.Sheets[sheetName];
@@ -162,6 +162,10 @@ export async function readWorkbook(file: File): Promise<FileData> {
   const headers = aoa.length ? (aoa[0] as unknown[]) : [];
   const rows = aoa.slice(1) as unknown[][];
   return { headers, rows, sheetName };
+}
+
+export async function readWorkbook(file: File): Promise<FileData> {
+  return parseWorkbookBuffer(await file.arrayBuffer());
 }
 
 export interface SampleMeta {

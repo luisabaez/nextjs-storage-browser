@@ -28,6 +28,7 @@ import {
 import { parseAgencyReport, AgencyReport, buildGroups } from './dashboard';
 import { RawFile, MergeResult, groupRawFiles, mergeGroup, resultToFileData, downloadMaster, appendValidationSheets } from './merge';
 import { PlanRow, EntityGroup, groupEntityPlan, READINESS_LABEL } from './entityFiles';
+import { GeneratedEntity, listGeneratedEntities, loadGeneratedFiles, safeName } from './generated';
 
 Amplify.configure(config);
 
@@ -169,7 +170,8 @@ function ValidationsPage() {
   const doGen = async (entity: string, dry: boolean) => {
     setEntGen(p => ({ ...p, [entity]: { state: 'working', dry } }));
     try {
-      const url = `${LAMBDA_URL}?action=generate_entity_files&mock=${PLAN_MOCK}&entity=${encodeURIComponent(entity)}${dry ? '&dry_run=1' : ''}`;
+      const actor = userEmail ? `&actor=${encodeURIComponent(userEmail)}` : '';
+      const url = `${LAMBDA_URL}?action=generate_entity_files&mock=${PLAN_MOCK}&entity=${encodeURIComponent(entity)}${dry ? '&dry_run=1' : ''}${actor}`;
       const d = await (await fetch(url)).json();
       if (!d.ok) { setEntGen(p => ({ ...p, [entity]: { state: 'error', error: d.error || 'Failed' } })); return; }
       setEntGen(p => ({ ...p, [entity]: { state: 'done', dry, planned: d.planned, generated: d.generated, folder: d.folder } }));
@@ -224,14 +226,8 @@ function ValidationsPage() {
   const [isRawDragOver, setIsRawDragOver] = useState(false);
   const rawInputRef = useRef<HTMLInputElement>(null);
 
-  const addRawFiles = useCallback(async (files: FileList | File[]) => {
-    const list = Array.from(files).filter(f => /\.(xlsx|xlsm|xls)$/i.test(f.name));
-    if (!list.length) return;
-    const raws: RawFile[] = [];
-    for (const file of list) {
-      try { raws.push({ name: file.name, data: await readWorkbook(file) }); }
-      catch (e) { console.error('read failed', file.name, e); }
-    }
+  // Group + merge raw parent/child files, adding one master per agency to the list.
+  const addRawResults = useCallback((raws: RawFile[]) => {
     for (const g of groupRawFiles(raws)) {
       try {
         const result = mergeGroup(g);
@@ -250,6 +246,60 @@ function ValidationsPage() {
       }
     }
   }, []);
+
+  const addRawFiles = useCallback(async (files: FileList | File[]) => {
+    const list = Array.from(files).filter(f => /\.(xlsx|xlsm|xls)$/i.test(f.name));
+    if (!list.length) return;
+    const raws: RawFile[] = [];
+    for (const file of list) {
+      try { raws.push({ name: file.name, data: await readWorkbook(file) }); }
+      catch (e) { console.error('read failed', file.name, e); }
+    }
+    addRawResults(raws);
+  }, [addRawResults]);
+
+  // ── Bridge: load server-generated CV_ files straight from S3 into the list ──
+  const [genList, setGenList] = useState<GeneratedEntity[] | null>(null);
+  const [genListLoading, setGenListLoading] = useState(false);
+  const [genListError, setGenListError] = useState('');
+  const [genLoading, setGenLoading] = useState<Record<string, { done: number; total: number }>>({});
+
+  const refreshGenerated = useCallback(async (): Promise<GeneratedEntity[]> => {
+    setGenListLoading(true);
+    setGenListError('');
+    try {
+      const items = await listGeneratedEntities(PLAN_MOCK);
+      setGenList(items);
+      return items;
+    } catch (e) {
+      setGenListError(e instanceof Error ? e.message : String(e));
+      return [];
+    } finally {
+      setGenListLoading(false);
+    }
+  }, [PLAN_MOCK]);
+
+  const loadFromGenerated = useCallback(async (g: GeneratedEntity) => {
+    setGenLoading(p => ({ ...p, [g.entity]: { done: 0, total: g.files.length } }));
+    try {
+      const raws = await loadGeneratedFiles(g, (done, total) =>
+        setGenLoading(p => ({ ...p, [g.entity]: { done, total } })));
+      addRawResults(raws);
+    } catch (e) {
+      console.error('load-from-generated failed', e);
+    } finally {
+      setGenLoading(p => { const n = { ...p }; delete n[g.entity]; return n; });
+    }
+  }, [addRawResults]);
+
+  // Jump from the Entity Files tab to Sampling and load that entity's files.
+  const loadGeneratedByEntity = useCallback(async (entity: string) => {
+    setActiveTab('sampling');
+    const items = genList ?? await refreshGenerated();
+    const g = items.find(x => x.entity === safeName(entity));
+    if (g) loadFromGenerated(g);
+    else setGenListError(`No generated files found for ${entity} yet — run Generate first.`);
+  }, [genList, refreshGenerated, loadFromGenerated]);
 
   const onRawDrop = (e: React.DragEvent) => {
     e.preventDefault();
@@ -453,6 +503,43 @@ function ValidationsPage() {
             <span className="val-dropzone-icon">🧩</span>
             <p><strong>Or drop the raw parent + child files</strong> — they&rsquo;ll be merged into a master on the common identifier</p>
             <p className="val-dropzone-hint">e.g. the CV_SCM_SUPPLIER_… set for one agency; grouped by agency automatically</p>
+          </div>
+
+          <div className="val-generated">
+            <div className="val-generated-head">
+              <div>
+                <strong>Or load generated files from S3</strong>
+                <span className="val-dropzone-hint"> — pull an entity&rsquo;s CV_ files straight from Sampling/Generated and merge them by agency (same grouping as the drop above), no download needed</span>
+              </div>
+              <button className="val-btn-secondary" onClick={() => refreshGenerated()} disabled={genListLoading}>
+                {genListLoading ? <><span className="val-spinner val-spinner-dark" /> Loading…</> : (genList ? '↻ Refresh' : '📂 Browse generated')}
+              </button>
+            </div>
+            {genListError && <div className="val-file-err">{genListError}</div>}
+            {genList && genList.length === 0 && !genListLoading && (
+              <div className="val-muted val-generated-empty">No generated files yet — generate them from the Entity Files tab.</div>
+            )}
+            {genList && genList.length > 0 && (
+              <div className="val-generated-grid">
+                {genList.map(g => {
+                  const prog = genLoading[g.entity];
+                  return (
+                    <div key={g.entity} className="val-generated-item">
+                      <div className="val-generated-info">
+                        <span className="val-generated-entity" title={g.entity}>{g.entity.replace(/_/g, ' ')}</span>
+                        <span className="val-muted">
+                          {g.files.length} file{g.files.length !== 1 ? 's' : ''}
+                          {g.lastModified ? ` · ${g.lastModified.toLocaleDateString()}` : ''}
+                        </span>
+                      </div>
+                      <button className="val-btn-row" disabled={!!prog} onClick={() => loadFromGenerated(g)}>
+                        {prog ? <><span className="val-spinner val-spinner-dark" /> {prog.done}/{prog.total}</> : '→ Load & merge'}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
           {entries.length > 0 && (
@@ -783,7 +870,10 @@ function ValidationsPage() {
                                       <span className="val-gen-status">Would generate <b>{gs.planned.length}</b> file(s) · {gs.planned.reduce((s, x) => s + (x as { rows: number }).rows, 0).toLocaleString()} rows</span>
                                     )}
                                     {gs.state === 'done' && !gs.dry && gs.generated && (
-                                      <span className="val-gen-status">✓ Generated <b>{gs.generated.length}</b> file(s) to <code>{gs.folder}</code></span>
+                                      <span className="val-gen-status">
+                                        ✓ Generated <b>{gs.generated.length}</b> file(s) to <code>{gs.folder}</code>
+                                        <button className="val-link-btn val-gen-load" onClick={() => loadGeneratedByEntity(g.entity)}>→ load into sampling</button>
+                                      </span>
                                     )}
                                   </div>
                                 );

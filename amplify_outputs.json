@@ -185,6 +185,20 @@
               "write",
               "delete"
             ]
+          },
+          "Sampling/Generated/*": {
+            "authenticated": [
+              "get",
+              "list",
+              "write",
+              "delete"
+            ],
+            "entityidentity": [
+              "get",
+              "list",
+              "write",
+              "delete"
+            ]
           }
         }
       }
