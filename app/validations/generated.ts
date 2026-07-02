@@ -10,7 +10,7 @@
 
 import { list, getUrl } from 'aws-amplify/storage';
 import { parseWorkbookBuffer } from './sampling';
-import { TaggedFile, SamplingTarget } from './merge';
+import { TaggedFile, SamplingTarget, RelEdge } from './merge';
 
 export const GENERATED_PREFIX = 'Sampling/Generated/';
 
@@ -61,6 +61,17 @@ export async function fetchSamplingTargets(lambdaUrl: string): Promise<SamplingT
     table: t.table,
     display: t.display,
     children: (t.children || []).map((c) => ({ table: c.table, link_field: c.link_field })),
+  }));
+}
+
+// The full parent/child edge list for multi-level traversal (Awards → bridge →
+// Project Tasks). Metadata only.
+export async function fetchSamplingRelationships(lambdaUrl: string): Promise<RelEdge[]> {
+  const resp = await fetch(`${lambdaUrl}?action=sampling_relationships`);
+  const d = await resp.json();
+  if (!d.ok) throw new Error(d.error || 'failed to load sampling relationships');
+  return (d.relationships || []).map((e: { child: string; parent: string; link_field: string }) => ({
+    child: e.child, parent: e.parent, link_field: e.link_field,
   }));
 }
 

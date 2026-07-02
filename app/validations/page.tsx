@@ -26,9 +26,9 @@ import {
   FileData,
 } from './sampling';
 import { parseAgencyReport, AgencyReport, buildGroups } from './dashboard';
-import { RawFile, MergeResult, SamplingTarget, groupRawFiles, mergeGroup, mergeByRelationships, resultToFileData, downloadMaster, appendValidationSheets } from './merge';
+import { RawFile, MergeResult, SamplingTarget, RelEdge, groupRawFiles, mergeGroup, mergeByRelationships, mergeHierarchy, resultToFileData, downloadMaster, appendValidationSheets } from './merge';
 import { PlanRow, EntityGroup, groupEntityPlan, READINESS_LABEL } from './entityFiles';
-import { GeneratedEntity, ManifestFileRow, listGeneratedEntities, loadGeneratedTagged, readEntityManifests, readAllManifests, fetchSamplingTargets, safeName } from './generated';
+import { GeneratedEntity, ManifestFileRow, listGeneratedEntities, loadGeneratedTagged, readEntityManifests, readAllManifests, fetchSamplingTargets, fetchSamplingRelationships, safeName } from './generated';
 import { ValidationReport, EntityValidation, parseValidationReport, fileMatchesTable, buildCompositeKeyOverrides } from './validationReport';
 
 Amplify.configure(config);
@@ -298,6 +298,7 @@ function ValidationsPage() {
   const [genLoading, setGenLoading] = useState<Record<string, { done: number; total: number }>>({});
   const [genNote, setGenNote] = useState('');
   const samplingTargetsRef = useRef<SamplingTarget[] | null>(null);
+  const relationshipEdgesRef = useRef<RelEdge[] | null>(null);
   const compositeOverridesRef = useRef<Map<string, string[]> | null>(null);
   const valReportRef = useRef<ValidationReport | null>(null);
   const valManifestsRef = useRef<ManifestFileRow[] | null>(null);
@@ -337,11 +338,14 @@ function ValidationsPage() {
     setGenLoading(p => ({ ...p, [g.entity]: { done: 0, total: g.files.length } }));
     setGenNote('');
     try {
-      // Fetch the relationship graph (once) and this entity's manifest in parallel
-      // with nothing blocking; then download + tag the files.
+      // Fetch the relationship graph + full edge list (once), then download + tag.
       if (!samplingTargetsRef.current) {
         try { samplingTargetsRef.current = await fetchSamplingTargets(LAMBDA_URL); }
         catch (e) { console.error('sampling_targets failed', e); samplingTargetsRef.current = []; }
+      }
+      if (!relationshipEdgesRef.current) {
+        try { relationshipEdgesRef.current = await fetchSamplingRelationships(LAMBDA_URL); }
+        catch (e) { console.error('sampling_relationships failed', e); relationshipEdgesRef.current = []; }
       }
       const manifest = await readEntityManifests(PLAN_MOCK, g.entity);
       const tagged = await loadGeneratedTagged(g, manifest, (done, total) =>
@@ -349,14 +353,18 @@ function ValidationsPage() {
 
       const label = g.entity.replace(/_/g, ' ');
       const targets = samplingTargetsRef.current || [];
+      const edges = relationshipEdgesRef.current || [];
+      const overrides = compositeOverridesRef.current || undefined;
       if (targets.length && manifest.size) {
-        // Relationship-aware: group by real source, join on the configured link
-        // field (composite key from the validation report when we have one).
-        const results = mergeByRelationships(tagged, targets, compositeOverridesRef.current || undefined);
+        // Multi-level relationship merge (falls back to direct-child if the full
+        // edge graph is unavailable). Group by real source; composite keys honoured.
+        const results = edges.length
+          ? mergeHierarchy(tagged, targets, edges, overrides)
+          : mergeByRelationships(tagged, targets, overrides);
         addMergeResults(results);
         const flagged = results.reduce((s, r) => s + r.warnings.length, 0);
         const complete = completenessNote(g.entity);
-        setGenNote(`${label}: relationship-aware merge · ${results.length} master${results.length !== 1 ? 's' : ''}${flagged ? ` · ${flagged} file(s) flagged` : ''}${complete ? ` · ${complete}` : ''}.`);
+        setGenNote(`${label}: ${edges.length ? 'multi-level' : 'relationship'} merge · ${results.length} master${results.length !== 1 ? 's' : ''}${flagged ? ` · ${flagged} file(s) flagged` : ''}${complete ? ` · ${complete}` : ''}.`);
       } else {
         // No manifest (older generation) → fall back to filename grouping.
         addRawResults(tagged);

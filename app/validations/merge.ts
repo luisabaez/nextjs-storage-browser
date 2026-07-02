@@ -583,3 +583,209 @@ export function mergeByRelationships(
   }
   return results;
 }
+
+// ── Multi-level (hierarchical) relationship merge ────────────────────────────
+// Handles chains deeper than one level (e.g. Awards → Award Projects bridge →
+// Project Tasks). Builds a spanning tree of the loaded tables rooted at the
+// configured target by following the parent/child edges, then propagates each
+// root record's ROW INDEX down the tree so every descendant — direct or deep —
+// is attached to the root records it belongs to and joined/aggregated on the
+// root key. When a table's configured parent isn't loaded (a bridge like
+// Award Projects standing in for the un-generated Projects table), it attaches
+// to the nearest loaded table that provides its link field. Composite root keys
+// (from the validation report) are honoured for the root's direct children.
+
+export interface RelEdge { child: string; parent: string; link_field: string; }
+
+interface HChild {
+  label: string;
+  headers: string[];
+  rows: unknown[][];
+  rootIdxPerRow: number[][]; // for each child row, the root row-indices it belongs to
+  dropCols: number[];        // child link columns (excluded from the merged output)
+}
+
+function assembleFromRootIdx(
+  parentName: string, bu: string, entityToken: string,
+  rootHeaders: string[], rootRows: unknown[][],
+  keyCols: number[], children: HChild[], extraWarnings: string[],
+): MergeResult {
+  const keyName = String(rootHeaders[keyCols[0]] ?? 'Key');
+  const rootKeyVal = (i: number) => String(rootRows[i]?.[keyCols[0]] ?? '').trim();
+  const rootHasKey = (i: number) => keyCols.every(c => String(rootRows[i][c] ?? '').trim() !== '');
+
+  interface CM {
+    label: string; strategy: 'join' | 'aggregate';
+    keep: { h: string; i: number }[];
+    map: Map<number, unknown[][]>; total: number;
+    headers: string[]; rows: unknown[][]; rootIdxPerRow: number[][];
+  }
+  const cms: CM[] = children.map(c => {
+    const dropSet = new Set([...c.dropCols.map(i => lc(c.headers[i])), ...CONTEXT_COLS]);
+    const map = new Map<number, unknown[][]>();
+    let maxPer = 0, total = 0;
+    c.rows.forEach((r, i) => {
+      const idxs = c.rootIdxPerRow[i];
+      if (!idxs || !idxs.length) return;
+      total++;
+      idxs.forEach(j => { const a = map.get(j) || []; a.push(r); map.set(j, a); if (a.length > maxPer) maxPer = a.length; });
+    });
+    const keep = c.headers.map((h, i) => ({ h: String(h), i })).filter(x => !dropSet.has(lc(x.h)));
+    return { label: c.label, strategy: (maxPer <= 1 ? 'join' : 'aggregate') as 'join' | 'aggregate', keep, map, total, headers: c.headers, rows: c.rows, rootIdxPerRow: c.rootIdxPerRow };
+  });
+
+  const joins = cms.filter(m => m.strategy === 'join');
+  const aggs = cms.filter(m => m.strategy === 'aggregate');
+  const headers: string[] = rootHeaders.map(String);
+  joins.forEach(m => m.keep.forEach(x => headers.push(`${m.label}: ${x.h}`)));
+  aggs.forEach(m => { const rem = m.keep[0]; if (rem) { headers.push(`${rem.h} Count`); headers.push(`All ${rem.h}s`); } });
+
+  const rows: unknown[][] = [];
+  rootRows.forEach((pr, j) => {
+    if (!rootHasKey(j)) return;
+    const row: unknown[] = [...pr];
+    joins.forEach(m => { const g = m.map.get(j); const first = g ? g[0] : null; m.keep.forEach(x => row.push(first ? first[x.i] : null)); });
+    aggs.forEach(m => {
+      const g = m.map.get(j) || [];
+      const rem = m.keep[0]; if (!rem) return;
+      const vals = Array.from(new Set(g.map(r => r[rem.i]).filter(v => v != null && String(v).trim() !== '')));
+      row.push(g.length); row.push(vals.join(', '));
+    });
+    rows.push(row);
+  });
+
+  const validRoots = new Set<number>();
+  rootRows.forEach((_, j) => { if (rootHasKey(j)) validRoots.add(j); });
+  const integrity: ChildIntegrity[] = cms.map(m => {
+    let orphans = 0;
+    m.rows.forEach((_, i) => { const idx = m.rootIdxPerRow[i]; if (!idx || !idx.length) orphans++; });
+    const covered = new Set<number>();
+    m.map.forEach((_, j) => { if (validRoots.has(j)) covered.add(j); });
+    return { child: m.label, rows: m.total, orphans, parentsCovered: covered.size, parentsTotal: validRoots.size, gaps: validRoots.size - covered.size, status: orphans === 0 ? 'CLEAN' : 'ORPHANS' };
+  });
+
+  const childrenData: ChildDetail[] = cms.map((m, ci) => {
+    const src = children[ci];
+    const hdr = [`Belongs To (${keyName})`, ...m.headers.map(String)];
+    const rws = m.rows.map((r, i) => [ (src.rootIdxPerRow[i] || []).map(j => rootKeyVal(j)).join(', '), ...r ]);
+    return { label: m.label, headers: hdr, rows: rws, keyIdx: 0, strategy: m.strategy };
+  });
+
+  const warnings = [...extraWarnings];
+  const totalChildRows = cms.reduce((s, m) => s + m.total, 0);
+  if (totalChildRows > 250000) warnings.push(`Large dataset: ~${totalChildRows.toLocaleString()} descendant rows — the workbook may be slow to build.`);
+
+  return {
+    bu, entityToken, parentName, key: keyName,
+    headers, rows,
+    children: cms.map(m => ({ label: m.label, strategy: m.strategy, keptCols: m.keep.length, rowCount: m.total })),
+    childrenData, integrity, warnings, recordCount: rows.length,
+  };
+}
+
+export function mergeHierarchy(
+  files: TaggedFile[],
+  targets: SamplingTarget[],
+  edges: RelEdge[],
+  keyOverrides?: Map<string, string[]>,
+): MergeResult[] {
+  const targetSet = new Set(targets.map(t => normTable(t.table)));
+  const displayOf = new Map(targets.map(t => [normTable(t.table), t.display] as const));
+  const childrenOf = new Map<string, { childN: string; link: string }[]>();
+  const parentsOf = new Map<string, { parentN: string; link: string }[]>();
+  for (const e of edges) {
+    const cN = normTable(e.child), pN = normTable(e.parent);
+    if (!childrenOf.has(pN)) childrenOf.set(pN, []);
+    childrenOf.get(pN)!.push({ childN: cN, link: e.link_field });
+    if (!parentsOf.has(cN)) parentsOf.set(cN, []);
+    parentsOf.get(cN)!.push({ parentN: pN, link: e.link_field });
+  }
+
+  const bySource = new Map<string, TaggedFile[]>();
+  for (const f of files) { const s = (f.source || '').trim() || '(none)'; if (!bySource.has(s)) bySource.set(s, []); bySource.get(s)!.push(f); }
+
+  const results: MergeResult[] = [];
+  for (const src of Array.from(bySource.keys()).sort()) {
+    const group = bySource.get(src)!;
+    const rootFile = group.find(f => f.table && targetSet.has(normTable(f.table)));
+    if (!rootFile) {
+      for (const g of groupRawFiles(group.map(f => ({ name: f.name, data: f.data })))) { try { results.push(mergeGroup(g)); } catch { /* skip */ } }
+      continue;
+    }
+    const normRoot = normTable(rootFile.table!);
+    const rootHeaders = rootFile.data.headers.map(String);
+    const rootLabel = displayOf.get(normRoot) || shortTable(rootFile.table!);
+    const loaded = new Map<string, TaggedFile>();
+    for (const f of group) if (f.table) loaded.set(normTable(f.table), f);
+
+    const override = keyOverrides?.get(normRoot);
+    let keyCols: number[] = override && override.length ? override.map(p => resolveLinkCol(rootHeaders, p)).filter(i => i >= 0) : [];
+    if (!keyCols.length) {
+      const kids = childrenOf.get(normRoot) || [];
+      const counts = new Map<number, number>();
+      for (const k of kids) { const i = resolveLinkCol(rootHeaders, k.link); if (i >= 0) counts.set(i, (counts.get(i) || 0) + 1); }
+      keyCols = counts.size ? [Array.from(counts.entries()).sort((a, b) => b[1] - a[1])[0][0]] : [0];
+    }
+
+    const rootIdxByTable = new Map<string, number[][]>();
+    rootIdxByTable.set(normRoot, rootFile.data.rows.map((_, i) => [i]));
+    const tree: { file: TaggedFile; dropCols: number[] }[] = [];
+    const warnings: string[] = [];
+    const visited = new Set<string>([normRoot]);
+
+    const attach = (cN: string, pN: string, link: string): boolean => {
+      const cFile = loaded.get(cN)!, pFile = loaded.get(pN)!;
+      const pHeaders = pFile.data.headers.map(String), cHeaders = cFile.data.headers.map(String);
+      let pIdxs: number[] = [], cIdxs: number[] = [];
+      if (pN === normRoot && override && override.length) {
+        const nl = normTable(link);
+        if (override.some(p => { const n = normTable(p); return n.includes(nl) || nl.includes(n); })) {
+          const r = resolveParts(pHeaders, cHeaders, override); pIdxs = r.pIdxs; cIdxs = r.cIdxs;
+        }
+      }
+      if (!pIdxs.length) { const p = resolveLinkCol(pHeaders, link), c = resolveLinkCol(cHeaders, link); if (p < 0 || c < 0) return false; pIdxs = [p]; cIdxs = [c]; }
+      const pRootIdx = rootIdxByTable.get(pN)!;
+      const pIndex = new Map<string, Set<number>>();
+      pFile.data.rows.forEach((pr, i) => { const v = linkKeyOf(pr, pIdxs); if (!v) return; let s = pIndex.get(v); if (!s) { s = new Set(); pIndex.set(v, s); } (pRootIdx[i] || []).forEach(j => s!.add(j)); });
+      const cRootIdx = cFile.data.rows.map(cr => { const v = linkKeyOf(cr, cIdxs); const s = v ? pIndex.get(v) : undefined; return s ? Array.from(s) : []; });
+      rootIdxByTable.set(cN, cRootIdx);
+      tree.push({ file: cFile, dropCols: cIdxs });
+      return true;
+    };
+
+    const drain = (queue: string[]) => {
+      while (queue.length) {
+        const pN = queue.shift()!;
+        for (const { childN, link } of (childrenOf.get(pN) || [])) {
+          if (visited.has(childN) || !loaded.has(childN)) continue;
+          if (attach(childN, pN, link)) { visited.add(childN); queue.push(childN); }
+        }
+      }
+    };
+    drain([normRoot]);
+
+    // Bridge fallback: attach any loaded table not reached via config edges to the
+    // nearest visited table that provides one of its link fields.
+    for (const [nt, f] of Array.from(loaded.entries())) {
+      if (visited.has(nt)) continue;
+      let done = false;
+      for (const { link } of (parentsOf.get(nt) || [])) {
+        for (const vN of Array.from(visited)) { if (attach(nt, vN, link)) { visited.add(nt); done = true; break; } }
+        if (done) break;
+      }
+      if (done) drain([nt]);
+      else warnings.push(`${f.name} — could not attach to ${rootLabel} (no link path found among the loaded files); not merged.`);
+    }
+
+    const hchildren: HChild[] = tree.map(t => {
+      const cN = normTable(t.file.table!);
+      return {
+        label: childLabel(rootFile.table!, t.file.table!),
+        headers: t.file.data.headers.map(String), rows: t.file.data.rows,
+        rootIdxPerRow: rootIdxByTable.get(cN)!, dropCols: t.dropCols,
+      };
+    });
+    results.push(assembleFromRootIdx(rootFile.name, src === '(none)' ? '' : src, rootLabel, rootHeaders, rootFile.data.rows, keyCols, hchildren, warnings));
+  }
+  return results;
+}
