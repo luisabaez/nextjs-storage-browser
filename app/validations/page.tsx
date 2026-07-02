@@ -163,6 +163,21 @@ function ValidationsPage() {
     populated: planRows.filter(r => typeof r.tableRows === 'number' && r.tableRows > 0).length,
   };
 
+  // Entity-file generation (server-side run of the conversion scripts).
+  interface GenState { state: 'idle' | 'working' | 'done' | 'error'; dry?: boolean; planned?: PlanRow[] | { file: string; rows: number }[]; generated?: { file: string; rows: number }[]; folder?: string; error?: string; }
+  const [entGen, setEntGen] = useState<Record<string, GenState>>({});
+  const doGen = async (entity: string, dry: boolean) => {
+    setEntGen(p => ({ ...p, [entity]: { state: 'working', dry } }));
+    try {
+      const url = `${LAMBDA_URL}?action=generate_entity_files&mock=${PLAN_MOCK}&entity=${encodeURIComponent(entity)}${dry ? '&dry_run=1' : ''}`;
+      const d = await (await fetch(url)).json();
+      if (!d.ok) { setEntGen(p => ({ ...p, [entity]: { state: 'error', error: d.error || 'Failed' } })); return; }
+      setEntGen(p => ({ ...p, [entity]: { state: 'done', dry, planned: d.planned, generated: d.generated, folder: d.folder } }));
+    } catch (e) {
+      setEntGen(p => ({ ...p, [entity]: { state: 'error', error: e instanceof Error ? e.message : String(e) } }));
+    }
+  };
+
   useEffect(() => {
     (async () => {
       try {
@@ -755,6 +770,24 @@ function ValidationsPage() {
                           <tr className="val-bu-detail-row">
                             <td></td>
                             <td colSpan={6}>
+                              {(() => {
+                                const gs = entGen[g.entity] || { state: 'idle' as const };
+                                return (
+                                  <div className="val-gen-panel">
+                                    <span className="val-gen-label">Generate entity files →</span>
+                                    <button className="val-btn-row" disabled={gs.state === 'working'} onClick={() => doGen(g.entity, true)}>Preview</button>
+                                    <button className="val-btn-row" disabled={gs.state === 'working'} onClick={() => { if (confirm(`Generate the ${g.entity} files into ${SAMPLING_FOLDER}Generated/? This reads the conversion tables and writes CV_ files to S3.`)) doGen(g.entity, false); }}>Generate</button>
+                                    {gs.state === 'working' && <span className="val-gen-status"><span className="val-spinner val-spinner-dark" /> {gs.dry ? 'previewing…' : 'generating… (may take a while)'}</span>}
+                                    {gs.state === 'error' && <span className="val-gen-status val-file-err">{gs.error}</span>}
+                                    {gs.state === 'done' && gs.dry && gs.planned && (
+                                      <span className="val-gen-status">Would generate <b>{gs.planned.length}</b> file(s) · {gs.planned.reduce((s, x) => s + (x as { rows: number }).rows, 0).toLocaleString()} rows</span>
+                                    )}
+                                    {gs.state === 'done' && !gs.dry && gs.generated && (
+                                      <span className="val-gen-status">✓ Generated <b>{gs.generated.length}</b> file(s) to <code>{gs.folder}</code></span>
+                                    )}
+                                  </div>
+                                );
+                              })()}
                               <table className="val-child-table">
                                 <thead><tr><th>Source</th><th>BU</th><th>Conversion table</th><th>Rows</th><th>Imported</th></tr></thead>
                                 <tbody>

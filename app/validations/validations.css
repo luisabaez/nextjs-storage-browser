@@ -238,6 +238,11 @@
 .val-ready-blocked { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
 .val-ready-unknown { background: #f3f4f6; color: #6b7280; border: 1px solid #e5e7eb; }
 
+.val-gen-panel { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 4px 12px; }
+.val-gen-label { font-size: 12.5px; font-weight: 600; color: #374151; }
+.val-gen-status { font-size: 12px; color: #6b7280; display: inline-flex; align-items: center; gap: 6px; }
+.val-gen-status code { font-size: 11px; }
+
 .val-files td { vertical-align: middle; }
 .val-files select, .val-files input {
   height: 32px; padding: 0 8px; border: 1px solid #d1d5db;
