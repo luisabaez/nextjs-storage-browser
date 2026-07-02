@@ -1607,6 +1607,32 @@ def lambda_handler(event, context):
             return {"statusCode": 500, "headers": headers,
                     "body": json.dumps({"ok": False, "error": str(e)})}
 
+    if action == "generate_entity_files":
+        # ?action=generate_entity_files&mock=MOCK14&entity=Supplier[&subentity=..][&dry_run=1]
+        # Server-side run of the ConvertedFilesBySource scripts for one entity:
+        # splits each conversion table by source[/BU] and writes CV_ files to
+        # Sampling/Generated/. dry_run=1 previews (counts, no writes).
+        try:
+            p = event.get("queryStringParameters") or {}
+            mock = (p.get("mock") or "MOCK14").upper()
+            entity = (p.get("entity") or "").strip()
+            subentity = (p.get("subentity") or "").strip() or None
+            dry_run = str(p.get("dry_run") or "").lower() in ("1", "true", "yes")
+            target_bucket = p.get("bucket") or DEFAULT_BUCKET
+            if not entity:
+                return {"statusCode": 400, "headers": headers,
+                        "body": json.dumps({"ok": False, "error": "entity required"})}
+            conn_str = get_connection_string()
+            res = sampling.generate_entity_files(conn_str, s3_client, target_bucket,
+                                                 mock, entity, subentity, dry_run=dry_run)
+            return {"statusCode": 200 if res.get("ok") else 400,
+                    "headers": headers,
+                    "body": json.dumps(res, default=str)}
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
     if action == "sampling_runs":
         # ?action=sampling_runs[&bucket=...] — recent sampling runs (history)
         try:

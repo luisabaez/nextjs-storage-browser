@@ -635,3 +635,134 @@ def list_entity_plan(conn_str, mock='MOCK14', source_db=None, with_counts=False)
                 rec['tableRows'] = counts.get(rec.get('CONVERSION_TABLE_BU', ''))
 
     return {"ok": True, "mock": mock, "count": len(out), "rows": out}
+
+
+# ── Entity-file generation (server-side equivalent of the ConvertedFilesBySource
+# scripts) ────────────────────────────────────────────────────────────────────
+# For one entity, read its conversion tables from SETUP_CONVERSION_PLAN_{mock},
+# split each by its source field (and BU field) and write one CV_ file per
+# source[/BU] into Sampling/Generated/{mock}/{entity}/ — the raw parent+child
+# set that feeds the merge + sampling. dry_run previews (counts, no writes).
+GENERATED_FOLDER = "Sampling/Generated/"
+XLSX_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+GEN_MAX_FILES = 400  # safety cap per run
+
+
+def _safe_name(s):
+    return re.sub(r'[^A-Za-z0-9]+', '_', str(s or '')).strip('_') or 'NA'
+
+
+def _table_prefix(t):
+    for s in ['_VW_CONVERTED_TBL', 'CONVERTED_VW', 'VW_CONVERTED', 'VW_TBL', 'VW_tbl', 'VW', 'TBL']:
+        t = t.replace(s, '')
+    return t.strip('_').rstrip('_')
+
+
+def _resolve_col(cols, name):
+    nl = str(name or '').strip().lower()
+    for c in cols:
+        if c.lower() == nl:
+            return c
+    return None
+
+
+def _rows_to_xlsx_bytes(headers, rows):
+    wb = openpyxl.Workbook(write_only=True)
+    ws = wb.create_sheet()
+    ws.append([str(h) for h in headers])
+    for r in rows:
+        ws.append([_coerce(v) for v in r])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def generate_entity_files(conn_str, s3, bucket, mock, entity, subentity=None,
+                          dry_run=False, source_db=None):
+    db = source_db or SOURCE_DATABASE
+    plan_table = f"SETUP_CONVERSION_PLAN_{mock}"
+    out_prefix = f"{GENERATED_FOLDER}{mock}/{_safe_name(entity)}/"
+    planned, generated, missing = [], [], []
+
+    with pyodbc.connect(conn_str) as conn:
+        cur = conn.cursor()
+        cur.execute(f"SELECT COUNT(*) FROM [{db}].INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = ?", (plan_table,))
+        if cur.fetchone()[0] == 0:
+            return {"ok": False, "error": f"{plan_table} not found in {db}"}
+
+        where = ("ISNULL([CONVERSION_TABLE_BU],'') <> '' AND ISNULL([ENRICHMENT_SYSTEM],'') <> 'Y' "
+                 "AND ISNULL([CONVERSION_TABLE_SourceField],'') <> '' AND [Entity] = ?")
+        params = [entity]
+        if subentity:
+            where += " AND [SubEntity] = ?"
+            params.append(subentity)
+        cur.execute(
+            f"SELECT DISTINCT [CONVERSION_TABLE_BU],[CONVERSION_TABLE_SourceField],[CONVERSION_TABLE_BU_Field] "
+            f"FROM [{db}].[dbo].[{plan_table}] WHERE {where} ORDER BY 1", params)
+        plans = cur.fetchall()
+
+        for (table, src_field, bu_field) in plans:
+            table = (table or '').strip()
+            src_field = (src_field or '').strip()
+            bu_field = (bu_field or '').strip()
+            if not table or not src_field:
+                continue
+            _, cols = _object_meta(cur, db, table)
+            if not cols:
+                missing.append(table)
+                continue
+            src_col = _resolve_col(cols, src_field)
+            if not src_col:
+                missing.append(f"{table} (no source field '{src_field}')")
+                continue
+            bu_col = _resolve_col(cols, bu_field) if bu_field else None
+            prefix = _table_prefix(table)
+            fq = f"[{db}].[dbo].[{table}]"
+
+            # Distinct source[/BU] combinations (excluding the header-as-value quirk).
+            if bu_col and bu_col.lower() != src_col.lower():
+                cur.execute(f"SELECT DISTINCT [{src_col}],[{bu_col}] FROM {fq} WHERE [{src_col}] <> ?", (src_field,))
+            else:
+                bu_col = None
+                cur.execute(f"SELECT DISTINCT [{src_col}] FROM {fq} WHERE [{src_col}] <> ?", (src_field,))
+            combos = cur.fetchall()
+
+            for combo in combos:
+                source = str(combo[0]).strip() if combo[0] is not None else ''
+                if not source:
+                    continue
+                bu = str(combo[1]).strip() if (bu_col and len(combo) > 1 and combo[1] is not None) else ''
+                if bu_col and bu:
+                    fname = f"CV_{prefix}__{_safe_name(source)}_{_safe_name(bu)}.xlsx"
+                    cond = f"WHERE [{src_col}] = ? AND [{bu_col}] = ?"
+                    args = (source, bu)
+                else:
+                    fname = f"CV_{prefix}__{_safe_name(source)}.xlsx"
+                    cond = f"WHERE [{src_col}] = ?"
+                    args = (source,)
+
+                if dry_run:
+                    cur.execute(f"SELECT COUNT(*) FROM {fq} {cond}", args)
+                    planned.append({"file": fname, "table": table, "source": source, "bu": bu,
+                                    "rows": cur.fetchone()[0]})
+                    continue
+
+                if len(generated) >= GEN_MAX_FILES:
+                    return {"ok": True, "entity": entity, "mock": mock, "folder": out_prefix,
+                            "generated": generated, "missing": missing,
+                            "capped": f"stopped at {GEN_MAX_FILES} files"}
+
+                cur.execute(f"SELECT * FROM {fq} {cond}", args)
+                headers = [d[0] for d in cur.description]
+                rows = cur.fetchall()
+                s3.put_object(Bucket=bucket, Key=out_prefix + fname,
+                              Body=_rows_to_xlsx_bytes(headers, rows), ContentType=XLSX_CONTENT_TYPE)
+                generated.append({"file": fname, "key": out_prefix + fname, "table": table,
+                                  "source": source, "bu": bu, "rows": len(rows)})
+
+    if dry_run:
+        return {"ok": True, "entity": entity, "mock": mock, "dry_run": True,
+                "folder": out_prefix, "planned": planned, "missing": missing,
+                "plan_count": len(plans)}
+    return {"ok": True, "entity": entity, "mock": mock, "folder": out_prefix,
+            "generated": generated, "missing": missing}
