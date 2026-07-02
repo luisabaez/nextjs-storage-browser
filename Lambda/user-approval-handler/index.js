@@ -19,10 +19,14 @@
 const { CognitoIdentityProviderClient, AdminGetUserCommand, AdminUpdateUserAttributesCommand, AdminEnableUserCommand, ListUsersCommand } = require("@aws-sdk/client-cognito-identity-provider");
 const { SESClient, SendEmailCommand } = require("@aws-sdk/client-ses");
 const { LambdaClient, GetFunctionConfigurationCommand, UpdateFunctionConfigurationCommand } = require("@aws-sdk/client-lambda");
+const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
+const { DynamoDBDocumentClient, GetCommand, PutCommand, ScanCommand } = require("@aws-sdk/lib-dynamodb");
 
 const cognitoClient = new CognitoIdentityProviderClient({ region: process.env.AWS_REGION || "us-east-1" });
 const sesClient = new SESClient({ region: process.env.AWS_REGION || "us-east-1" });
 const lambdaClient = new LambdaClient({ region: process.env.AWS_REGION || "us-east-1" });
+const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: process.env.AWS_REGION || "us-east-1" }));
+const PERMISSIONS_TABLE = process.env.PERMISSIONS_TABLE || "HaciendaUserPermissions";
 
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "mrichcreek@elitebco.com";
 const APPROVAL_TOKEN = process.env.APPROVAL_TOKEN || "hacienda-erp-approval-2024";
@@ -80,10 +84,12 @@ exports.handler = async (event) => {
     `
   });
 
+  // Actions that return JSON (vs the HTML approve/deny pages)
+  const JSON_ACTIONS = ["list", "get_permissions", "list_permissions", "set_permissions"];
+
   // Validate token
   if (token !== APPROVAL_TOKEN) {
-    // For list action, return JSON error
-    if (action === "list") {
+    if (JSON_ACTIONS.includes(action)) {
       return jsonResponse(403, { error: "Invalid or missing security token" });
     }
     return htmlResponse(403, "Access Denied", "Invalid or missing security token.", false);
@@ -97,6 +103,58 @@ exports.handler = async (event) => {
     } catch (error) {
       console.error("Error fetching admin data:", error);
       return jsonResponse(500, { error: error.message });
+    }
+  }
+
+  // ── User permission store (DynamoDB) ──
+  // get_permissions&email=X       -> one user's permissions (client fetches its own on login)
+  // list_permissions              -> all users' permissions (admin dashboard)
+  // set_permissions&data=<json>   -> upsert; data = {email, permissions, actor} url-encoded
+  if (action === "get_permissions") {
+    if (!email) return jsonResponse(400, { ok: false, error: "email required" });
+    try {
+      const res = await ddb.send(new GetCommand({
+        TableName: PERMISSIONS_TABLE, Key: { email: email.toLowerCase() },
+      }));
+      return jsonResponse(200, { ok: true, permissions: res.Item || null });
+    } catch (e) {
+      console.error("get_permissions error:", e);
+      return jsonResponse(500, { ok: false, error: e.message });
+    }
+  }
+
+  if (action === "list_permissions") {
+    try {
+      const res = await ddb.send(new ScanCommand({ TableName: PERMISSIONS_TABLE }));
+      return jsonResponse(200, { ok: true, permissions: res.Items || [] });
+    } catch (e) {
+      console.error("list_permissions error:", e);
+      return jsonResponse(500, { ok: false, error: e.message });
+    }
+  }
+
+  if (action === "set_permissions") {
+    try {
+      const payload = JSON.parse(queryParams.data || "{}");
+      const targetEmail = (payload.email || "").toLowerCase();
+      if (!targetEmail) return jsonResponse(400, { ok: false, error: "email required" });
+      const p = payload.permissions || {};
+      const asArray = (v) => (Array.isArray(v) ? v : []);
+      const item = {
+        email: targetEmail,
+        isAdmin: !!p.isAdmin,
+        allowedSources: asArray(p.allowedSources),
+        allowedEntities: asArray(p.allowedEntities),
+        allowedMocks: asArray(p.allowedMocks),
+        allowedBusinessUnits: asArray(p.allowedBusinessUnits),
+        updatedBy: payload.actor || "",
+        updatedAt: new Date().toISOString(),
+      };
+      await ddb.send(new PutCommand({ TableName: PERMISSIONS_TABLE, Item: item }));
+      return jsonResponse(200, { ok: true, permissions: item });
+    } catch (e) {
+      console.error("set_permissions error:", e);
+      return jsonResponse(500, { ok: false, error: e.message });
     }
   }
 
