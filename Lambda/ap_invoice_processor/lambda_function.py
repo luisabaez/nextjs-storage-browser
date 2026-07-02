@@ -1590,6 +1590,23 @@ def lambda_handler(event, context):
             return {"statusCode": 500, "headers": headers,
                     "body": json.dumps({"ok": False, "error": str(e)})}
 
+    if action == "entity_plan":
+        # ?action=entity_plan&mock=MOCK14[&counts=1] — expected entity files from
+        # SETUP_CONVERSION_PLAN_{mock} (+ conversion-table row counts if counts=1).
+        try:
+            p = event.get("queryStringParameters") or {}
+            mock = (p.get("mock") or "MOCK14").upper()
+            with_counts = str(p.get("counts") or "").lower() in ("1", "true", "yes")
+            conn_str = get_connection_string()
+            res = sampling.list_entity_plan(conn_str, mock, with_counts=with_counts)
+            return {"statusCode": 200 if res.get("ok") else 400,
+                    "headers": headers,
+                    "body": json.dumps(res, default=str)}
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
     if action == "sampling_runs":
         # ?action=sampling_runs[&bucket=...] — recent sampling runs (history)
         try:

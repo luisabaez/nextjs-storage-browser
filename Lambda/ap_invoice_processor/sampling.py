@@ -570,3 +570,68 @@ def list_runs(s3, bucket, limit=50):
                 continue
     runs.sort(key=lambda r: r.get("created_at", ""), reverse=True)
     return {"ok": True, "count": len(runs), "runs": runs[:limit]}
+
+
+# ── Entity-file readiness (from SETUP_CONVERSION_PLAN_{mock}) ──────────────────
+# The conversion plan defines, per entity/source/BU, the conversion table the
+# generation scripts export to a CV_ file. This powers the Entity Files tab:
+# what's expected, whether the table is populated, and (client-side) whether the
+# file has been uploaded.
+ENTITY_PLAN_COLUMNS = [
+    'Pillar', 'Module', 'Entity', 'SubEntity', 'SOURCE', 'BU',
+    'CONVERSION_TABLE_BU', 'CONVERSION_TABLE_SourceField', 'CONVERSION_TABLE_BU_Field',
+    'Conversion_Table_Sourcefield_ForSampling', 'FileImportStatus', 'SourceFileName',
+]
+
+
+def list_entity_plan(conn_str, mock='MOCK14', source_db=None, with_counts=False):
+    db = source_db or SOURCE_DATABASE
+    plan_table = f"SETUP_CONVERSION_PLAN_{mock}"
+    with pyodbc.connect(conn_str) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"SELECT COUNT(*) FROM [{db}].INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = ?",
+            (plan_table,),
+        )
+        if cur.fetchone()[0] == 0:
+            return {"ok": False, "error": f"{plan_table} not found in {db}"}
+
+        # Which of the requested columns actually exist (schema varies by mock).
+        cur.execute(
+            f"SELECT COLUMN_NAME FROM [{db}].INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = ?",
+            (plan_table,),
+        )
+        have = {r[0].lower() for r in cur.fetchall()}
+        cols = [c for c in ENTITY_PLAN_COLUMNS if c.lower() in have]
+        sel = ", ".join(f"[{c}]" for c in cols)
+        enrich = "AND ISNULL([ENRICHMENT_SYSTEM],'') <> 'Y'" if 'enrichment_system' in have else ""
+        cur.execute(
+            f"SELECT {sel} FROM [{db}].[dbo].[{plan_table}] "
+            f"WHERE ISNULL([CONVERSION_TABLE_BU],'') <> '' {enrich} "
+            f"ORDER BY [Pillar],[Module],[Entity],[SubEntity]"
+        )
+        rows = cur.fetchall()
+        out = []
+        for r in rows:
+            out.append({cols[i]: (str(r[i]).strip() if r[i] is not None else '') for i in range(len(cols))})
+
+        counts = {}
+        if with_counts:
+            tables = sorted({rec.get('CONVERSION_TABLE_BU', '') for rec in out if rec.get('CONVERSION_TABLE_BU')})
+            for t in tables:
+                cur.execute(
+                    f"SELECT COUNT(*) FROM [{db}].INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = ?",
+                    (t,),
+                )
+                if cur.fetchone()[0] == 0:
+                    counts[t] = None  # object missing
+                    continue
+                try:
+                    cur.execute(f"SELECT COUNT(*) FROM [{db}].[dbo].[{t}]")
+                    counts[t] = cur.fetchone()[0]
+                except Exception:
+                    counts[t] = None
+            for rec in out:
+                rec['tableRows'] = counts.get(rec.get('CONVERSION_TABLE_BU', ''))
+
+    return {"ok": True, "mock": mock, "count": len(out), "rows": out}
