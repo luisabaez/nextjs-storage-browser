@@ -231,6 +231,49 @@ export function fileMatchesTable(label: string, table: string): boolean {
   return toks.length > 0 && toks.every(tok => t.includes(tok));
 }
 
+// ── Email readiness overlay (from "FW Publicacion Extracted Files", 2026-07-02) ──
+// Which entities are workable now vs on hold / not published. Hard-coded from the
+// email; update here when a newer status email arrives.
+export type EmailStatus = 'ready' | 'completed' | 'hold' | 'notpublished' | 'unknown';
+
+const EMAIL_STATUS_RULES: { keys: string[]; status: EmailStatus; note?: string }[] = [
+  { keys: ['ARINVOICE'], status: 'ready' },
+  { keys: ['AWARD', 'PROJECT'], status: 'ready' },
+  { keys: ['APINVOICE'], status: 'ready', note: 'non-SIFDE' },
+  { keys: ['LOCATION'], status: 'completed' },
+  { keys: ['SUPPLIER'], status: 'hold', note: 'until PO published' },
+  { keys: ['PROCUREMENTCONTRACT'], status: 'notpublished' },
+  { keys: ['PURCHASEORDER'], status: 'notpublished' },
+  { keys: ['REQUISITION'], status: 'notpublished' },
+  { keys: ['CONTRACT', 'BPA'], status: 'notpublished' },
+  { keys: ['ASSET'], status: 'notpublished' },
+  { keys: ['BANK'], status: 'notpublished' },
+  { keys: ['INVENTORY'], status: 'notpublished' },
+  { keys: ['PSITEM'], status: 'notpublished' },
+  { keys: ['GLBALANCE'], status: 'notpublished' },
+  { keys: ['BUDGETBALANCE'], status: 'notpublished' },
+  { keys: ['CUSTOMER'], status: 'ready' }, // AR Customer
+];
+
+export const EMAIL_STATUS_LABEL: Record<EmailStatus, string> = {
+  ready: 'Ready to work', completed: 'Completed', hold: 'On hold', notpublished: 'Not published', unknown: '—',
+};
+
+export function entityEmailStatus(entity: string): { status: EmailStatus; note?: string } {
+  const n = normName(entity);
+  for (const r of EMAIL_STATUS_RULES) if (r.keys.some(k => n.includes(k))) return { status: r.status, note: r.note };
+  return { status: 'unknown' };
+}
+
+// PRIFAS entities have no agency — one complete file is published to ALL of their
+// agencies (per the email). So their file counts as present for every agency it
+// applies to, regardless of the generated file's source value.
+const SHARED_ENTITY_KEYS = ['AWARD', 'PROJECT', 'SUPPLIER'];
+export function isSharedEntity(entity: string): boolean {
+  const n = normName(entity);
+  return SHARED_ENTITY_KEYS.some(k => n.includes(k));
+}
+
 // Map each report entity that has a COMPOSITE key to its root sampling target
 // table, so the relationship merge can join that entity's children on the full
 // key. Keyed by the normalized root table name (what mergeByRelationships uses).

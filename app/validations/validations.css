@@ -263,6 +263,22 @@
 .val-flags-item code { font-size: 11px; color: #7c3f00; }
 .val-src-file { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; color: #6b7280; }
 
+/* Sample by BU */
+.val-bu-controls { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin: 6px 0 14px; }
+.val-bu-pick { font-size: 13px; font-weight: 600; color: #374151; display: inline-flex; align-items: center; gap: 8px; }
+.val-bu-pick select { height: 34px; padding: 0 10px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 14px; font-weight: 600; }
+.val-bu-files { display: flex; flex-wrap: wrap; gap: 5px; }
+.val-bu-file { font-size: 11px; padding: 1px 7px; border-radius: 999px; white-space: nowrap; }
+.val-bu-file.ok { background: #ecfdf5; color: #065f46; border: 1px solid #a7f3d0; }
+.val-bu-file.missing { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
+.val-es-note { font-size: 11px; }
+.val-bu-foot { margin-top: 12px; font-size: 12px; }
+.val-es-ready { background: #ecfdf5; color: #065f46; border: 1px solid #a7f3d0; }
+.val-es-completed { background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; }
+.val-es-hold { background: #fffbeb; color: #92400e; border: 1px solid #fde68a; }
+.val-es-notpub { background: #f3f4f6; color: #6b7280; border: 1px solid #e5e7eb; }
+.val-es-unknown { background: #f3f4f6; color: #9ca3af; border: 1px solid #e5e7eb; }
+
 .val-merged-note { font-size: 11px; color: #6b7280; margin-top: 4px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .val-link-btn { border: none; background: none; color: #2563eb; font-size: 11px; font-weight: 600; cursor: pointer; padding: 0; }
 .val-link-btn:hover { text-decoration: underline; }

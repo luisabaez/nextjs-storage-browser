@@ -29,7 +29,7 @@ import { parseAgencyReport, AgencyReport, buildGroups } from './dashboard';
 import { RawFile, MergeResult, SamplingTarget, RelEdge, groupRawFiles, mergeGroup, mergeByRelationships, mergeHierarchy, resultToFileData, downloadMaster, appendValidationSheets } from './merge';
 import { PlanRow, EntityGroup, groupEntityPlan, READINESS_LABEL } from './entityFiles';
 import { GeneratedEntity, ManifestFileRow, listGeneratedEntities, loadGeneratedTagged, readEntityManifests, readAllManifests, fetchSamplingTargets, fetchSamplingRelationships, safeName } from './generated';
-import { ValidationReport, EntityValidation, parseValidationReport, fileMatchesTable, buildCompositeKeyOverrides } from './validationReport';
+import { ValidationReport, EntityValidation, parseValidationReport, fileMatchesTable, buildCompositeKeyOverrides, entityEmailStatus, isSharedEntity, EMAIL_STATUS_LABEL, EmailStatus } from './validationReport';
 
 Amplify.configure(config);
 
@@ -41,7 +41,7 @@ const VALIDATION_REPORT_PATH = 'Sampling/_status/entity_validation_report.xlsx';
 const XLSX_CT = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 const LAMBDA_URL = 'https://5ahxjcxhrcopng5hjgc2n6utxq0rwcmm.lambda-url.us-east-1.on.aws/';
 
-type TabId = 'sampling' | 'dashboard' | 'entities' | 'completeness';
+type TabId = 'sampling' | 'dashboard' | 'entities' | 'completeness' | 'bybu';
 type GenStatus = 'idle' | 'working' | 'done' | 'error';
 
 interface FileEntry {
@@ -67,14 +67,35 @@ function presentFor(mans: ManifestFileRow[], label: string, agency: string) {
 }
 
 const normStr = (s: string) => s.toUpperCase().replace(/[^A-Z0-9]/g, '');
-// Match a generated-entity folder name (e.g. "Supplier", "AR_Invoices") to a
-// report entity ("Suppliers", "AR Invoices").
+// Match a generated-entity folder name (e.g. "Supplier", "AR_Invoices", "Awards")
+// to a report entity ("Suppliers", "AR Invoices", "Projects"). Also considers the
+// entity's master file label, since the report calls the awards entity "Projects"
+// while its master file (and the generated folder) is "AWARDS".
 function matchReportEntity(rep: ValidationReport, folder: string): EntityValidation | null {
   const nf = normStr(folder);
+  if (!nf) return null;
   return rep.entities.find(e => {
-    const a = normStr(e.tab), b = normStr(e.entity);
-    return a.includes(nf) || nf.includes(a) || b.includes(nf) || nf.includes(b);
+    const master = e.files.find(f => f.role === 'master')?.label || '';
+    const cands = [normStr(e.tab), normStr(e.entity), normStr(master)];
+    return cands.some(a => a && (a.includes(nf) || nf.includes(a)));
   }) || null;
+}
+
+// Is an entity's file present for a BU? PRIFAS/shared entities count as present
+// if generated at all (one file serves all their agencies); others need an
+// agency-specific match.
+function buFilePresent(mans: ManifestFileRow[], entity: string, label: string, bu: string) {
+  if (isSharedEntity(entity)) {
+    const hits = mans.filter(m => fileMatchesTable(label, m.table));
+    return { present: hits.length > 0, rows: hits.reduce((s, r) => s + r.rows, 0), shared: true };
+  }
+  const p = presentFor(mans, label, bu);
+  return { present: p.present, rows: p.rows, shared: false };
+}
+
+function emailStatusClass(s: EmailStatus): string {
+  return s === 'ready' ? 'val-es-ready' : s === 'completed' ? 'val-es-completed'
+    : s === 'hold' ? 'val-es-hold' : s === 'notpublished' ? 'val-es-notpub' : 'val-es-unknown';
 }
 
 function repStatusClass(status: string): string {
@@ -442,8 +463,58 @@ function ValidationsPage() {
   }, [applyReport, ensureTargets, PLAN_MOCK]);
 
   useEffect(() => {
-    if (activeTab === 'completeness' && !valLoaded) loadValReport();
+    if ((activeTab === 'completeness' || activeTab === 'bybu') && !valLoaded) loadValReport();
   }, [activeTab, valLoaded, loadValReport]);
+
+  // ── Sample by BU ──
+  const [selectedBU, setSelectedBU] = useState('');
+  const [buLoading, setBuLoading] = useState(false);
+  useEffect(() => {
+    if (valReport && !selectedBU && valReport.agencies.length) setSelectedBU(valReport.agencies[0]);
+  }, [valReport, selectedBU]);
+
+  // Load every file-ready entity for a BU into the Sampling list (filtered to that
+  // BU; PRIFAS/shared entities load whole, per the email's one-file-per-PRIFAS rule).
+  const loadBUIntoSampling = useCallback(async (bu: string) => {
+    if (!valReport) return;
+    setBuLoading(true);
+    try {
+      await ensureTargets();
+      if (!relationshipEdgesRef.current) {
+        try { relationshipEdgesRef.current = await fetchSamplingRelationships(LAMBDA_URL); } catch { relationshipEdgesRef.current = []; }
+      }
+      const items = genList ?? await refreshGenerated();
+      const targets = samplingTargetsRef.current || [];
+      const edges = relationshipEdgesRef.current || [];
+      const overrides = compositeOverridesRef.current || undefined;
+      const applicable = valReport.entities.filter(e => e.agencies.includes(bu));
+      let loadedEntities = 0, masters = 0;
+      for (const e of applicable) {
+        // file-ready = every expected file present for this BU
+        const ready = e.files.every(f => {
+          const c = f.counts[bu]; if (!c || c === 'N/A') return true;
+          return buFilePresent(valManifestsRef.current || [], e.entity, f.label, bu).present;
+        });
+        if (!ready) continue;
+        const g = items.find(x => matchReportEntity(valReport, x.entity)?.tab === e.tab);
+        if (!g) continue;
+        const manifest = await readEntityManifests(PLAN_MOCK, g.entity);
+        const tagged = await loadGeneratedTagged(g, manifest);
+        const shared = isSharedEntity(e.entity);
+        const forBU = shared ? tagged : tagged.filter(t => t.source === bu || t.bu === bu);
+        if (!forBU.length) continue;
+        const results = edges.length ? mergeHierarchy(forBU, targets, edges, overrides) : mergeByRelationships(forBU, targets, overrides);
+        addMergeResults(results);
+        loadedEntities++; masters += results.length;
+      }
+      setActiveTab('sampling');
+      setGenNote(`BU ${bu}: loaded ${loadedEntities} ready entit${loadedEntities !== 1 ? 'ies' : 'y'} → ${masters} master${masters !== 1 ? 's' : ''} into the sampling list.`);
+    } catch (e) {
+      console.error('load-bu failed', e);
+    } finally {
+      setBuLoading(false);
+    }
+  }, [valReport, ensureTargets, genList, refreshGenerated, addMergeResults]);
 
   const onRawDrop = (e: React.DragEvent) => {
     e.preventDefault();
@@ -590,6 +661,9 @@ function ValidationsPage() {
         </button>
         <button className={`val-tab-btn ${activeTab === 'completeness' ? 'active' : ''}`} onClick={() => setActiveTab('completeness')}>
           Completeness
+        </button>
+        <button className={`val-tab-btn ${activeTab === 'bybu' ? 'active' : ''}`} onClick={() => setActiveTab('bybu')}>
+          Sample by BU
         </button>
       </div>
 
@@ -1211,6 +1285,98 @@ function ValidationsPage() {
                     })}
                   </tbody>
                 </table>
+              </>
+            );
+          })()}
+        </div>
+      )}
+
+      {activeTab === 'bybu' && (
+        <div className="val-tab-content">
+          <div className="val-intro">
+            <h2>Sample by BU</h2>
+            <p>
+              Pick a business unit to see every entity and master/child file it expects
+              (from the validation report&rsquo;s <em>Present in agencies</em>), whether those files
+              have been generated, and the latest email status. When a BU&rsquo;s files are ready,
+              load them into the Sampling tab to run the sample. PRIFAS entities (Suppliers,
+              Projects) share one file across all their agencies.
+            </p>
+          </div>
+
+          {valLoading && <div className="val-loading"><span className="val-spinner val-spinner-dark" /> Loading validation report…</div>}
+          {!valLoading && !valReport && (
+            <div className="val-error">
+              Upload the Entity Validation Report on the <button className="val-link-btn" onClick={() => setActiveTab('completeness')}>Completeness</button> tab first — it drives this view.
+            </div>
+          )}
+
+          {!valLoading && valReport && (() => {
+            const mans = valManifests;
+            const rows = valReport.entities
+              .filter(e => e.agencies.includes(selectedBU))
+              .map(e => {
+                const es = entityEmailStatus(e.entity);
+                let exp = 0, pres = 0;
+                const fileStates = e.files.map(f => {
+                  const c = f.counts[selectedBU];
+                  if (!c || c === 'N/A') return { label: f.label, role: f.role, na: true, present: false, expected: 0, rows: 0 };
+                  exp++;
+                  const st = buFilePresent(mans, e.entity, f.label, selectedBU);
+                  if (st.present) pres++;
+                  return { label: f.label, role: f.role, na: false, present: st.present, expected: c.rows, rows: st.rows };
+                });
+                return { e, es, exp, pres, ready: exp > 0 && pres === exp, fileStates };
+              });
+            const readyCount = rows.filter(r => r.ready).length;
+            const anyReady = rows.some(r => r.ready);
+            return (
+              <>
+                <div className="val-bu-controls">
+                  <label className="val-bu-pick">BU
+                    <select value={selectedBU} onChange={ev => setSelectedBU(ev.target.value)}>
+                      {valReport.agencies.map(a => <option key={a} value={a}>{a}</option>)}
+                    </select>
+                  </label>
+                  <span className="val-muted">{readyCount} of {rows.length} entities ready</span>
+                  <button className="val-btn-row" disabled={!anyReady || buLoading} onClick={() => loadBUIntoSampling(selectedBU)}>
+                    {buLoading ? <><span className="val-spinner" /> Loading…</> : `→ Load ${selectedBU}'s ready entities into Sampling`}
+                  </button>
+                </div>
+
+                <table className="val-table val-bu">
+                  <thead>
+                    <tr>
+                      <th>Entity</th><th>Linking key</th><th>Email status</th>
+                      <th className="val-col-num">Files</th><th>Expected files (✓ present / ✗ missing)</th><th>Ready</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map(r => (
+                      <tr key={r.e.tab}>
+                        <td className="val-bu-unit">{r.e.entity}</td>
+                        <td className="val-muted" title={r.e.howItLinks}>{r.e.key}</td>
+                        <td>
+                          <span className={`val-repstatus ${emailStatusClass(r.es.status)}`}>{EMAIL_STATUS_LABEL[r.es.status]}</span>
+                          {r.es.note && <span className="val-muted val-es-note"> {r.es.note}</span>}
+                        </td>
+                        <td className="val-col-num">{r.pres}/{r.exp}</td>
+                        <td className="val-bu-files">
+                          {r.fileStates.filter(f => !f.na).map((f, i) => (
+                            <span key={i} className={`val-bu-file ${f.present ? 'ok' : 'missing'}`} title={f.present ? `${f.rows.toLocaleString()} rows generated` : 'not generated for this BU'}>
+                              {f.present ? '✓' : '✗'} {f.label}
+                            </span>
+                          ))}
+                        </td>
+                        <td>{r.ready ? <span className="val-repstatus val-rep-clean">Ready</span> : <span className="val-repstatus val-rep-orphans">{r.exp - r.pres} missing</span>}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <p className="val-muted val-bu-foot">
+                  &ldquo;Ready&rdquo; means every expected master/child file for BU {selectedBU} has been generated. Email status is advisory —
+                  it reflects which entities the team said are workable now (from the latest status email).
+                </p>
               </>
             );
           })()}
