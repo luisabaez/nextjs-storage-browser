@@ -26,9 +26,9 @@ import {
   FileData,
 } from './sampling';
 import { parseAgencyReport, AgencyReport, buildGroups } from './dashboard';
-import { RawFile, MergeResult, groupRawFiles, mergeGroup, resultToFileData, downloadMaster, appendValidationSheets } from './merge';
+import { RawFile, MergeResult, SamplingTarget, groupRawFiles, mergeGroup, mergeByRelationships, resultToFileData, downloadMaster, appendValidationSheets } from './merge';
 import { PlanRow, EntityGroup, groupEntityPlan, READINESS_LABEL } from './entityFiles';
-import { GeneratedEntity, listGeneratedEntities, loadGeneratedFiles, safeName } from './generated';
+import { GeneratedEntity, listGeneratedEntities, loadGeneratedTagged, readEntityManifests, fetchSamplingTargets, safeName } from './generated';
 
 Amplify.configure(config);
 
@@ -226,26 +226,30 @@ function ValidationsPage() {
   const [isRawDragOver, setIsRawDragOver] = useState(false);
   const rawInputRef = useRef<HTMLInputElement>(null);
 
-  // Group + merge raw parent/child files, adding one master per agency to the list.
-  const addRawResults = useCallback((raws: RawFile[]) => {
-    for (const g of groupRawFiles(raws)) {
-      try {
-        const result = mergeGroup(g);
-        const id = `m-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        setEntries(prev => [...prev, {
-          id,
-          fileName: `Consolidated_${result.entityToken}_${result.bu || 'NA'}`,
-          entity: matchEntity(result.entityToken) || '',
-          agency: result.bu,
-          N: result.recordCount,
-          loading: false, error: '', data: resultToFileData(result),
-          genStatus: 'idle', genError: '', generated: null, merged: result,
-        }]);
-      } catch (e) {
-        console.error('merge failed', e);
-      }
-    }
+  // Add one sampling entry per merged master.
+  const addMergeResults = useCallback((results: MergeResult[]) => {
+    results.forEach((result, i) => {
+      const id = `m-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 8)}`;
+      setEntries(prev => [...prev, {
+        id,
+        fileName: `Consolidated_${result.entityToken}_${result.bu || 'NA'}`,
+        entity: matchEntity(result.entityToken) || '',
+        agency: result.bu,
+        N: result.recordCount,
+        loading: false, error: '', data: resultToFileData(result),
+        genStatus: 'idle', genError: '', generated: null, merged: result,
+      }]);
+    });
   }, []);
+
+  // Group + merge raw parent/child files by the filename heuristic (drag-and-drop).
+  const addRawResults = useCallback((raws: RawFile[]) => {
+    const results: MergeResult[] = [];
+    for (const g of groupRawFiles(raws)) {
+      try { results.push(mergeGroup(g)); } catch (e) { console.error('merge failed', e); }
+    }
+    addMergeResults(results);
+  }, [addMergeResults]);
 
   const addRawFiles = useCallback(async (files: FileList | File[]) => {
     const list = Array.from(files).filter(f => /\.(xlsx|xlsm|xls)$/i.test(f.name));
@@ -263,6 +267,8 @@ function ValidationsPage() {
   const [genListLoading, setGenListLoading] = useState(false);
   const [genListError, setGenListError] = useState('');
   const [genLoading, setGenLoading] = useState<Record<string, { done: number; total: number }>>({});
+  const [genNote, setGenNote] = useState('');
+  const samplingTargetsRef = useRef<SamplingTarget[] | null>(null);
 
   const refreshGenerated = useCallback(async (): Promise<GeneratedEntity[]> => {
     setGenListLoading(true);
@@ -281,16 +287,38 @@ function ValidationsPage() {
 
   const loadFromGenerated = useCallback(async (g: GeneratedEntity) => {
     setGenLoading(p => ({ ...p, [g.entity]: { done: 0, total: g.files.length } }));
+    setGenNote('');
     try {
-      const raws = await loadGeneratedFiles(g, (done, total) =>
+      // Fetch the relationship graph (once) and this entity's manifest in parallel
+      // with nothing blocking; then download + tag the files.
+      if (!samplingTargetsRef.current) {
+        try { samplingTargetsRef.current = await fetchSamplingTargets(LAMBDA_URL); }
+        catch (e) { console.error('sampling_targets failed', e); samplingTargetsRef.current = []; }
+      }
+      const manifest = await readEntityManifests(PLAN_MOCK, g.entity);
+      const tagged = await loadGeneratedTagged(g, manifest, (done, total) =>
         setGenLoading(p => ({ ...p, [g.entity]: { done, total } })));
-      addRawResults(raws);
+
+      const label = g.entity.replace(/_/g, ' ');
+      const targets = samplingTargetsRef.current || [];
+      if (targets.length && manifest.size) {
+        // Relationship-aware: group by real source, join on the configured link field.
+        const results = mergeByRelationships(tagged, targets);
+        addMergeResults(results);
+        const flagged = results.reduce((s, r) => s + r.warnings.length, 0);
+        setGenNote(`${label}: relationship-aware merge · ${results.length} master${results.length !== 1 ? 's' : ''}${flagged ? ` · ${flagged} file(s) flagged (not a direct child — see the ⚠ note)` : ''}.`);
+      } else {
+        // No manifest (older generation) → fall back to filename grouping.
+        addRawResults(tagged);
+        setGenNote(`${label}: filename grouping (no manifest found — re-generate to enable the relationship-aware merge).`);
+      }
     } catch (e) {
       console.error('load-from-generated failed', e);
+      setGenListError(e instanceof Error ? e.message : String(e));
     } finally {
       setGenLoading(p => { const n = { ...p }; delete n[g.entity]; return n; });
     }
-  }, [addRawResults]);
+  }, [addMergeResults, addRawResults]);
 
   // Jump from the Entity Files tab to Sampling and load that entity's files.
   const loadGeneratedByEntity = useCallback(async (entity: string) => {
@@ -516,6 +544,7 @@ function ValidationsPage() {
               </button>
             </div>
             {genListError && <div className="val-file-err">{genListError}</div>}
+            {genNote && <div className="val-gen-note-inline">{genNote}</div>}
             {genList && genList.length === 0 && !genListLoading && (
               <div className="val-muted val-generated-empty">No generated files yet — generate them from the Entity Files tab.</div>
             )}

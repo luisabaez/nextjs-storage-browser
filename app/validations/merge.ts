@@ -309,3 +309,233 @@ export function buildValidationWorkbook(r: MergeResult, opts: ValidationWorkbook
 export function downloadMaster(r: MergeResult, filename: string): void {
   XLSX.writeFile(buildValidationWorkbook(r, { masterSheetName: 'Master' }), filename);
 }
+
+// ── Relationship-aware merge ─────────────────────────────────────────────────
+// Instead of guessing parent/key/children from filenames, use the authoritative
+// parent→child + link-field graph (the sampling_targets config) plus the real
+// (table, source) of each generated file (from the generation manifest). Files
+// are grouped by their real source; within a source the configured target is the
+// root, each of its DIRECT children is joined/aggregated on the *configured* link
+// field (resolved to a real column), and anything not a direct child of the root
+// (grandchildren / unrelated) is flagged in warnings rather than mis-merged.
+
+export interface TargetChild { table: string; link_field: string; }
+export interface SamplingTarget { table: string; display: string; children: TargetChild[]; }
+export interface TaggedFile { name: string; data: FileData; table?: string; source?: string; bu?: string; }
+
+const normTable = (s: string) => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+
+function shortTable(t: string): string {
+  return t.replace(/_MOCK\d+.*$/i, '').replace(/_VW.*$/i, '');
+}
+
+// Readable child label: the child table's tokens after the prefix it shares with
+// the root (SCM_SUPPLIER_ADDRESSES vs SCM_SUPPLIER → "Address"; AR LINES vs
+// DISTRIBUTION → "Distribution"), reusing the curated label map.
+function childLabel(rootTable: string, childTable: string): string {
+  const rtok = shortTable(rootTable).toUpperCase().split('_').filter(Boolean);
+  const ctok = shortTable(childTable).toUpperCase().split('_').filter(Boolean);
+  let i = 0;
+  while (i < rtok.length && i < ctok.length && rtok[i] === ctok[i]) i++;
+  const suffix = (ctok.slice(i).join('_') || ctok[ctok.length - 1] || '').toUpperCase();
+  return LABEL_MAP[suffix] || titleize(suffix);
+}
+
+// Resolve a business-key name ("Award Number") to a real column index — mirror of
+// the Lambda's resolve_link_column: normalized exact match, else best substring.
+function resolveLinkCol(headers: string[], linkField: string): number {
+  const nl = normTable(linkField);
+  if (!nl) return -1;
+  const norm = headers.map(h => normTable(h));
+  const exact = norm.findIndex(h => h === nl);
+  if (exact >= 0) return exact;
+  let best = -1, bestLen = Infinity;
+  for (let k = 0; k < norm.length; k++) {
+    if (norm[k] && (nl.includes(norm[k]) || norm[k].includes(nl)) && headers[k].length < bestLen) {
+      best = k; bestLen = headers[k].length;
+    }
+  }
+  return best;
+}
+
+interface RelChild {
+  label: string;
+  headers: string[];
+  rows: unknown[][];
+  parentLinkIdx: number; // column in the parent this child links to
+  childLinkIdx: number;  // column in the child that carries the link value
+}
+
+// Build one MergeResult from an explicit parent + explicitly-linked children.
+// Same join/aggregate/integrity output as mergeGroup, but each child links on its
+// own (parent col, child col) pair rather than a single shared key.
+function assembleMaster(
+  parentName: string, bu: string, entityToken: string,
+  parentHeaders: string[], parentRows: unknown[][],
+  keyName: string, keyIdx: number,
+  relChildren: RelChild[], extraWarnings: string[],
+): MergeResult {
+  interface CM {
+    label: string; strategy: 'join' | 'aggregate';
+    keep: { h: string; i: number }[];
+    map: Map<string, unknown[][]>;
+    total: number; parentLinkIdx: number; childLinkIdx: number;
+    headers: string[]; rows: unknown[][];
+  }
+  const cms: CM[] = relChildren.map(c => {
+    const dropSet = new Set([lc(c.headers[c.childLinkIdx]), ...CONTEXT_COLS]);
+    const map = new Map<string, unknown[][]>();
+    let maxPer = 0, total = 0;
+    for (const r of c.rows) {
+      const kv = String(r[c.childLinkIdx] ?? '').trim();
+      if (!kv) continue;
+      const arr = map.get(kv) || [];
+      arr.push(r); map.set(kv, arr); total++;
+      if (arr.length > maxPer) maxPer = arr.length;
+    }
+    const keep = c.headers.map((h, i) => ({ h: String(h), i })).filter(x => !dropSet.has(lc(x.h)));
+    return {
+      label: c.label, strategy: (maxPer <= 1 ? 'join' : 'aggregate') as 'join' | 'aggregate',
+      keep, map, total, parentLinkIdx: c.parentLinkIdx, childLinkIdx: c.childLinkIdx,
+      headers: c.headers, rows: c.rows,
+    };
+  });
+
+  const joins = cms.filter(m => m.strategy === 'join');
+  const aggs = cms.filter(m => m.strategy === 'aggregate');
+
+  const headers: string[] = parentHeaders.map(String);
+  joins.forEach(m => m.keep.forEach(x => headers.push(`${m.label}: ${x.h}`)));
+  aggs.forEach(m => { const rem = m.keep[0]; if (rem) { headers.push(`${rem.h} Count`); headers.push(`All ${rem.h}s`); } });
+
+  const rows: unknown[][] = [];
+  for (const pr of parentRows) {
+    const kv = String(pr[keyIdx] ?? '').trim();
+    if (!kv) continue;
+    const row: unknown[] = [...pr];
+    joins.forEach(m => {
+      const lv = String(pr[m.parentLinkIdx] ?? '').trim();
+      const g = lv ? m.map.get(lv) : null;
+      const first = g ? g[0] : null;
+      m.keep.forEach(x => row.push(first ? first[x.i] : null));
+    });
+    aggs.forEach(m => {
+      const lv = String(pr[m.parentLinkIdx] ?? '').trim();
+      const g = (lv ? m.map.get(lv) : null) || [];
+      const rem = m.keep[0];
+      if (!rem) return;
+      const vals = Array.from(new Set(g.map(r => r[rem.i]).filter(v => v != null && String(v).trim() !== '')));
+      row.push(g.length);
+      row.push(vals.join(', '));
+    });
+    rows.push(row);
+  }
+
+  const integrity: ChildIntegrity[] = cms.map(m => {
+    const parentVals = new Set<string>();
+    for (const pr of parentRows) {
+      const v = String(pr[m.parentLinkIdx] ?? '').trim();
+      if (v) parentVals.add(v);
+    }
+    let orphans = 0;
+    const childKeys = Array.from(m.map.keys());
+    childKeys.forEach(kv => { if (!parentVals.has(kv)) orphans += m.map.get(kv)!.length; });
+    const covered = childKeys.filter(kv => parentVals.has(kv)).length;
+    return {
+      child: m.label, rows: m.total, orphans,
+      parentsCovered: covered, parentsTotal: parentVals.size,
+      gaps: parentVals.size - covered, status: orphans === 0 ? 'CLEAN' : 'ORPHANS',
+    };
+  });
+
+  const childrenData: ChildDetail[] = cms.map(m => ({
+    label: m.label, headers: m.headers.map(String), rows: m.rows,
+    keyIdx: m.childLinkIdx, strategy: m.strategy,
+  }));
+
+  const warnings = [...extraWarnings];
+  const totalChildRows = cms.reduce((s, m) => s + m.total, 0);
+  if (totalChildRows > 250000) {
+    warnings.push(`Large dataset: ~${totalChildRows.toLocaleString()} child rows — the workbook may be slow to build.`);
+  }
+
+  return {
+    bu, entityToken, parentName, key: keyName,
+    headers, rows,
+    children: cms.map(m => ({ label: m.label, strategy: m.strategy, keptCols: m.keep.length, rowCount: m.total })),
+    childrenData, integrity, warnings, recordCount: rows.length,
+  };
+}
+
+export function mergeByRelationships(files: TaggedFile[], targets: SamplingTarget[]): MergeResult[] {
+  const targetSet = new Set(targets.map(t => normTable(t.table)));
+  const displayOf = new Map(targets.map(t => [normTable(t.table), t.display] as const));
+  const childLink = new Map<string, Map<string, string>>(); // normParent -> normChild -> link_field
+  targets.forEach(t => {
+    const m = new Map<string, string>();
+    t.children.forEach(c => m.set(normTable(c.table), c.link_field));
+    childLink.set(normTable(t.table), m);
+  });
+
+  const bySource = new Map<string, TaggedFile[]>();
+  for (const f of files) {
+    const s = (f.source || '').trim() || '(none)';
+    if (!bySource.has(s)) bySource.set(s, []);
+    bySource.get(s)!.push(f);
+  }
+
+  const results: MergeResult[] = [];
+  for (const src of Array.from(bySource.keys()).sort()) {
+    const group = bySource.get(src)!;
+    const rootFile = group.find(f => f.table && targetSet.has(normTable(f.table)));
+
+    // No configured target in this source group → fall back to the filename heuristic.
+    if (!rootFile) {
+      for (const g of groupRawFiles(group.map(f => ({ name: f.name, data: f.data })))) {
+        try { results.push(mergeGroup(g)); } catch { /* skip */ }
+      }
+      continue;
+    }
+
+    const normRoot = normTable(rootFile.table!);
+    const kids = childLink.get(normRoot) || new Map<string, string>();
+    const warnings: string[] = [];
+    const relChildren: RelChild[] = [];
+    const parentLinkCount = new Map<number, number>();
+    const rootHeaders = rootFile.data.headers.map(String);
+    const rootLabel = displayOf.get(normRoot) || shortTable(rootFile.table!);
+
+    for (const f of group) {
+      if (f === rootFile) continue;
+      const nt = f.table ? normTable(f.table) : '';
+      const linkField = nt ? kids.get(nt) : undefined;
+      if (!linkField) {
+        warnings.push(`${f.name} — not a configured direct child of ${rootLabel}; not merged (multi-level or unrelated).`);
+        continue;
+      }
+      const pIdx = resolveLinkCol(rootHeaders, linkField);
+      const cIdx = resolveLinkCol(f.data.headers.map(String), linkField);
+      if (pIdx < 0 || cIdx < 0) {
+        warnings.push(`${f.name} — could not resolve link column "${linkField}" on the ${pIdx < 0 ? 'parent' : 'child'}; not merged.`);
+        continue;
+      }
+      relChildren.push({
+        label: childLabel(rootFile.table!, f.table!),
+        headers: f.data.headers.map(String), rows: f.data.rows,
+        parentLinkIdx: pIdx, childLinkIdx: cIdx,
+      });
+      parentLinkCount.set(pIdx, (parentLinkCount.get(pIdx) || 0) + 1);
+    }
+
+    // Primary key = the parent column most children link on (else first column).
+    const keyIdx = parentLinkCount.size
+      ? Array.from(parentLinkCount.entries()).sort((a, b) => b[1] - a[1])[0][0]
+      : 0;
+    results.push(assembleMaster(
+      rootFile.name, src === '(none)' ? '' : src, rootLabel,
+      rootHeaders, rootFile.data.rows,
+      String(rootHeaders[keyIdx] ?? 'Key'), keyIdx, relChildren, warnings,
+    ));
+  }
+  return results;
+}

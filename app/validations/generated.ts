@@ -1,14 +1,16 @@
 // Bridge from the server-generated entity files (written to S3 by the
 // generate_entity_files Lambda action) into the client-side merge/sampling flow.
 //
-// The generator writes CV_ files to Sampling/Generated/{mock}/{entity}/. Here we
-// list those folders and pull an entity's files straight into the browser, so
-// they feed the same groupRawFiles + mergeGroup pipeline the drag-and-drop uses —
-// no download-and-re-drop round trip. Record data is read in the browser only.
+// The generator writes CV_ files to Sampling/Generated/{mock}/{entity}/ and a
+// manifest to Sampling/Generated/_manifests/{mock}/{entity}/. Here we list those
+// folders, read the manifest to learn each file's real (table, source, bu), and
+// pull the files into the browser so they feed either the relationship-aware
+// merge (using the sampling_targets graph) or, as a fallback, the same filename
+// grouping the drag-and-drop uses. Record data is read in the browser only.
 
 import { list, getUrl } from 'aws-amplify/storage';
 import { parseWorkbookBuffer } from './sampling';
-import { RawFile } from './merge';
+import { TaggedFile, SamplingTarget } from './merge';
 
 export const GENERATED_PREFIX = 'Sampling/Generated/';
 
@@ -19,6 +21,9 @@ export interface GeneratedEntity {
   files: string[];      // CV_ file names within the folder
   lastModified?: Date;  // newest file time — when it was generated
 }
+
+// (table, source, bu) recorded by the generation manifest for one output file.
+export interface ManifestEntry { table: string; source: string; bu: string; rows: number; }
 
 // Same folder-safe transform the Lambda's _safe_name applies to the entity name.
 export function safeName(s: string): string {
@@ -47,23 +52,68 @@ export async function listGeneratedEntities(mock: string): Promise<GeneratedEnti
   return Array.from(map.values()).sort((a, b) => a.entity.localeCompare(b.entity));
 }
 
-// Download an entity's generated files and parse them into RawFiles for merging.
-export async function loadGeneratedFiles(
+// The authoritative parent→child + link-field graph (metadata only).
+export async function fetchSamplingTargets(lambdaUrl: string): Promise<SamplingTarget[]> {
+  const resp = await fetch(`${lambdaUrl}?action=sampling_targets`);
+  const d = await resp.json();
+  if (!d.ok) throw new Error(d.error || 'failed to load sampling targets');
+  return (d.targets || []).map((t: { table: string; display: string; children?: { table: string; link_field: string }[] }) => ({
+    table: t.table,
+    display: t.display,
+    children: (t.children || []).map((c) => ({ table: c.table, link_field: c.link_field })),
+  }));
+}
+
+// Read the entity's generation manifest(s) → map of output filename to its real
+// (table, source, bu). Newer runs win on collision. Empty map if none exist
+// (e.g. files generated before manifests were introduced).
+export async function readEntityManifests(mock: string, entity: string): Promise<Map<string, ManifestEntry>> {
+  const base = `${GENERATED_PREFIX}_manifests/${mock}/${safeName(entity)}/`;
+  const out = new Map<string, ManifestEntry>();
+  let res;
+  try { res = await list({ path: base, options: { listAll: true } }); }
+  catch { return out; }
+  const jsons = res.items
+    .filter(it => it.path.endsWith('.json'))
+    .sort((a, b) => (+new Date(a.lastModified || 0)) - (+new Date(b.lastModified || 0)));
+  for (const it of jsons) {
+    try {
+      const { url } = await getUrl({ path: it.path, options: { expiresIn: 3600 } });
+      const resp = await fetch(url.toString());
+      if (!resp.ok) continue;
+      const m = await resp.json();
+      for (const gf of (m.generated || [])) {
+        if (gf.file) out.set(gf.file, {
+          table: gf.table || '', source: String(gf.source ?? ''),
+          bu: String(gf.bu ?? ''), rows: gf.rows || 0,
+        });
+      }
+    } catch { /* skip a bad manifest */ }
+  }
+  return out;
+}
+
+// Download an entity's generated files, parse them, and tag each with its real
+// (table, source, bu) from the manifest so the relationship-aware merge can use it.
+export async function loadGeneratedTagged(
   g: GeneratedEntity,
+  manifest: Map<string, ManifestEntry>,
   onProgress?: (done: number, total: number) => void,
-): Promise<RawFile[]> {
-  const raws: RawFile[] = [];
+): Promise<TaggedFile[]> {
+  const out: TaggedFile[] = [];
   let done = 0;
   for (const f of g.files) {
     try {
       const { url } = await getUrl({ path: g.prefix + f, options: { expiresIn: 3600 } });
       const resp = await fetch(url.toString());
       if (!resp.ok) throw new Error(`fetch ${resp.status}`);
-      raws.push({ name: f, data: parseWorkbookBuffer(await resp.arrayBuffer()) });
+      const data = parseWorkbookBuffer(await resp.arrayBuffer());
+      const meta = manifest.get(f);
+      out.push({ name: f, data, table: meta?.table, source: meta?.source, bu: meta?.bu });
     } catch (e) {
       console.error('generated load failed', f, e);
     }
     onProgress?.(++done, g.files.length);
   }
-  return raws;
+  return out;
 }
