@@ -1562,6 +1562,17 @@ def lambda_handler(event, context):
             return {"statusCode": 500, "headers": headers,
                     "body": json.dumps({"ok": False, "error": str(e)})}
 
+    if action == "sampling_relationships":
+        # ?action=sampling_relationships — full parent/child edge list + targets
+        # (for client-side multi-level traversal). Config only, no DB.
+        try:
+            return {"statusCode": 200, "headers": headers,
+                    "body": json.dumps(sampling.list_relationships(), default=str)}
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
     if action == "run_sampling":
         # POST { target_table, sample_size, bucket?, actor? }
         # Selects N random records from the target, gathers linked child

@@ -112,6 +112,7 @@ RELATIONSHIPS = [
     ('SCM_SUPPLIER_ADDRESSES_ASG_MOCK14_VW_TBL', 'SCM_SUPPLIER_ASG_MOCK13_VW_TBL', 'Supplier Name'),
     ('SCM_SUPPLIER_ADDRESSES_MOCK14_VW_TBL', 'SCM_SUPPLIER_MOCK14_VW_TBL', 'Supplier Name'),
     ('SCM_SUPPLIER_BANK_ACCOUNTS_MOCK14_VW_TBL', 'SCM_SUPPLIER_MOCK14_VW_TBL', 'Supplier Name'),
+    ('SCM_SUPPLIER_CLASSIFICATION_MOCK14_VW_TBL', 'SCM_SUPPLIER_MOCK14_VW_TBL', 'Supplier Name'),
     ('SCM_SUPPLIER_CONTACTS_MOCK14_VW_TBL', 'SCM_SUPPLIER_MOCK14_VW_TBL', 'Supplier Name'),
     ('SCM_SUPPLIER_SITE_ASG_MOCK14_VW_TBL', 'SCM_SUPPLIER_ASG_MOCK13_VW_TBL', 'Supplier Name'),
     ('SCM_SUPPLIER_SITE_ASSIG_ASG_MOCK14_VW_TBL', 'SCM_SUPPLIER_ASG_MOCK13_VW_TBL', 'Supplier Name'),
@@ -149,6 +150,17 @@ def list_targets():
         })
     out.sort(key=lambda r: r["display"])
     return {"ok": True, "count": len(out), "targets": out}
+
+
+def list_relationships():
+    """Full parent/child edge list + target tables, for client-side multi-level
+    traversal (e.g. Awards -> Award Projects bridge -> Project Tasks). Config only,
+    no DB/row data."""
+    edges = [{"child": c, "parent": p, "link_field": link,
+              "child_display": _short_name(c), "parent_display": _short_name(p)}
+             for (c, p, link) in RELATIONSHIPS]
+    return {"ok": True, "target_tables": list(TARGET_TABLES),
+            "count": len(edges), "relationships": edges}
 
 
 # ── Column resolution ──────────────────────────────────────────────────────────
