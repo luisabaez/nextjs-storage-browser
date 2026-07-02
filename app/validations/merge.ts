@@ -362,13 +362,21 @@ interface RelChild {
   label: string;
   headers: string[];
   rows: unknown[][];
-  parentLinkIdx: number; // column in the parent this child links to
-  childLinkIdx: number;  // column in the child that carries the link value
+  parentLinkIdxs: number[]; // parent columns the child links on (1 = single, >1 = composite)
+  childLinkIdxs: number[];  // matching child columns carrying the link value
+}
+
+// Composite link value: the link columns joined so a multi-part key (e.g.
+// Business Unit + Invoice Number) matches as a tuple. Empty when all parts blank.
+function linkKeyOf(row: unknown[], idxs: number[]): string {
+  const parts = idxs.map(i => String(row[i] ?? '').trim());
+  return parts.some(p => p !== '') ? parts.join('') : '';
 }
 
 // Build one MergeResult from an explicit parent + explicitly-linked children.
 // Same join/aggregate/integrity output as mergeGroup, but each child links on its
-// own (parent col, child col) pair rather than a single shared key.
+// own set of (parent col, child col) pairs — one pair for a simple key, several
+// for a composite key.
 function assembleMaster(
   parentName: string, bu: string, entityToken: string,
   parentHeaders: string[], parentRows: unknown[][],
@@ -379,15 +387,15 @@ function assembleMaster(
     label: string; strategy: 'join' | 'aggregate';
     keep: { h: string; i: number }[];
     map: Map<string, unknown[][]>;
-    total: number; parentLinkIdx: number; childLinkIdx: number;
+    total: number; parentLinkIdxs: number[]; childLinkIdxs: number[];
     headers: string[]; rows: unknown[][];
   }
   const cms: CM[] = relChildren.map(c => {
-    const dropSet = new Set([lc(c.headers[c.childLinkIdx]), ...CONTEXT_COLS]);
+    const dropSet = new Set([...c.childLinkIdxs.map(i => lc(c.headers[i])), ...CONTEXT_COLS]);
     const map = new Map<string, unknown[][]>();
     let maxPer = 0, total = 0;
     for (const r of c.rows) {
-      const kv = String(r[c.childLinkIdx] ?? '').trim();
+      const kv = linkKeyOf(r, c.childLinkIdxs);
       if (!kv) continue;
       const arr = map.get(kv) || [];
       arr.push(r); map.set(kv, arr); total++;
@@ -396,7 +404,7 @@ function assembleMaster(
     const keep = c.headers.map((h, i) => ({ h: String(h), i })).filter(x => !dropSet.has(lc(x.h)));
     return {
       label: c.label, strategy: (maxPer <= 1 ? 'join' : 'aggregate') as 'join' | 'aggregate',
-      keep, map, total, parentLinkIdx: c.parentLinkIdx, childLinkIdx: c.childLinkIdx,
+      keep, map, total, parentLinkIdxs: c.parentLinkIdxs, childLinkIdxs: c.childLinkIdxs,
       headers: c.headers, rows: c.rows,
     };
   });
@@ -414,13 +422,13 @@ function assembleMaster(
     if (!kv) continue;
     const row: unknown[] = [...pr];
     joins.forEach(m => {
-      const lv = String(pr[m.parentLinkIdx] ?? '').trim();
+      const lv = linkKeyOf(pr, m.parentLinkIdxs);
       const g = lv ? m.map.get(lv) : null;
       const first = g ? g[0] : null;
       m.keep.forEach(x => row.push(first ? first[x.i] : null));
     });
     aggs.forEach(m => {
-      const lv = String(pr[m.parentLinkIdx] ?? '').trim();
+      const lv = linkKeyOf(pr, m.parentLinkIdxs);
       const g = (lv ? m.map.get(lv) : null) || [];
       const rem = m.keep[0];
       if (!rem) return;
@@ -434,7 +442,7 @@ function assembleMaster(
   const integrity: ChildIntegrity[] = cms.map(m => {
     const parentVals = new Set<string>();
     for (const pr of parentRows) {
-      const v = String(pr[m.parentLinkIdx] ?? '').trim();
+      const v = linkKeyOf(pr, m.parentLinkIdxs);
       if (v) parentVals.add(v);
     }
     let orphans = 0;
@@ -450,7 +458,7 @@ function assembleMaster(
 
   const childrenData: ChildDetail[] = cms.map(m => ({
     label: m.label, headers: m.headers.map(String), rows: m.rows,
-    keyIdx: m.childLinkIdx, strategy: m.strategy,
+    keyIdx: m.childLinkIdxs[0], strategy: m.strategy,
   }));
 
   const warnings = [...extraWarnings];
@@ -467,7 +475,28 @@ function assembleMaster(
   };
 }
 
-export function mergeByRelationships(files: TaggedFile[], targets: SamplingTarget[]): MergeResult[] {
+// Resolve the fields of a (possibly composite) key to column pairs, keeping only
+// the parts that resolve on BOTH parent and child.
+function resolveParts(parentHeaders: string[], childHeaders: string[], fields: string[]): { pIdxs: number[]; cIdxs: number[] } {
+  const pIdxs: number[] = [], cIdxs: number[] = [];
+  for (const f of fields) {
+    const p = resolveLinkCol(parentHeaders, f);
+    const c = resolveLinkCol(childHeaders, f);
+    if (p >= 0 && c >= 0) { pIdxs.push(p); cIdxs.push(c); }
+  }
+  return { pIdxs, cIdxs };
+}
+
+// keyOverrides: normalized root table → the entity's composite key fields (from
+// the validation report). A child that links via the entity key (its configured
+// link_field matches one of the key parts) is then joined on the full composite
+// key rather than the single field, so e.g. AP lines match on Business Unit +
+// Invoice Number instead of Invoice Number alone (which would cross BUs).
+export function mergeByRelationships(
+  files: TaggedFile[],
+  targets: SamplingTarget[],
+  keyOverrides?: Map<string, string[]>,
+): MergeResult[] {
   const targetSet = new Set(targets.map(t => normTable(t.table)));
   const displayOf = new Map(targets.map(t => [normTable(t.table), t.display] as const));
   const childLink = new Map<string, Map<string, string>>(); // normParent -> normChild -> link_field
@@ -499,6 +528,8 @@ export function mergeByRelationships(files: TaggedFile[], targets: SamplingTarge
 
     const normRoot = normTable(rootFile.table!);
     const kids = childLink.get(normRoot) || new Map<string, string>();
+    const composite = keyOverrides?.get(normRoot) || null; // entity composite key parts (>1)
+    const compositeNorms = (composite && composite.length > 1) ? composite.map(normTable) : null;
     const warnings: string[] = [];
     const relChildren: RelChild[] = [];
     const parentLinkCount = new Map<number, number>();
@@ -513,18 +544,31 @@ export function mergeByRelationships(files: TaggedFile[], targets: SamplingTarge
         warnings.push(`${f.name} — not a configured direct child of ${rootLabel}; not merged (multi-level or unrelated).`);
         continue;
       }
-      const pIdx = resolveLinkCol(rootHeaders, linkField);
-      const cIdx = resolveLinkCol(f.data.headers.map(String), linkField);
-      if (pIdx < 0 || cIdx < 0) {
-        warnings.push(`${f.name} — could not resolve link column "${linkField}" on the ${pIdx < 0 ? 'parent' : 'child'}; not merged.`);
+      const childHeaders = f.data.headers.map(String);
+
+      // Use the composite key when this child links via the entity key (its
+      // configured field matches one of the composite parts); else the single field.
+      let pIdxs: number[] = [], cIdxs: number[] = [];
+      const nlf = normTable(linkField);
+      if (compositeNorms && compositeNorms.some(p => p.includes(nlf) || nlf.includes(p))) {
+        const r = resolveParts(rootHeaders, childHeaders, composite!);
+        pIdxs = r.pIdxs; cIdxs = r.cIdxs;
+      }
+      if (!pIdxs.length) {
+        const pIdx = resolveLinkCol(rootHeaders, linkField);
+        const cIdx = resolveLinkCol(childHeaders, linkField);
+        if (pIdx >= 0 && cIdx >= 0) { pIdxs = [pIdx]; cIdxs = [cIdx]; }
+      }
+      if (!pIdxs.length) {
+        warnings.push(`${f.name} — could not resolve link column "${linkField}"; not merged.`);
         continue;
       }
       relChildren.push({
         label: childLabel(rootFile.table!, f.table!),
-        headers: f.data.headers.map(String), rows: f.data.rows,
-        parentLinkIdx: pIdx, childLinkIdx: cIdx,
+        headers: childHeaders, rows: f.data.rows,
+        parentLinkIdxs: pIdxs, childLinkIdxs: cIdxs,
       });
-      parentLinkCount.set(pIdx, (parentLinkCount.get(pIdx) || 0) + 1);
+      parentLinkCount.set(pIdxs[0], (parentLinkCount.get(pIdxs[0]) || 0) + 1);
     }
 
     // Primary key = the parent column most children link on (else first column).
