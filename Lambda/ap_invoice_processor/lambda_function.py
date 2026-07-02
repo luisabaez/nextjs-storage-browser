@@ -1618,13 +1618,15 @@ def lambda_handler(event, context):
             entity = (p.get("entity") or "").strip()
             subentity = (p.get("subentity") or "").strip() or None
             dry_run = str(p.get("dry_run") or "").lower() in ("1", "true", "yes")
+            actor = (p.get("actor") or "").strip()
             target_bucket = p.get("bucket") or DEFAULT_BUCKET
             if not entity:
                 return {"statusCode": 400, "headers": headers,
                         "body": json.dumps({"ok": False, "error": "entity required"})}
             conn_str = get_connection_string()
             res = sampling.generate_entity_files(conn_str, s3_client, target_bucket,
-                                                 mock, entity, subentity, dry_run=dry_run)
+                                                 mock, entity, subentity, dry_run=dry_run,
+                                                 actor=actor)
             return {"statusCode": 200 if res.get("ok") else 400,
                     "headers": headers,
                     "body": json.dumps(res, default=str)}

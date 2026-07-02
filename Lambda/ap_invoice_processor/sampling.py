@@ -644,6 +644,7 @@ def list_entity_plan(conn_str, mock='MOCK14', source_db=None, with_counts=False)
 # source[/BU] into Sampling/Generated/{mock}/{entity}/ — the raw parent+child
 # set that feeds the merge + sampling. dry_run previews (counts, no writes).
 GENERATED_FOLDER = "Sampling/Generated/"
+GENERATED_MANIFEST_FOLDER = GENERATED_FOLDER + "_manifests/"
 XLSX_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 GEN_MAX_FILES = 400  # safety cap per run
 
@@ -677,8 +678,40 @@ def _rows_to_xlsx_bytes(headers, rows):
     return buf.getvalue()
 
 
+def _write_gen_manifest(s3, bucket, mock, entity, subentity, db, actor,
+                        out_prefix, generated, missing, capped=None):
+    """Audit trail for one generation run: which CV_ files were written, from
+    which conversion table / source / BU, their row counts, and who ran it and
+    when. Lets a suspect generated file be traced back to its source later.
+    Written alongside the files under Sampling/Generated/_manifests/."""
+    stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    key = f"{GENERATED_MANIFEST_FOLDER}{mock}/{_safe_name(entity)}/{stamp}_{uuid.uuid4().hex[:6]}.json"
+    manifest = {
+        "mock": mock,
+        "entity": entity,
+        "subentity": subentity or "",
+        "source_db": db,
+        "actor": actor or "",
+        "created_at": datetime.utcnow().isoformat() + "Z",
+        "folder": out_prefix,
+        "file_count": len(generated),
+        "total_rows": sum(g.get("rows", 0) for g in generated),
+        "generated": generated,
+        "missing": missing,
+    }
+    if capped:
+        manifest["capped"] = capped
+    try:
+        s3.put_object(Bucket=bucket, Key=key,
+                      Body=json.dumps(manifest, default=str),
+                      ContentType="application/json")
+    except Exception:
+        return None
+    return key
+
+
 def generate_entity_files(conn_str, s3, bucket, mock, entity, subentity=None,
-                          dry_run=False, source_db=None):
+                          dry_run=False, source_db=None, actor=""):
     db = source_db or SOURCE_DATABASE
     plan_table = f"SETUP_CONVERSION_PLAN_{mock}"
     out_prefix = f"{GENERATED_FOLDER}{mock}/{_safe_name(entity)}/"
@@ -748,9 +781,12 @@ def generate_entity_files(conn_str, s3, bucket, mock, entity, subentity=None,
                     continue
 
                 if len(generated) >= GEN_MAX_FILES:
+                    cap = f"stopped at {GEN_MAX_FILES} files"
+                    mkey = _write_gen_manifest(s3, bucket, mock, entity, subentity, db,
+                                               actor, out_prefix, generated, missing, capped=cap)
                     return {"ok": True, "entity": entity, "mock": mock, "folder": out_prefix,
                             "generated": generated, "missing": missing,
-                            "capped": f"stopped at {GEN_MAX_FILES} files"}
+                            "capped": cap, "manifest_key": mkey}
 
                 cur.execute(f"SELECT * FROM {fq} {cond}", args)
                 headers = [d[0] for d in cur.description]
@@ -764,5 +800,7 @@ def generate_entity_files(conn_str, s3, bucket, mock, entity, subentity=None,
         return {"ok": True, "entity": entity, "mock": mock, "dry_run": True,
                 "folder": out_prefix, "planned": planned, "missing": missing,
                 "plan_count": len(plans)}
+    mkey = _write_gen_manifest(s3, bucket, mock, entity, subentity, db, actor,
+                               out_prefix, generated, missing)
     return {"ok": True, "entity": entity, "mock": mock, "folder": out_prefix,
-            "generated": generated, "missing": missing}
+            "generated": generated, "missing": missing, "manifest_key": mkey}
