@@ -4,8 +4,21 @@ import React, { useState, useEffect, useRef } from 'react';
 export type SortOption = 'name-asc' | 'name-desc' | 'date-newest' | 'date-oldest';
 export type SearchScope = 'current' | 'all';
 
+// Human-readable byte size, e.g. 500 B, 1.5 KB, 5 MB, 2.1 GB.
+function formatBytes(bytes: number): string {
+  if (!bytes || bytes < 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0;
+  let n = bytes;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  const rounded = i === 0 || n >= 100 || Number.isInteger(n) ? Math.round(n) : Number(n.toFixed(1));
+  return `${rounded} ${units[i]}`;
+}
+
 interface ToolbarProps {
   selectedCount: number;
+  selectedBytes?: number;       // total size of selected files (folders excluded)
+  selectedFolderCount?: number; // how many of the selection are folders
   onUpload: () => void;
   onDownload: () => void;
   // Phase 7: explicit "always zip" option from the dropdown next to Download
@@ -27,6 +40,8 @@ interface ToolbarProps {
 
 export function Toolbar({
   selectedCount,
+  selectedBytes = 0,
+  selectedFolderCount = 0,
   onUpload,
   onDownload,
   onDownloadAsZip,
@@ -184,6 +199,15 @@ export function Toolbar({
         {hasSelection && (
           <span className="toolbar-selection-count">
             {selectedCount} item{selectedCount !== 1 ? 's' : ''} selected
+            {(selectedBytes > 0 || selectedFolderCount > 0) && (
+              <span className="toolbar-selection-size">
+                {' · '}
+                {selectedBytes > 0 ? formatBytes(selectedBytes) : ''}
+                {selectedFolderCount > 0
+                  ? `${selectedBytes > 0 ? ' + ' : ''}${selectedFolderCount} folder${selectedFolderCount !== 1 ? 's' : ''}`
+                  : ''}
+              </span>
+            )}
           </span>
         )}
 

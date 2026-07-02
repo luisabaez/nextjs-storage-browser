@@ -1252,6 +1252,8 @@ function FileBrowser() {
           {/* Toolbar */}
           <Toolbar
             selectedCount={selectedItems.length}
+            selectedBytes={selectedItems.reduce((sum, it) => sum + (it.type === 'file' ? (it.size || 0) : 0), 0)}
+            selectedFolderCount={selectedItems.filter(it => it.type === 'folder').length}
             onUpload={() => fileInputRef.current?.click()}
             onDownload={handleDownloadSelected}
             onDownloadAsZip={handleDownloadAsZip}
