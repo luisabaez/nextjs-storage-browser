@@ -1,60 +1,45 @@
 import { defineStorage } from "@aws-amplify/backend";
 
-/*export const storage = defineStorage({
-  name: "storage-browser-test",
-  access: (allow: any) => ({
-    'media-readwritedelete/*': [allow.authenticated.to(['read', 'write', 'delete'])],
-    'media-readonly/*': [allow.authenticated.to(['read'])],
-    'shared-folder-readwrite/*': [
-      allow.authenticated.to(['read', 'write'])
-    ],
-    'protected-useronlyreadwritedelete/{entity_id}/*': [
-      allow.authenticated.to(['read']),
-      allow.entity('identity').to(['read', 'write', 'delete'])
-    ],
-    'private-useronlyreadwritedelete/{entity_id}/*': [
-      allow.entity('identity').to(['read', 'write', 'delete'])
-    ]
-  })
-});*/
-
+// ─────────────────────────────────────────────────────────────────────────────
+// Every top-level folder the file browser works with is listed here so that
+// authenticated users get read/write/delete access to it. This is the single
+// source of truth for storage access.
+//
+// ADDING A NEW FOLDER: add its name to FOLDERS below AND mirror a matching
+// `"<name>/*"` entry into the `paths` of amplify_outputs.dev.json /
+// amplify_outputs.prd.json (and amplify_outputs.json for local dev) — the app
+// reads its access config from those generated files at runtime. Keeping both
+// in sync prevents "folder not accessible / not listed" problems.
+// ─────────────────────────────────────────────────────────────────────────────
+const FOLDERS = [
+  "ConversionFiles",
+  "ConversionFileErrors",
+  "ConversionFileErrors/Mock8",
+  "InitialUpload",
+  "InitialUploadErrors",
+  "TSQLFiles",
+  "DataValidation",
+  "Dalving Input",
+  "InputFilesForProcessing",
+  "ProcessedFiles",
+  "FailedInvoices",
+  "FailedUnmatchedFilenames",
+  "APInvoiceInput",
+  "UploadedAPInvoices",
+  "FailedAPInvoices",
+  "Sampling",
+];
 
 export const storage = defineStorage({
-  name: 'storage-browser-test',
-  access: (allow) => ({
-    'ConversionFiles/*': [
-      allow.authenticated.to(['read']),
-      allow.entity('identity').to(['read', 'write', 'delete'])
-    ]
-    ,
-    'ConversionFileErrors/*': [
-      allow.authenticated.to(['read']),
-      allow.entity('identity').to(['read', 'write', 'delete'])
-    ]
-    ,
-    'InitialUpload/*': [
-      allow.authenticated.to(['read']),
-      allow.entity('identity').to(['read', 'write', 'delete'])
-    ]
-    ,
-    'InitialUploadErrors/*': [
-      allow.authenticated.to(['read']),
-      allow.entity('identity').to(['read', 'write', 'delete'])
-    ]
-    ,
-    'TSQLFiles/*': [
-      allow.authenticated.to(['read']),
-      allow.entity('identity').to(['read', 'write', 'delete'])
-    ]
-    ,
-    'DataValidation/*': [
-      allow.authenticated.to(['read']),
-      allow.entity('identity').to(['read', 'write', 'delete'])
-    ]
-    ,
-    'ConversionFileErrors/Mock8/*': [
-      allow.authenticated.to(['read']),
-      allow.entity('identity').to(['read', 'write', 'delete'])
-    ]
-  })
+  name: "storage-browser-test",
+  access: (allow) =>
+    Object.fromEntries(
+      FOLDERS.map((folder) => [
+        `${folder}/*`,
+        [
+          allow.authenticated.to(["read", "write", "delete"]),
+          allow.entity("identity").to(["read", "write", "delete"]),
+        ],
+      ])
+    ),
 });
