@@ -20,13 +20,16 @@ import {
   selectSample,
   readWorkbook,
   buildWorkbook,
-  workbookToArray,
   downloadWorkbook,
   matchEntity,
   FileData,
+  parsePriorSample,
+  verifyReproduction,
+  PriorSample,
 } from './sampling';
 import { parseAgencyReport, AgencyReport, buildGroups } from './dashboard';
-import { RawFile, MergeResult, SamplingTarget, RelEdge, TaggedFile, groupRawFiles, mergeGroup, mergeByRelationships, mergeHierarchy, resultToFileData, downloadMaster, appendValidationSheets } from './merge';
+import { RawFile, MergeResult, SamplingTarget, RelEdge, TaggedFile, groupRawFiles, mergeGroup, mergeByRelationships, mergeHierarchy, resultToFileData, downloadMaster } from './merge';
+import { buildPerFileReport, mergeResultToReportFiles, singleFileReport, reportToBuffer, downloadReport } from './excelReport';
 import { PlanRow, EntityGroup, groupEntityPlan, READINESS_LABEL } from './entityFiles';
 import { GeneratedEntity, ManifestFileRow, listGeneratedEntities, loadGeneratedTagged, readEntityManifests, readAllManifests, fetchSamplingTargets, fetchSamplingRelationships, safeName } from './generated';
 import { ValidationReport, EntityValidation, parseValidationReport, fileMatchesTable, buildCompositeKeyOverrides, entityEmailStatus, isSharedEntity, EMAIL_STATUS_LABEL, EMAIL_STATUS_ORDER, EmailStatus } from './validationReport';
@@ -40,10 +43,11 @@ const REPORT_PATH = 'Sampling/_status/agency_report.xlsx';
 const VALIDATION_REPORT_PATH = 'Sampling/_status/entity_validation_report.xlsx';
 const READINESS_PATH = 'Sampling/_status/entity_readiness.json';
 const BU_ASSIGN_PATH = 'Sampling/_status/bu_assignments.json';
+const LINK_KEYS_PATH = 'Sampling/_status/entity_link_keys.json';
 const XLSX_CT = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 const LAMBDA_URL = 'https://5ahxjcxhrcopng5hjgc2n6utxq0rwcmm.lambda-url.us-east-1.on.aws/';
 
-type TabId = 'sampling' | 'dashboard' | 'entities' | 'completeness' | 'bybu' | 'bufiles';
+type TabId = 'sampling' | 'dashboard' | 'entities' | 'completeness' | 'bybu' | 'bufiles' | 'reproduce';
 type GenStatus = 'idle' | 'working' | 'done' | 'error';
 
 interface FileEntry {
@@ -105,6 +109,40 @@ function buFilePresent(mans: ManifestFileRow[], entity: string, label: string, b
   return { present: p.present, rows: p.rows, shared: false };
 }
 
+// Resolve a report entity (by tab) to its sampling target (root table + children).
+// Matches on the entity's master-file label first, then any file, then the target
+// display name — so "Supplier" → SCM_SUPPLIER_MOCK14_VW_TBL, "Projects" → Awards.
+function resolveEntityTarget(report: ValidationReport | null, targets: SamplingTarget[], tab: string): SamplingTarget | undefined {
+  if (!targets.length) return undefined;
+  const e = report?.entities.find(x => x.tab === tab);
+  const master = e?.files.find(f => f.role === 'master');
+  const byLabel = (lbl?: string) => (lbl ? targets.find(t => fileMatchesTable(lbl, t.table)) : undefined);
+  return (
+    byLabel(master?.label) ||
+    (e && targets.find(t => e.files.some(f => fileMatchesTable(f.label, t.table)))) ||
+    targets.find(t => { const d = normStr(t.display); const x = normStr(tab); return !!d && !!x && (d.includes(x) || x.includes(d)); })
+  );
+}
+
+// Merge key overrides for the sampling merge: the report's composite keys plus any
+// user-chosen link column (Goal 4), which wins for that entity's root table.
+function buildKeyOverrides(
+  composite: Map<string, string[]> | null,
+  targets: SamplingTarget[],
+  report: ValidationReport | null,
+  linkKeys: Record<string, string>,
+): Map<string, string[]> | undefined {
+  const base = new Map<string, string[]>();
+  composite?.forEach((v, k) => base.set(k, v));
+  for (const tab of Object.keys(linkKeys || {})) {
+    const key = linkKeys[tab];
+    if (!key) continue;
+    const tgt = resolveEntityTarget(report, targets, tab);
+    if (tgt) base.set(normTbl(tgt.table), [key]);
+  }
+  return base.size ? base : undefined;
+}
+
 function emailStatusClass(s: EmailStatus): string {
   return s === 'ready' ? 'val-es-ready' : s === 'completed' ? 'val-es-completed'
     : s === 'hold' ? 'val-es-hold' : s === 'notpublished' ? 'val-es-notpub' : 'val-es-unknown';
@@ -122,6 +160,26 @@ function repStatusClass(status: string): string {
 function pad(n: number) { return n < 10 ? `0${n}` : `${n}`; }
 function stamp(d: Date) {
   return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+}
+function titleCaseEntity(s: string): string {
+  return String(s || '').toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
+}
+// Client-facing parent-entity label for the sample filename: title-case, singular
+// last word, short all-caps acronyms preserved. "SUPPLIERS" → "Supplier",
+// "PURCHASE ORDERS" → "Purchase Order", "AP INVOICES" → "AP Invoice", "AR" → "AR".
+function parentEntityLabel(entity: string): string {
+  const words = String(entity || '').trim().split(/\s+/).filter(Boolean);
+  return words.map((w, i) => {
+    let word = w;
+    if (i === words.length - 1 && word.length > 2 && /s$/i.test(word)) word = word.replace(/s$/i, '');
+    if (word.length <= 3 && word === word.toUpperCase()) return word; // keep AP / AR / GL / PO
+    return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+  }).join(' ');
+}
+// Zero-pad a numeric BU code to 3 digits (015, 081); leave non-numeric codes as-is.
+function bu3(code: string): string {
+  const s = String(code || '');
+  return /^\d+$/.test(s) ? s.padStart(3, '0') : s;
 }
 
 // ── Overall-completion donut (SVG, no chart library) ─────────────────────────
@@ -166,6 +224,18 @@ function ValidationsPage() {
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // ── Reproduce-by-seed state ──
+  const repInputRef = useRef<HTMLInputElement>(null);
+  const [isRepDragOver, setIsRepDragOver] = useState(false);
+  const [repFile, setRepFile] = useState<{ name: string; parsed: PriorSample } | null>(null);
+  const [repEntity, setRepEntity] = useState('');
+  const [repAgency, setRepAgency] = useState('');
+  const [repN, setRepN] = useState('');
+  const [repn, setRepn] = useState('');
+  const [repSeed, setRepSeed] = useState('');
+  const [repResult, setRepResult] = useState<{ indices: number[]; checked: boolean; matched: number; total: number; identical: boolean } | null>(null);
+  const [repError, setRepError] = useState('');
 
   // ── Dashboard state ──
   const [report, setReport] = useState<AgencyReport | null>(null);
@@ -406,7 +476,7 @@ function ValidationsPage() {
       const label = g.entity.replace(/_/g, ' ');
       const targets = samplingTargetsRef.current || [];
       const edges = relationshipEdgesRef.current || [];
-      const overrides = compositeOverridesRef.current || undefined;
+      const overrides = buildKeyOverrides(compositeOverridesRef.current, samplingTargetsRef.current || [], valReportRef.current, linkKeysRef.current);
       if (targets.length && manifest.size) {
         // Multi-level relationship merge (falls back to direct-child if the full
         // edge graph is unavailable). Group by real source; composite keys honoured.
@@ -491,6 +561,15 @@ function ValidationsPage() {
   const [buAssignSaving, setBuAssignSaving] = useState(false);
   const [buAssignSavedAt, setBuAssignSavedAt] = useState('');
 
+  // Goal 4: per-entity parent→child linking column (the shared Unique ID). Keyed
+  // by report tab; overrides the config link field when the merge runs.
+  const [linkKeys, setLinkKeys] = useState<Record<string, string>>({});
+  const linkKeysRef = useRef<Record<string, string>>({});
+  // Column lists per table (from sql_table_columns), cached for the link picker.
+  const [tableCols, setTableCols] = useState<Record<string, string[]>>({});
+  const tableColsRef = useRef<Record<string, string[]>>({});
+  const [colsLoading, setColsLoading] = useState<Record<string, boolean>>({});
+
   const loadBuAssignments = useCallback(async (report: ValidationReport) => {
     let saved: Record<string, unknown> = {};
     try {
@@ -520,6 +599,35 @@ function ValidationsPage() {
     finally { setBuAssignSaving(false); }
   }, [buAssignments]);
 
+  const loadLinkKeys = useCallback(async () => {
+    try {
+      const { url } = await getUrl({ path: LINK_KEYS_PATH, options: { validateObjectExistence: true } });
+      const resp = await fetch(url.toString());
+      if (resp.ok) { const j = await resp.json(); if (j && typeof j === 'object') { setLinkKeys(j as Record<string, string>); linkKeysRef.current = j as Record<string, string>; } }
+    } catch { /* not saved yet */ }
+  }, []);
+
+  const saveLinkKeys = useCallback(async (next: Record<string, string>) => {
+    setLinkKeys(next);
+    linkKeysRef.current = next;
+    try {
+      await uploadData({ path: LINK_KEYS_PATH, data: new Blob([JSON.stringify(next)], { type: 'application/json' }), options: { contentType: 'application/json' } }).result;
+    } catch (e) { console.error('save link keys failed', e); }
+  }, []);
+
+  // Fetch (and cache) a table's column names from SQL for the link picker.
+  const fetchTableColumns = useCallback(async (table: string) => {
+    if (!table || tableColsRef.current[table]) return;
+    setColsLoading(p => ({ ...p, [table]: true }));
+    try {
+      const r = await (await fetch(`${LAMBDA_URL}?action=sql_table_columns&table=${encodeURIComponent(table)}&db=Hacienda_ERP`)).json();
+      const cols: string[] = r.ok ? (r.columns || []).map((c: { name?: string }) => c.name || '').filter(Boolean) : [];
+      tableColsRef.current = { ...tableColsRef.current, [table]: cols };
+      setTableCols(c => ({ ...c, [table]: cols }));
+    } catch { tableColsRef.current = { ...tableColsRef.current, [table]: [] }; setTableCols(c => ({ ...c, [table]: [] })); }
+    finally { setColsLoading(p => ({ ...p, [table]: false })); }
+  }, []);
+
   const reportFilesFor = useCallback((tab: string): string[] => {
     const e = valReport?.entities.find(x => x.tab === tab);
     return e ? e.files.map(f => f.label) : [];
@@ -535,7 +643,8 @@ function ValidationsPage() {
     compositeOverridesRef.current = buildCompositeKeyOverrides(report, samplingTargetsRef.current || []);
     loadReadiness(report);
     loadBuAssignments(report);
-  }, [loadReadiness, loadBuAssignments]);
+    loadLinkKeys();
+  }, [loadReadiness, loadBuAssignments, loadLinkKeys]);
 
   const ensureTargets = useCallback(async () => {
     if (!samplingTargetsRef.current) {
@@ -622,6 +731,61 @@ function ValidationsPage() {
     return out;
   }, [valReport, valManifests, reportToPlanEntity]);
 
+  // Goal 3/4: resolve an entity to its real sampling target (root table + children).
+  const entityTarget = useCallback((tab: string) => resolveEntityTarget(valReport, samplingTargetsRef.current || [], tab), [valReport]);
+
+  // Kick off column loads (parent + children) for the link picker.
+  const ensureEntityColumns = useCallback((tab: string) => {
+    const tgt = entityTarget(tab);
+    if (!tgt) return;
+    fetchTableColumns(tgt.table);
+    tgt.children.forEach(c => fetchTableColumns(c.table));
+  }, [entityTarget, fetchTableColumns]);
+
+  // Columns the parent shares with at least one child (candidate linking keys). If
+  // columns haven't loaded yet, offer the parent's columns so the picker isn't empty.
+  const entityLinkOptions = useCallback((tab: string): string[] => {
+    const tgt = entityTarget(tab);
+    if (!tgt) return [];
+    const pcols = tableCols[tgt.table] || [];
+    const childCols = new Set<string>();
+    tgt.children.forEach(c => (tableCols[c.table] || []).forEach(col => childCols.add(col.toLowerCase())));
+    const shared = childCols.size ? pcols.filter(col => childCols.has(col.toLowerCase())) : [];
+    return shared.length ? shared : pcols;
+  }, [entityTarget, tableCols]);
+
+  // The effective linking column for an entity: the user's choice, else the config
+  // link field (modal across children), else the report's composite-key first part.
+  const effectiveLinkKey = useCallback((tab: string): string => {
+    if (linkKeys[tab]) return linkKeys[tab];
+    const tgt = entityTarget(tab);
+    if (tgt?.children.length) {
+      const counts = new Map<string, number>();
+      tgt.children.forEach(c => { if (c.link_field) counts.set(c.link_field, (counts.get(c.link_field) || 0) + 1); });
+      let best = '', n = 0;
+      counts.forEach((v, k) => { if (v > n) { n = v; best = k; } });
+      if (best) return best;
+    }
+    return '';
+  }, [linkKeys, entityTarget]);
+
+  // Goal 3: resolve a file label to its real source table name (for display).
+  const fileTableName = useCallback((tab: string, label: string): string => {
+    const tgt = entityTarget(tab);
+    const ent = valReport?.entities.find(x => x.tab === tab);
+    const masterLbl = ent?.files.find(f => f.role === 'master')?.label;
+    if (tgt && masterLbl && normStr(masterLbl) === normStr(label)) return tgt.table;
+    const child = tgt?.children.find(c => normStr(tableLabel(c.table)) === normStr(label) || fileMatchesTable(label, c.table));
+    if (child) return child.table;
+    const plan = reportToPlanEntity.get(tab);
+    if (plan) {
+      const folder = safeName(plan);
+      const m = (valManifests || []).find(mm => mm.entity === folder && (normStr(tableLabel(mm.table)) === normStr(label) || fileMatchesTable(label, mm.table)));
+      if (m) return m.table;
+    }
+    return '';
+  }, [entityTarget, valReport, reportToPlanEntity, valManifests]);
+
   // ── Sample by BU ──
   const [selectedBU, setSelectedBU] = useState('');
   const [sampleEntitySel, setSampleEntitySel] = useState(''); // '' = all entities
@@ -676,45 +840,54 @@ function ValidationsPage() {
 
   // Load the BU's entities (all, or just onlyEntity) into the sampling list —
   // filtered to the BU and to the files that BU includes for each entity.
+  // Build (but don't add) the merge results for a BU's entities — the merge core,
+  // reused by loading into the list and by the entity-wide batch run.
+  const buildBUResults = useCallback(async (bu: string, onlyEntity?: string): Promise<{ e: EntityValidation; results: MergeResult[] }[]> => {
+    if (!valReport) return [];
+    await ensureTargets();
+    if (!relationshipEdgesRef.current) {
+      try { relationshipEdgesRef.current = await fetchSamplingRelationships(LAMBDA_URL); } catch { relationshipEdgesRef.current = []; }
+    }
+    const items = genList ?? await refreshGenerated();
+    const targets = samplingTargetsRef.current || [];
+    const edges = relationshipEdgesRef.current || [];
+    const overrides = buildKeyOverrides(compositeOverridesRef.current, samplingTargetsRef.current || [], valReportRef.current, linkKeysRef.current);
+    const entTabs = assignedEntitiesFor(bu).filter(t => !onlyEntity || t === onlyEntity);
+    const applicable = valReport.entities.filter(e => entTabs.includes(e.tab));
+    const out: { e: EntityValidation; results: MergeResult[] }[] = [];
+    for (const e of applicable) {
+      const included = includedFilesFor(bu, e.tab);
+      const ready = e.files.filter(f => included.includes(f.label)).every(f => {
+        const c = f.counts[bu]; if (!c || c === 'N/A') return true;
+        return buFilePresent(valManifestsRef.current || [], e.entity, f.label, bu).present;
+      });
+      if (!ready) continue;
+      const g = items.find(x => matchReportEntity(valReport, x.entity)?.tab === e.tab);
+      if (!g) continue;
+      const manifest = await readEntityManifests(PLAN_MOCK, g.entity);
+      // Only download this BU's files (agency-coded source/bu), not the whole
+      // entity folder. Fall back to all files for a no-agency PRIFAS entity.
+      const buFiles = g.files.filter(fn => { const m = manifest.get(fn); return m && (m.source === bu || m.bu === bu); });
+      const downloadG = buFiles.length ? { ...g, files: buFiles } : (isSharedEntity(e.entity) ? g : { ...g, files: [] });
+      if (!downloadG.files.length) continue;
+      const tagged = await loadGeneratedTagged(downloadG, manifest);
+      let forBU = tagged.filter(t => t.source === bu || t.bu === bu);
+      if (!forBU.length && isSharedEntity(e.entity)) forBU = tagged;
+      forBU = filterIncludedFiles(bu, e, forBU);
+      if (!forBU.length) continue;
+      const results = edges.length ? mergeHierarchy(forBU, targets, edges, overrides) : mergeByRelationships(forBU, targets, overrides);
+      out.push({ e, results });
+    }
+    return out;
+  }, [valReport, ensureTargets, genList, refreshGenerated, assignedEntitiesFor, includedFilesFor, filterIncludedFiles]);
+
   const loadBUIntoSampling = useCallback(async (bu: string, onlyEntity?: string) => {
     if (!valReport) return;
     setBuLoading(true);
     try {
-      await ensureTargets();
-      if (!relationshipEdgesRef.current) {
-        try { relationshipEdgesRef.current = await fetchSamplingRelationships(LAMBDA_URL); } catch { relationshipEdgesRef.current = []; }
-      }
-      const items = genList ?? await refreshGenerated();
-      const targets = samplingTargetsRef.current || [];
-      const edges = relationshipEdgesRef.current || [];
-      const overrides = compositeOverridesRef.current || undefined;
-      const entTabs = assignedEntitiesFor(bu).filter(t => !onlyEntity || t === onlyEntity);
-      const applicable = valReport.entities.filter(e => entTabs.includes(e.tab));
+      const built = await buildBUResults(bu, onlyEntity);
       let loadedEntities = 0, masters = 0;
-      for (const e of applicable) {
-        const included = includedFilesFor(bu, e.tab);
-        const ready = e.files.filter(f => included.includes(f.label)).every(f => {
-          const c = f.counts[bu]; if (!c || c === 'N/A') return true;
-          return buFilePresent(valManifestsRef.current || [], e.entity, f.label, bu).present;
-        });
-        if (!ready) continue;
-        const g = items.find(x => matchReportEntity(valReport, x.entity)?.tab === e.tab);
-        if (!g) continue;
-        const manifest = await readEntityManifests(PLAN_MOCK, g.entity);
-        // Only download this BU's files (agency-coded source/bu), not the whole
-        // entity folder. Fall back to all files for a no-agency PRIFAS entity.
-        const buFiles = g.files.filter(fn => { const m = manifest.get(fn); return m && (m.source === bu || m.bu === bu); });
-        const downloadG = buFiles.length ? { ...g, files: buFiles } : (isSharedEntity(e.entity) ? g : { ...g, files: [] });
-        if (!downloadG.files.length) continue;
-        const tagged = await loadGeneratedTagged(downloadG, manifest);
-        let forBU = tagged.filter(t => t.source === bu || t.bu === bu);
-        if (!forBU.length && isSharedEntity(e.entity)) forBU = tagged;
-        forBU = filterIncludedFiles(bu, e, forBU);
-        if (!forBU.length) continue;
-        const results = edges.length ? mergeHierarchy(forBU, targets, edges, overrides) : mergeByRelationships(forBU, targets, overrides);
-        addMergeResults(results);
-        loadedEntities++; masters += results.length;
-      }
+      for (const { results } of built) { addMergeResults(results); loadedEntities++; masters += results.length; }
       setActiveTab('sampling');
       setGenNote(`BU ${bu}${onlyEntity ? ' · ' + onlyEntity : ''}: loaded ${loadedEntities} entit${loadedEntities !== 1 ? 'ies' : 'y'} → ${masters} master${masters !== 1 ? 's' : ''} into the sampling list.`);
     } catch (e) {
@@ -722,7 +895,7 @@ function ValidationsPage() {
     } finally {
       setBuLoading(false);
     }
-  }, [valReport, ensureTargets, genList, refreshGenerated, addMergeResults, assignedEntitiesFor, includedFilesFor, filterIncludedFiles]);
+  }, [valReport, buildBUResults, addMergeResults]);
 
   // Generate only the files a BU needs (per-BU, small/fast), for the assigned
   // entities (all, or just onlyEntity) whose included files aren't present yet.
@@ -767,50 +940,43 @@ function ValidationsPage() {
     if (e.dataTransfer.files?.length) addRawFiles(e.dataTransfer.files);
   };
 
+  // Size, seed-select, build the per-file report, and write it to Local (full) +
+  // Client (no Sizing). Shared by the single-entry Generate button and the
+  // entity-wide batch run. `download` triggers a local copy (skipped for batches).
+  const sampleAndWriteResult = useCallback(async (
+    p: { entity: string; agency: string; N: number; data: FileData; merged?: MergeResult; download: boolean }
+  ): Promise<{ seed: number; n: number } | null> => {
+    const tier = tierForEntity(p.entity);
+    if (!tier || !p.N) return null;
+    const n = computeSampleSize(p.N, tier);
+    const seed = Math.floor(Math.random() * 2 ** 32) >>> 0;
+    const selectedIndices = selectSample(p.N, n, seed);
+    const now = new Date();
+    const agency = p.agency || 'NA';
+    // Client naming convention: "<Parent Entity> BU <3-digit BU>-Sample Converted Data.xlsx"
+    const base = `${parentEntityLabel(p.entity)} BU ${bu3(agency)}-Sample Converted Data`;
+    const meta = { entity: p.entity, agency, tier, N: p.N, n, seed, generatedAt: now.toISOString(), generatedBy: userEmail, selectedIndices };
+    // Each source file gets its own Sample + Population sheet, linked by the shared
+    // Unique ID (highlighted); a merged entry contributes its parent + every child.
+    const files = p.merged
+      ? mergeResultToReportFiles(p.merged, selectedIndices, titleCaseEntity(p.entity))
+      : [singleFileReport(titleCaseEntity(p.entity), p.data.sheetName || p.entity, p.data.headers, p.data.rows, selectedIndices)];
+    const full = buildPerFileReport(files, meta, { includeSizing: true, integrity: p.merged?.integrity });
+    const client = buildPerFileReport(files, meta, { includeSizing: false });
+    await uploadData({ path: `${LOCAL_FOLDER}${base}.xlsx`, data: new Blob([await reportToBuffer(full)], { type: XLSX_CT }), options: { contentType: XLSX_CT } }).result;
+    await uploadData({ path: `${CLIENT_FOLDER}${base}.xlsx`, data: new Blob([await reportToBuffer(client)], { type: XLSX_CT }), options: { contentType: XLSX_CT } }).result;
+    if (p.download) await downloadReport(full, `${base}.xlsx`);
+    return { seed, n };
+  }, [userEmail]);
+
   // ── Sampling: generate → upload to Local (full) + Client (no Sizing) + local download ──
   const generate = async (entry: FileEntry) => {
     if (!entry.data || !entry.entity) return;
-    const tier = tierForEntity(entry.entity);
-    if (!tier) return;
-    const n = computeSampleSize(entry.N, tier);
-    const seed = Math.floor(Math.random() * 2 ** 32) >>> 0;
-    const selectedIndices = selectSample(entry.N, n, seed);
-    const now = new Date();
-    const agency = entry.agency || 'NA';
-    const base = `${entry.entity.replace(/\s+/g, '_')}_${agency}_Sample_${stamp(now)}`;
-    const meta = {
-      entity: entry.entity, agency, tier, N: entry.N, n, seed,
-      generatedAt: now.toISOString(), generatedBy: userEmail, selectedIndices,
-    };
-
     patch(entry.id, { genStatus: 'working', genError: '' });
     try {
-      const full = buildWorkbook(entry.data, meta, true);
-      const client = buildWorkbook(entry.data, meta, false);
-      // If this came from a raw-file merge, add the Data Integrity sheet and the
-      // sampled parents' child detail to both copies.
-      if (entry.merged) {
-        const keyIdx = entry.data.headers.findIndex(
-          h => String(h ?? '').trim().toLowerCase() === entry.merged!.key.toLowerCase()
-        );
-        const selectedKeys = keyIdx >= 0
-          ? new Set(selectedIndices.map(i => String(entry.data!.rows[i]?.[keyIdx] ?? '').trim()))
-          : undefined;
-        appendValidationSheets(full, entry.merged, selectedKeys);
-        appendValidationSheets(client, entry.merged, selectedKeys);
-      }
-      await uploadData({
-        path: `${LOCAL_FOLDER}${base}.xlsx`,
-        data: new Blob([workbookToArray(full)], { type: XLSX_CT }),
-        options: { contentType: XLSX_CT },
-      }).result;
-      await uploadData({
-        path: `${CLIENT_FOLDER}${base}.xlsx`,
-        data: new Blob([workbookToArray(client)], { type: XLSX_CT }),
-        options: { contentType: XLSX_CT },
-      }).result;
-      downloadWorkbook(full, `${base}.xlsx`);
-      patch(entry.id, { genStatus: 'done', generated: { seed, n, at: now.toLocaleString() } });
+      const r = await sampleAndWriteResult({ entity: entry.entity, agency: entry.agency || 'NA', N: entry.N, data: entry.data, merged: entry.merged || undefined, download: true });
+      if (!r) { patch(entry.id, { genStatus: 'error', genError: 'No sampling classification for this entity.' }); return; }
+      patch(entry.id, { genStatus: 'done', generated: { seed: r.seed, n: r.n, at: new Date().toLocaleString() } });
     } catch (err) {
       patch(entry.id, { genStatus: 'error', genError: err instanceof Error ? err.message : String(err) });
     }
@@ -820,6 +986,134 @@ function ValidationsPage() {
     const tier = entry.entity ? tierForEntity(entry.entity) : null;
     if (!tier || !entry.N) return null;
     return computeSampleSize(entry.N, tier);
+  };
+
+  // ── Goal 5: run an entity across every BU it's attached to (agency report) ──
+  const [entityRunSel, setEntityRunSel] = useState('');
+  const [entityRun, setEntityRun] = useState<{ running: boolean; done: number; total: number; current: string; note: string }>({ running: false, done: 0, total: 0, current: '', note: '' });
+
+  // Match a report entity (tab) to its column in the agency report, then list the
+  // BUs where that column has any status (attached).
+  const agencyColForEntity = useCallback((entityTab: string): string | null => {
+    if (!report) return null;
+    const e = valReport?.entities.find(x => x.tab === entityTab);
+    const cands = [entityTab, e?.entity, e?.files.find(f => f.role === 'master')?.label].filter(Boolean).map(s => normStr(s as string));
+    let best: string | null = null, bestScore = 0;
+    for (const col of report.entities) {
+      const nc = normStr(col);
+      let score = 0;
+      for (const c of cands) { if (!c) continue; if (nc === c) score = Math.max(score, 3); else if (nc.includes(c) || c.includes(nc)) score = Math.max(score, 2); }
+      if (score > bestScore) { bestScore = score; best = col; }
+    }
+    return bestScore > 0 ? best : null;
+  }, [report, valReport]);
+
+  const attachedBUsForEntity = useCallback((entityTab: string): string[] => {
+    if (!report) return [];
+    const col = agencyColForEntity(entityTab);
+    if (!col) return [];
+    return report.bus.filter(b => { const s = b.statuses[col]; return s != null && String(s).trim() !== ''; }).map(b => b.unit);
+  }, [report, agencyColForEntity]);
+
+  const runEntityAcrossBUs = useCallback(async (entityTab: string) => {
+    if (!valReport) return;
+    if (!report) { setEntityRun({ running: false, done: 0, total: 0, current: '', note: 'Agency report not loaded yet — open the BU Dashboard once so it loads, then retry.' }); return; }
+    const bus = attachedBUsForEntity(entityTab);
+    if (!bus.length) { setEntityRun({ running: false, done: 0, total: 0, current: '', note: `No BUs are attached to "${entityTab}" in the agency report.` }); return; }
+    if (!confirm(`Generate + sample "${entityTab}" for ${bus.length} attached BU${bus.length !== 1 ? 's' : ''}?\n${bus.join(', ')}\n\nFor each BU this writes CV_ files and a sample report to Sampling/Local + Client (real ERP data).`)) return;
+    setEntityRun({ running: true, done: 0, total: bus.length, current: '', note: '' });
+    const actor = userEmail ? `&actor=${encodeURIComponent(userEmail)}` : '';
+    let reports = 0; const skipped: string[] = [];
+    for (let i = 0; i < bus.length; i++) {
+      const bu = bus[i];
+      setEntityRun({ running: true, done: i, total: bus.length, current: bu, note: '' });
+      try {
+        // 1) generate this BU's missing files for the entity
+        const toGen = buEntitiesToGenerate(bu, entityTab);
+        for (const t of toGen) {
+          try { const d = await (await fetch(`${LAMBDA_URL}?action=generate_entity_files&mock=${PLAN_MOCK}&entity=${encodeURIComponent(t.plan)}&bu=${encodeURIComponent(bu)}${actor}`)).json(); if (!d.ok) console.error('gen failed', bu, t, d.error); }
+          catch (e) { console.error('gen error', bu, t, e); }
+        }
+        if (toGen.length) { try { const mans = await readAllManifests(PLAN_MOCK); setValManifests(mans); valManifestsRef.current = mans; } catch { /* keep old */ } }
+        // 2) build + sample each master for this BU
+        const built = await buildBUResults(bu, entityTab);
+        for (const { e, results } of built) {
+          for (const result of results) {
+            const entity = matchEntity(result.entityToken) || e.entity;
+            const r = await sampleAndWriteResult({ entity, agency: result.bu || bu, N: result.recordCount, data: resultToFileData(result), merged: result, download: false });
+            if (r) reports++; else skipped.push(`${bu}/${entity}`);
+          }
+        }
+      } catch (e) { console.error('run entity across BU failed', bu, e); }
+    }
+    setEntityRun({ running: false, done: bus.length, total: bus.length, current: '', note: `Done — wrote ${reports} report${reports !== 1 ? 's' : ''} across ${bus.length} BU${bus.length !== 1 ? 's' : ''}${skipped.length ? ` · ${skipped.length} skipped (no data/classification)` : ''}. See Sampling/Local + Client.` });
+  }, [valReport, report, attachedBUsForEntity, buEntitiesToGenerate, buildBUResults, sampleAndWriteResult, userEmail]);
+
+  // ── Reproduce a prior sample from its recorded seed ──
+  const addRepFile = async (file: File) => {
+    setRepError('');
+    setRepResult(null);
+    try {
+      const parsed = parsePriorSample(await file.arrayBuffer());
+      if (!parsed.population) {
+        setRepFile(null);
+        setRepError('This workbook has no "Population" sheet. Reproduction needs the full sample workbook (the copy that still carries its Population sheet).');
+        return;
+      }
+      const sz = parsed.sizing;
+      const guess = parseFilename(file.name);
+      setRepFile({ name: file.name, parsed });
+      setRepEntity(sz?.entity || guess.entity || '');
+      setRepAgency(sz?.agency || guess.agency || '');
+      setRepN(String(sz?.N ?? parsed.population.rows.length));
+      setRepn(sz?.n != null ? String(sz.n) : '');
+      setRepSeed(sz?.seed != null ? String(sz.seed) : '');
+    } catch (err) {
+      setRepFile(null);
+      setRepError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const onRepDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsRepDragOver(false);
+    const f = e.dataTransfer.files?.[0];
+    if (f) addRepFile(f);
+  };
+
+  const reproduce = () => {
+    setRepError('');
+    const pop = repFile?.parsed.population;
+    if (!pop) return;
+    const N = parseInt(repN, 10), n = parseInt(repn, 10), seed = Number(repSeed);
+    if (!Number.isFinite(N) || N <= 0) { setRepError('Enter a valid population size (N).'); return; }
+    if (!Number.isFinite(n) || n <= 0) { setRepError('Enter the sample size (n) from the original run.'); return; }
+    if (!Number.isInteger(seed)) { setRepError('Enter the numeric seed from the original run (an integer).'); return; }
+    const indices = selectSample(N, n, seed);
+    const sample = repFile?.parsed.sample;
+    if (sample) {
+      const v = verifyReproduction(pop, sample, indices);
+      setRepResult({ indices, checked: true, matched: v.matched, total: v.total, identical: v.identical });
+    } else {
+      setRepResult({ indices, checked: false, matched: 0, total: 0, identical: false });
+    }
+  };
+
+  const downloadReproduced = () => {
+    const pop = repFile?.parsed.population;
+    if (!pop || !repResult) return;
+    const N = parseInt(repN, 10), n = parseInt(repn, 10), seed = Number(repSeed);
+    const entity = (repEntity || 'SAMPLE').trim();
+    const agency = (repAgency || 'NA').trim();
+    const tierName = (repFile?.parsed.sizing?.tierName || '').toUpperCase();
+    const tier = tierForEntity(entity) || TIERS[tierName] || { name: tierName || '—', confidence: 0, Z: 0, e: 0, p: 0 };
+    const now = new Date();
+    const meta = {
+      entity, agency, tier, N, n, seed,
+      generatedAt: now.toISOString(), generatedBy: userEmail, selectedIndices: repResult.indices,
+    };
+    const wb = buildWorkbook(pop, meta, true);
+    downloadWorkbook(wb, `${parentEntityLabel(entity)} BU ${bu3(agency)}-Sample Converted Data (Reproduced ${stamp(now)}).xlsx`);
   };
 
   // ── Dashboard: load report from S3 (auto), or upload to persist ──
@@ -840,7 +1134,7 @@ function ValidationsPage() {
   }, []);
 
   useEffect(() => {
-    if (activeTab === 'dashboard' && !reportLoaded) loadReport();
+    if ((activeTab === 'dashboard' || activeTab === 'bybu') && !reportLoaded) loadReport();
   }, [activeTab, reportLoaded, loadReport]);
 
   const uploadReport = async (file: File) => {
@@ -932,6 +1226,14 @@ function ValidationsPage() {
               MODERATE 95% · LOW 90% · AUTO 85%. Selection uses a recorded random seed so any
               sample can be reproduced.
             </div>
+          </div>
+
+          <div className="val-reproduce-cta">
+            <div>
+              <strong>Reproduce a prior sample</strong>
+              <span className="val-dropzone-hint"> — re-draw an earlier run&rsquo;s exact selection from its recorded seed, for audit or a row-by-row comparison.</span>
+            </div>
+            <button className="val-btn-secondary" onClick={() => setActiveTab('reproduce')}>🎯 Reproduce by seed →</button>
           </div>
 
           <div
@@ -1644,6 +1946,28 @@ function ValidationsPage() {
             const scopeLabel = scope ? (valReport.entities.find(e => e.tab === scope)?.entity || scope) : `BU ${selectedBU}`;
             return (
               <>
+                <div className="val-entityrun">
+                  <div className="val-entityrun-head">
+                    <strong>Run one entity across every BU it&rsquo;s attached to</strong>
+                    <span className="val-dropzone-hint"> — generates each BU&rsquo;s files and writes a sample report to Sampling/Local + Client, using the agency report for the BU list.</span>
+                  </div>
+                  <div className="val-entityrun-row">
+                    <label className="val-bu-pick">Entity
+                      <select value={entityRunSel} onChange={ev => setEntityRunSel(ev.target.value)} disabled={entityRun.running}>
+                        <option value="">— select entity —</option>
+                        {valReport.entities.map(e => <option key={e.tab} value={e.tab}>{e.entity || e.tab}</option>)}
+                      </select>
+                    </label>
+                    <button className="val-btn-row" disabled={!entityRunSel || entityRun.running} onClick={() => runEntityAcrossBUs(entityRunSel)}>
+                      {entityRun.running ? <><span className="val-spinner" /> {entityRun.current || 'starting'} ({entityRun.done}/{entityRun.total})…</> : '▶ Generate + sample all attached BUs'}
+                    </button>
+                    {entityRunSel && !entityRun.running && (
+                      <span className="val-muted">{attachedBUsForEntity(entityRunSel).length} BU{attachedBUsForEntity(entityRunSel).length !== 1 ? 's' : ''} attached{!report ? ' · loading agency report…' : ''}</span>
+                    )}
+                  </div>
+                  {entityRun.note && <div className="val-gen-note-inline">{entityRun.note}</div>}
+                </div>
+
                 <div className="val-bu-controls">
                   <label className="val-bu-pick">BU
                     <select value={selectedBU} onChange={ev => { setSelectedBU(ev.target.value); setSampleEntitySel(''); }} disabled={busy}>
@@ -1709,11 +2033,14 @@ function ValidationsPage() {
       {activeTab === 'bufiles' && (
         <div className="val-tab-content">
           <div className="val-intro">
-            <h2>BU Files</h2>
+            <h2>BU Files — configuration</h2>
             <p>
               Which entities (and their master/child files) each BU needs — seeded from the validation
-              report&rsquo;s <em>Present in agencies</em>. Add, edit or delete assignments as requirements change
-              (e.g. add Location to 015) and Save; assignments persist to S3 and drive the Sample by BU tab.
+              report&rsquo;s <em>Present in agencies</em>. Each entity shows its real <strong>table name</strong>
+              (e.g. <code>SCM_SUPPLIER_MOCK14_VW_TBL</code>) so you know exactly what you&rsquo;re wiring, and a
+              <strong> Link parent&nbsp;→&nbsp;children</strong> picker lets you choose the shared Unique ID
+              (Supplier&nbsp;Name, Order, …) that joins the files. Add, edit or delete assignments as
+              requirements change and Save; everything persists to S3 and drives the Sample by BU tab.
             </p>
           </div>
 
@@ -1768,7 +2095,7 @@ function ValidationsPage() {
                   <span className="val-muted">{assigned.length} entit{assigned.length !== 1 ? 'ies' : 'y'} assigned</span>
                   <input className="val-search val-bu-newbu" placeholder="new BU #" value={newBuInput} onChange={e => setNewBuInput(e.target.value)} />
                   <button className="val-btn-secondary" onClick={addBU} disabled={!newBuInput.trim()}>Add BU</button>
-                  <button className="val-btn-secondary" onClick={saveBuAssignments} disabled={buAssignSaving}>
+                  <button className="val-btn-secondary" onClick={() => { saveBuAssignments(); saveLinkKeys(linkKeysRef.current); }} disabled={buAssignSaving}>
                     {buAssignSaving ? <><span className="val-spinner val-spinner-dark" /> Saving…</> : 'Save assignments'}
                   </button>
                   {buAssignSavedAt && <span className="val-muted">saved {buAssignSavedAt}</span>}
@@ -1797,11 +2124,17 @@ function ValidationsPage() {
                       const custom = included.filter(lbl => !options.some(o => normStr(o.label) === normStr(lbl)));
                       const open = !!buFilesExpanded[name];
                       const total = options.length + custom.length;
+                      const tgt = entityTarget(name);
+                      const linkOpts = entityLinkOptions(name);
+                      const curLink = effectiveLinkKey(name);
                       return (
                         <React.Fragment key={name}>
-                          <tr className="val-bu-row" onClick={() => setBuFilesExpanded(p => ({ ...p, [name]: !p[name] }))}>
+                          <tr className="val-bu-row" onClick={() => { const willOpen = !open; setBuFilesExpanded(p => ({ ...p, [name]: willOpen })); if (willOpen) ensureEntityColumns(name); }}>
                             <td className="val-col-caret"><span className="val-caret">{open ? '▾' : '▸'}</span></td>
-                            <td className="val-bu-unit">{ent?.entity || name}</td>
+                            <td className="val-bu-unit">
+                              {ent?.entity || name}
+                              {tgt && <div className="val-bu-tablename" title={tgt.table}>{tgt.table}</div>}
+                            </td>
                             <td className="val-muted">{included.length} of {total} file{total !== 1 ? 's' : ''}</td>
                             <td>{ent ? <span className="val-repstatus val-rep-clean">yes</span> : <span className="val-repstatus val-rep-other">no</span>}</td>
                             <td><button className="val-remove" onClick={e => { e.stopPropagation(); removeEntity(name); }} aria-label={`Remove ${name}`}>×</button></td>
@@ -1810,18 +2143,40 @@ function ValidationsPage() {
                             <tr className="val-bu-detail-row">
                               <td></td>
                               <td colSpan={4}>
+                                {tgt && (
+                                  <div className="val-linkpick">
+                                    <label className="val-bu-pick">Link parent&nbsp;→&nbsp;children on
+                                      <select value={curLink} onChange={e => { const val = e.target.value; setLinkKeys(p => { const nx = { ...p }; if (val) nx[name] = val; else delete nx[name]; linkKeysRef.current = nx; return nx; }); }}>
+                                        {!curLink && <option value="">— choose the Unique ID —</option>}
+                                        {linkOpts.map(c => <option key={c} value={c}>{c}</option>)}
+                                        {curLink && !linkOpts.some(c => c.toLowerCase() === curLink.toLowerCase()) && <option value={curLink}>{curLink}</option>}
+                                      </select>
+                                    </label>
+                                    {colsLoading[tgt.table] && <span className="val-muted"><span className="val-spinner val-spinner-dark" /> loading columns…</span>}
+                                    {linkKeys[name] && <button className="val-link-btn" onClick={() => setLinkKeys(p => { const nx = { ...p }; delete nx[name]; linkKeysRef.current = nx; return nx; })}>reset to config default</button>}
+                                    <div className="val-muted val-linkpick-note">
+                                      Columns shared between <code>{tgt.table}</code> and its {tgt.children.length} child table{tgt.children.length !== 1 ? 's' : ''}. The chosen column is the Unique ID that carries the sample across every file.
+                                    </div>
+                                  </div>
+                                )}
                                 {options.length === 0 && custom.length === 0 && <div className="val-muted">Not in the validation report and nothing generated yet — add files below, or add it to the report to get a spec.</div>}
                                 <div className="val-filecheck-grid">
-                                  {options.map(o => (
-                                    <label key={o.label} className="val-filecheck">
-                                      <input type="checkbox" checked={included.includes(o.label)} onChange={() => toggleFile(name, o.label)} />
-                                      {o.label}{o.gen && <span className="val-muted"> (extra)</span>}
-                                    </label>
-                                  ))}
+                                  {options.map(o => {
+                                    const ft = fileTableName(name, o.label);
+                                    return (
+                                      <label key={o.label} className="val-filecheck" title={ft || undefined}>
+                                        <input type="checkbox" checked={included.includes(o.label)} onChange={() => toggleFile(name, o.label)} />
+                                        <span className="val-filecheck-body">
+                                          <span>{o.label}{o.gen && <span className="val-muted"> (extra)</span>}</span>
+                                          {ft && <span className="val-filecheck-table">{ft}</span>}
+                                        </span>
+                                      </label>
+                                    );
+                                  })}
                                   {custom.map(lbl => (
                                     <label key={lbl} className="val-filecheck">
                                       <input type="checkbox" checked onChange={() => toggleFile(name, lbl)} />
-                                      {lbl} <span className="val-muted">(custom)</span>
+                                      <span className="val-filecheck-body"><span>{lbl} <span className="val-muted">(custom)</span></span></span>
                                     </label>
                                   ))}
                                 </div>
@@ -1848,6 +2203,105 @@ function ValidationsPage() {
               </>
             );
           })()}
+        </div>
+      )}
+
+      {activeTab === 'reproduce' && (
+        <div className="val-tab-content">
+          <div className="val-intro">
+            <button className="val-link-btn" onClick={() => setActiveTab('sampling')}>&larr; Back to Sampling</button>
+            <h2>Reproduce a Sample from its Seed</h2>
+            <p>
+              Drop a prior sample workbook (the full copy that includes the <strong>Sizing</strong> and{' '}
+              <strong>Population</strong> sheets). The recorded seed, population size (N) and sample size (n)
+              are read automatically, the exact same selection is re-drawn, and — when the workbook still
+              carries its <strong>Sample</strong> sheet — the re-draw is checked against it to prove the rows
+              are identical. Everything runs in your browser; nothing is uploaded.
+            </p>
+            <div className="val-note">
+              Reproduction needs the <em>same population in the same order</em>. If the underlying extract
+              changed since the original run (e.g. more records), the seed still draws deterministically but
+              the selected rows may differ — the verification below will flag that.
+            </div>
+          </div>
+
+          <div
+            className={`val-dropzone ${isRepDragOver ? 'drag-over' : ''}`}
+            onDragOver={e => { e.preventDefault(); setIsRepDragOver(true); }}
+            onDragLeave={() => setIsRepDragOver(false)}
+            onDrop={onRepDrop}
+            onClick={() => repInputRef.current?.click()}
+          >
+            <input
+              ref={repInputRef}
+              type="file"
+              accept=".xlsx,.xlsm,.xls"
+              style={{ display: 'none' }}
+              onChange={e => { const f = e.target.files?.[0]; if (f) addRepFile(f); e.target.value = ''; }}
+            />
+            <span className="val-dropzone-icon">🎯</span>
+            <p><strong>Drop a prior sample workbook here</strong> or click to browse</p>
+            <p className="val-dropzone-hint">.xlsx — e.g. Supplier BU 015-Sample Converted Data.xlsx (use the Local/full copy so the seed is included)</p>
+          </div>
+
+          {repError && <div className="val-error">{repError}</div>}
+
+          {repFile && (
+            <div className="val-reproduce-panel">
+              <div className="val-reproduce-file">
+                📄 <strong>{repFile.name}</strong>
+                <span className="val-muted"> — sheets: {repFile.parsed.sheetNames.join(', ')}</span>
+              </div>
+              {!repFile.parsed.sizing && (
+                <div className="val-note">No <b>Sizing</b> sheet in this file (it looks like a client copy). Enter the seed and sample size (n) from the original run below.</div>
+              )}
+              <div className="val-reproduce-grid">
+                <label>Entity
+                  <input value={repEntity} onChange={e => { setRepEntity(e.target.value); setRepResult(null); }} />
+                </label>
+                <label>Agency
+                  <input value={repAgency} onChange={e => { setRepAgency(e.target.value); setRepResult(null); }} />
+                </label>
+                <label>Population (N)
+                  <input inputMode="numeric" value={repN} onChange={e => { setRepN(e.target.value); setRepResult(null); }} />
+                </label>
+                <label>Sample (n)
+                  <input inputMode="numeric" value={repn} onChange={e => { setRepn(e.target.value); setRepResult(null); }} />
+                </label>
+                <label>Seed
+                  <input inputMode="numeric" value={repSeed} onChange={e => { setRepSeed(e.target.value); setRepResult(null); }} />
+                </label>
+              </div>
+              {repFile.parsed.population && repFile.parsed.sizing?.N != null &&
+                repFile.parsed.sizing.N !== repFile.parsed.population.rows.length && (
+                <div className="val-note val-reproduce-warn">
+                  Heads up: the Sizing sheet records N = {repFile.parsed.sizing.N}, but the Population sheet
+                  has {repFile.parsed.population.rows.length} rows. Reproduction uses the N above — they
+                  should match for a faithful re-draw.
+                </div>
+              )}
+              <button className="val-btn-row" onClick={reproduce}>🎲 Reproduce selection</button>
+            </div>
+          )}
+
+          {repResult && (
+            <div className="val-reproduce-result">
+              {repResult.checked ? (
+                <div className={repResult.identical ? 'val-comp-ok' : 'val-comp-missing'}>
+                  {repResult.identical
+                    ? `✓ Reproduced ${repResult.matched}/${repResult.total} rows — identical to the original Sample sheet.`
+                    : `⚠ Only ${repResult.matched}/${repResult.total} rows match the original Sample sheet. The population or its order likely changed since the original run.`}
+                </div>
+              ) : (
+                <div className="val-comp-warn">Re-drew {repResult.indices.length} rows. No Sample sheet in this file to verify against — download and compare manually.</div>
+              )}
+              <div className="val-reproduce-idx">
+                <span className="val-muted">Selected row positions (0-based into the population): </span>
+                <code>{repResult.indices.join(', ')}</code>
+              </div>
+              <button className="val-btn-secondary" onClick={downloadReproduced}>⬇ Download reproduced sample</button>
+            </div>
+          )}
         </div>
       )}
     </div>

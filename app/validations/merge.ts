@@ -51,6 +51,7 @@ export interface MergeResult {
   key: string;
   headers: string[];
   rows: unknown[][];
+  parentHeaders: string[]; // the parent/root file's own columns (master = parentHeaders + child cols)
   children: ChildInfo[];
   childrenData: ChildDetail[];
   integrity: ChildIntegrity[];
@@ -223,6 +224,7 @@ export function mergeGroup(group: RawFile[]): MergeResult {
     parentName: parent.name,
     key,
     headers, rows,
+    parentHeaders: parent.data.headers.map(String),
     children: cms.map(m => ({ label: m.label, strategy: m.strategy, keptCols: m.keep.length, rowCount: m.total })),
     childrenData,
     integrity,
@@ -474,6 +476,7 @@ function assembleMaster(
   return {
     bu, entityToken, parentName, key: keyName,
     headers, rows,
+    parentHeaders: parentHeaders.map(String),
     children: cms.map(m => ({ label: m.label, strategy: m.strategy, keptCols: m.keep.length, rowCount: m.total })),
     childrenData, integrity, warnings, recordCount: rows.length,
   };
@@ -682,6 +685,7 @@ function assembleFromRootIdx(
   return {
     bu, entityToken, parentName, key: keyName,
     headers, rows,
+    parentHeaders: rootHeaders.map(String),
     children: cms.map(m => ({ label: m.label, strategy: m.strategy, keptCols: m.keep.length, rowCount: m.total })),
     childrenData, integrity, warnings, recordCount: rows.length,
   };

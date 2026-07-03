@@ -149,11 +149,8 @@ export interface FileData {
   sheetName: string;
 }
 
-// Parse spreadsheet bytes (from a File or an S3 download) into a FileData.
-export function parseWorkbookBuffer(buf: ArrayBuffer): FileData {
-  const wb = XLSX.read(buf, { type: 'array', cellDates: true });
-  const sheetName = wb.SheetNames[0];
-  const ws = wb.Sheets[sheetName];
+// Read one worksheet into a headers/rows FileData.
+function sheetToFileData(ws: XLSX.WorkSheet, sheetName: string): FileData {
   const aoa = XLSX.utils.sheet_to_json<unknown[]>(ws, {
     header: 1,
     blankrows: false,
@@ -164,8 +161,105 @@ export function parseWorkbookBuffer(buf: ArrayBuffer): FileData {
   return { headers, rows, sheetName };
 }
 
+// Parse spreadsheet bytes (from a File or an S3 download) into a FileData.
+export function parseWorkbookBuffer(buf: ArrayBuffer): FileData {
+  const wb = XLSX.read(buf, { type: 'array', cellDates: true });
+  const sheetName = wb.SheetNames[0];
+  return sheetToFileData(wb.Sheets[sheetName], sheetName);
+}
+
 export async function readWorkbook(file: File): Promise<FileData> {
   return parseWorkbookBuffer(await file.arrayBuffer());
+}
+
+// ── Reproduce a prior sample from its recorded seed ──────────────────────────
+// A prior sample workbook carries the Population it was drawn from and (in the
+// full/internal copy) a Sizing sheet recording N, n and the seed. Re-reading
+// those lets us re-draw the exact same selection and verify it against the
+// original Sample sheet.
+
+export interface PriorSizing {
+  entity: string;
+  agency: string;
+  tierName: string;
+  N: number | null;
+  n: number | null;
+  seed: number | null;
+}
+
+export interface PriorSample {
+  sheetNames: string[];
+  population: FileData | null; // the Population sheet — required to reproduce
+  sample: FileData | null;     // the original Sample sheet — used to verify
+  sizing: PriorSizing | null;  // N / n / seed, if the Sizing sheet is present
+}
+
+function findSheet(wb: XLSX.WorkBook, name: string): string | null {
+  const lc = name.toLowerCase();
+  return (
+    wb.SheetNames.find(s => s.toLowerCase() === lc) ||
+    wb.SheetNames.find(s => s.toLowerCase().includes(lc)) ||
+    null
+  );
+}
+
+// Parse the key/value Sizing sheet written by buildWorkbook back into its fields.
+function parseSizingSheet(ws: XLSX.WorkSheet): PriorSizing {
+  const aoa = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, blankrows: false, defval: null });
+  const pairs: Array<[string, unknown]> = [];
+  const seen = new Set<string>();
+  for (const row of aoa) {
+    const k = String(row?.[0] ?? '').trim().toLowerCase();
+    if (k && !seen.has(k)) { seen.add(k); pairs.push([k, row?.[1]]); }
+  }
+  const get = (pred: (k: string) => boolean): unknown => {
+    const hit = pairs.find(([k]) => pred(k));
+    return hit ? hit[1] : null;
+  };
+  const num = (v: unknown): number | null => {
+    if (v == null || v === '') return null;
+    const x = Number(v);
+    return Number.isFinite(x) ? x : null;
+  };
+  return {
+    entity: String(get(k => k === 'entity') ?? '').trim(),
+    agency: String(get(k => k === 'agency') ?? '').trim(),
+    tierName: String(get(k => k.startsWith('classification')) ?? '').trim(),
+    N: num(get(k => k.startsWith('population'))),
+    n: num(get(k => k.startsWith('required sample'))),
+    seed: num(get(k => k.startsWith('random seed'))),
+  };
+}
+
+export function parsePriorSample(buf: ArrayBuffer): PriorSample {
+  const wb = XLSX.read(buf, { type: 'array', cellDates: true });
+  const popName = findSheet(wb, 'Population');
+  const sampName = findSheet(wb, 'Sample');
+  const sizeName = findSheet(wb, 'Sizing');
+  return {
+    sheetNames: wb.SheetNames.slice(),
+    population: popName ? sheetToFileData(wb.Sheets[popName], popName) : null,
+    sample: sampName ? sheetToFileData(wb.Sheets[sampName], sampName) : null,
+    sizing: sizeName ? parseSizingSheet(wb.Sheets[sizeName]) : null,
+  };
+}
+
+// Compare a reproduced selection against the original Sample sheet, positionally
+// (both are written in ascending index order). Returns how many of the original
+// sampled rows the re-draw reproduces exactly.
+export function verifyReproduction(
+  population: FileData,
+  sample: FileData,
+  indices: number[],
+): { matched: number; total: number; identical: boolean } {
+  const serial = (row: unknown[] | undefined) => JSON.stringify((row ?? []).map(c => c ?? null));
+  const total = sample.rows.length;
+  const count = Math.min(indices.length, total);
+  let matched = 0;
+  for (let k = 0; k < count; k++) {
+    if (serial(population.rows[indices[k]]) === serial(sample.rows[k])) matched++;
+  }
+  return { matched, total, identical: total > 0 && indices.length === total && matched === total };
 }
 
 export interface SampleMeta {
