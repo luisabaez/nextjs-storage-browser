@@ -691,7 +691,7 @@ def _rows_to_xlsx_bytes(headers, rows):
 
 
 def _write_gen_manifest(s3, bucket, mock, entity, subentity, db, actor,
-                        out_prefix, generated, missing, capped=None):
+                        out_prefix, generated, missing, capped=None, bu_filter=None):
     """Audit trail for one generation run: which CV_ files were written, from
     which conversion table / source / BU, their row counts, and who ran it and
     when. Lets a suspect generated file be traced back to its source later.
@@ -711,6 +711,8 @@ def _write_gen_manifest(s3, bucket, mock, entity, subentity, db, actor,
         "generated": generated,
         "missing": missing,
     }
+    if bu_filter:
+        manifest["bu_filter"] = bu_filter
     if capped:
         manifest["capped"] = capped
     try:
@@ -723,7 +725,11 @@ def _write_gen_manifest(s3, bucket, mock, entity, subentity, db, actor,
 
 
 def generate_entity_files(conn_str, s3, bucket, mock, entity, subentity=None,
-                          dry_run=False, source_db=None, actor=""):
+                          dry_run=False, source_db=None, actor="", bu_filter=None):
+    # bu_filter: when set, only source[/BU] splits whose source OR BU value equals
+    # it are generated — so one agency's files can be produced in a small, fast
+    # call (no 400-file cap / Lambda timeout) instead of the whole entity at once.
+    bu_filter = (str(bu_filter).strip() if bu_filter not in (None, "") else None)
     db = source_db or SOURCE_DATABASE
     plan_table = f"SETUP_CONVERSION_PLAN_{mock}"
     out_prefix = f"{GENERATED_FOLDER}{mock}/{_safe_name(entity)}/"
@@ -777,6 +783,8 @@ def generate_entity_files(conn_str, s3, bucket, mock, entity, subentity=None,
                 if not source:
                     continue
                 bu = str(combo[1]).strip() if (bu_col and len(combo) > 1 and combo[1] is not None) else ''
+                if bu_filter and bu_filter not in (source, bu):
+                    continue  # per-BU generation: skip splits for other agencies
                 if bu_col and bu:
                     fname = f"CV_{prefix}__{_safe_name(source)}_{_safe_name(bu)}.xlsx"
                     cond = f"WHERE [{src_col}] = ? AND [{bu_col}] = ?"
@@ -795,7 +803,8 @@ def generate_entity_files(conn_str, s3, bucket, mock, entity, subentity=None,
                 if len(generated) >= GEN_MAX_FILES:
                     cap = f"stopped at {GEN_MAX_FILES} files"
                     mkey = _write_gen_manifest(s3, bucket, mock, entity, subentity, db,
-                                               actor, out_prefix, generated, missing, capped=cap)
+                                               actor, out_prefix, generated, missing, capped=cap,
+                                               bu_filter=bu_filter)
                     return {"ok": True, "entity": entity, "mock": mock, "folder": out_prefix,
                             "generated": generated, "missing": missing,
                             "capped": cap, "manifest_key": mkey}
@@ -813,6 +822,6 @@ def generate_entity_files(conn_str, s3, bucket, mock, entity, subentity=None,
                 "folder": out_prefix, "planned": planned, "missing": missing,
                 "plan_count": len(plans)}
     mkey = _write_gen_manifest(s3, bucket, mock, entity, subentity, db, actor,
-                               out_prefix, generated, missing)
+                               out_prefix, generated, missing, bu_filter=bu_filter)
     return {"ok": True, "entity": entity, "mock": mock, "folder": out_prefix,
             "generated": generated, "missing": missing, "manifest_key": mkey}
