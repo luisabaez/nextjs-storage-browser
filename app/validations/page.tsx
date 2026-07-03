@@ -39,10 +39,11 @@ const CLIENT_FOLDER = 'Sampling/Client/';
 const REPORT_PATH = 'Sampling/_status/agency_report.xlsx';
 const VALIDATION_REPORT_PATH = 'Sampling/_status/entity_validation_report.xlsx';
 const READINESS_PATH = 'Sampling/_status/entity_readiness.json';
+const BU_ASSIGN_PATH = 'Sampling/_status/bu_assignments.json';
 const XLSX_CT = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 const LAMBDA_URL = 'https://5ahxjcxhrcopng5hjgc2n6utxq0rwcmm.lambda-url.us-east-1.on.aws/';
 
-type TabId = 'sampling' | 'dashboard' | 'entities' | 'completeness' | 'bybu';
+type TabId = 'sampling' | 'dashboard' | 'entities' | 'completeness' | 'bybu' | 'bufiles';
 type GenStatus = 'idle' | 'working' | 'done' | 'error';
 
 interface FileEntry {
@@ -229,6 +230,24 @@ function ValidationsPage() {
     } catch (e) {
       setEntGen(p => ({ ...p, [entity]: { state: 'error', error: e instanceof Error ? e.message : String(e) } }));
     }
+  };
+
+  // Multi-select + batch generate (Entity Files tab).
+  const [selectedEntities, setSelectedEntities] = useState<Set<string>>(new Set());
+  const [batchGen, setBatchGen] = useState<{ running: boolean; done: number; total: number; dry: boolean }>({ running: false, done: 0, total: 0, dry: false });
+  const toggleEntity = (entity: string) => setSelectedEntities(p => {
+    const n = new Set(p); if (n.has(entity)) n.delete(entity); else n.add(entity); return n;
+  });
+  const doGenSelected = async (dry: boolean) => {
+    const list = filteredEntities.map(g => g.entity).filter(e => selectedEntities.has(e));
+    if (!list.length || batchGen.running) return;
+    if (!dry && !confirm(`Generate files for ${list.length} selected entit${list.length !== 1 ? 'ies' : 'y'}? This reads the conversion tables and writes CV_ files to S3 for each (one at a time).`)) return;
+    setBatchGen({ running: true, done: 0, total: list.length, dry });
+    for (let i = 0; i < list.length; i++) {
+      await doGen(list[i], dry);           // sequential — avoids hammering the Lambda/DB
+      setBatchGen(b => ({ ...b, done: i + 1 }));
+    }
+    setBatchGen(b => ({ ...b, running: false }));
   };
 
   useEffect(() => {
@@ -455,12 +474,43 @@ function ValidationsPage() {
     }
   }, [readiness]);
 
+  // Editable BU → entities assignments (which entities/files each BU needs),
+  // seeded from the report's Present-in-agencies, persisted to S3.
+  const [buAssignments, setBuAssignments] = useState<Record<string, string[]>>({});
+  const [buAssignSaving, setBuAssignSaving] = useState(false);
+  const [buAssignSavedAt, setBuAssignSavedAt] = useState('');
+
+  const loadBuAssignments = useCallback(async (report: ValidationReport) => {
+    let saved: Record<string, string[]> = {};
+    try {
+      const { url } = await getUrl({ path: BU_ASSIGN_PATH, options: { validateObjectExistence: true } });
+      const resp = await fetch(url.toString());
+      if (resp.ok) saved = await resp.json();
+    } catch { /* not saved yet */ }
+    const merged: Record<string, string[]> = {};
+    for (const bu of report.agencies) {
+      merged[bu] = saved[bu] ?? report.entities.filter(e => e.agencies.includes(bu)).map(e => e.tab);
+    }
+    for (const bu of Object.keys(saved)) if (!merged[bu]) merged[bu] = saved[bu];
+    setBuAssignments(merged);
+  }, []);
+
+  const saveBuAssignments = useCallback(async () => {
+    setBuAssignSaving(true);
+    try {
+      await uploadData({ path: BU_ASSIGN_PATH, data: new Blob([JSON.stringify(buAssignments)], { type: 'application/json' }), options: { contentType: 'application/json' } }).result;
+      setBuAssignSavedAt(new Date().toLocaleTimeString());
+    } catch (e) { console.error('save bu assignments failed', e); }
+    finally { setBuAssignSaving(false); }
+  }, [buAssignments]);
+
   const applyReport = useCallback((report: ValidationReport, manifests: ManifestFileRow[]) => {
     setValReport(report); valReportRef.current = report;
     setValManifests(manifests); valManifestsRef.current = manifests;
     compositeOverridesRef.current = buildCompositeKeyOverrides(report, samplingTargetsRef.current || []);
     loadReadiness(report);
-  }, [loadReadiness]);
+    loadBuAssignments(report);
+  }, [loadReadiness, loadBuAssignments]);
 
   const ensureTargets = useCallback(async () => {
     if (!samplingTargetsRef.current) {
@@ -501,8 +551,12 @@ function ValidationsPage() {
   }, [applyReport, ensureTargets, PLAN_MOCK]);
 
   useEffect(() => {
-    if ((activeTab === 'completeness' || activeTab === 'bybu') && !valLoaded) loadValReport();
+    if ((activeTab === 'completeness' || activeTab === 'bybu' || activeTab === 'bufiles') && !valLoaded) loadValReport();
   }, [activeTab, valLoaded, loadValReport]);
+  // The BU Files "add entity" dropdown also offers conversion-plan entities (e.g. Location).
+  useEffect(() => {
+    if (activeTab === 'bufiles' && !planLoaded && !planLoading) loadPlan();
+  }, [activeTab, planLoaded, planLoading, loadPlan]);
 
   // ── Sample by BU ──
   const [selectedBU, setSelectedBU] = useState('');
@@ -510,6 +564,24 @@ function ValidationsPage() {
   useEffect(() => {
     if (valReport && !selectedBU && valReport.agencies.length) setSelectedBU(valReport.agencies[0]);
   }, [valReport, selectedBU]);
+
+  // ── BU Files editor state ──
+  const [buFilesSel, setBuFilesSel] = useState('');
+  const [newBuInput, setNewBuInput] = useState('');
+  const [addEntSel, setAddEntSel] = useState('');
+  useEffect(() => {
+    const keys = Object.keys(buAssignments);
+    if (keys.length && (!buFilesSel || !keys.includes(buFilesSel))) setBuFilesSel(keys.sort()[0]);
+  }, [buAssignments, buFilesSel]);
+
+  // Entities available to assign: report entities (by tab) + conversion-plan entities.
+  const availableEntityNames = React.useMemo(() => {
+    const seen = new Set<string>(); const out: string[] = [];
+    const add = (name: string) => { const k = normStr(name); if (name && !seen.has(k)) { seen.add(k); out.push(name); } };
+    (valReport?.entities || []).forEach(e => add(e.tab));
+    entityGroups.forEach(g => add(g.entity));
+    return out.sort((a, b) => a.localeCompare(b));
+  }, [valReport, entityGroups]);
 
   // Load every file-ready entity for a BU into the Sampling list (filtered to that
   // BU; PRIFAS/shared entities load whole, per the email's one-file-per-PRIFAS rule).
@@ -702,6 +774,9 @@ function ValidationsPage() {
         </button>
         <button className={`val-tab-btn ${activeTab === 'bybu' ? 'active' : ''}`} onClick={() => setActiveTab('bybu')}>
           Sample by BU
+        </button>
+        <button className={`val-tab-btn ${activeTab === 'bufiles' ? 'active' : ''}`} onClick={() => setActiveTab('bufiles')}>
+          BU Files
         </button>
       </div>
 
@@ -1101,9 +1176,28 @@ function ValidationsPage() {
                 </span>
               </div>
 
+              <div className="val-batchbar">
+                <span className="val-muted"><b>{selectedEntities.size}</b> selected</span>
+                <button className="val-btn-secondary" disabled={!selectedEntities.size || batchGen.running} onClick={() => doGenSelected(true)}>Preview selected</button>
+                <button className="val-btn-row" disabled={!selectedEntities.size || batchGen.running} onClick={() => doGenSelected(false)}>Generate selected</button>
+                {batchGen.running && <span className="val-gen-status"><span className="val-spinner val-spinner-dark" /> {batchGen.dry ? 'previewing' : 'generating'} {batchGen.done}/{batchGen.total}…</span>}
+                {selectedEntities.size > 0 && !batchGen.running && <button className="val-link-btn" onClick={() => setSelectedEntities(new Set())}>clear</button>}
+              </div>
+
               <table className="val-table val-bu">
                 <thead>
                   <tr>
+                    <th className="val-col-check">
+                      <input type="checkbox" aria-label="Select all"
+                        checked={filteredEntities.length > 0 && filteredEntities.every(g => selectedEntities.has(g.entity))}
+                        ref={el => { if (el) el.indeterminate = filteredEntities.some(g => selectedEntities.has(g.entity)) && !filteredEntities.every(g => selectedEntities.has(g.entity)); }}
+                        onChange={() => setSelectedEntities(p => {
+                          const all = filteredEntities.every(g => p.has(g.entity));
+                          const n = new Set(p);
+                          filteredEntities.forEach(g => all ? n.delete(g.entity) : n.add(g.entity));
+                          return n;
+                        })} />
+                    </th>
                     <th className="val-col-caret"></th>
                     <th>Entity</th>
                     <th>Pillar / Module</th>
@@ -1120,6 +1214,10 @@ function ValidationsPage() {
                     return (
                       <React.Fragment key={gkey}>
                         <tr className="val-bu-row" onClick={() => setPlanExpanded(p => ({ ...p, [gkey]: !p[gkey] }))}>
+                          <td className="val-col-check">
+                            <input type="checkbox" aria-label={`Select ${g.entity}`} checked={selectedEntities.has(g.entity)}
+                              onClick={e => e.stopPropagation()} onChange={() => toggleEntity(g.entity)} />
+                          </td>
                           <td className="val-col-caret"><span className="val-caret">{open ? '▾' : '▸'}</span></td>
                           <td className="val-bu-unit">{g.entity}</td>
                           <td className="val-muted">{g.pillar} / {g.module}</td>
@@ -1134,6 +1232,7 @@ function ValidationsPage() {
                         </tr>
                         {open && (
                           <tr className="val-bu-detail-row">
+                            <td></td>
                             <td></td>
                             <td colSpan={6}>
                               {(() => {
@@ -1381,8 +1480,9 @@ function ValidationsPage() {
 
           {!valLoading && valReport && (() => {
             const mans = valManifests;
+            const assignedTabs = buAssignments[selectedBU];
             const rows = valReport.entities
-              .filter(e => e.agencies.includes(selectedBU))
+              .filter(e => assignedTabs ? assignedTabs.includes(e.tab) : e.agencies.includes(selectedBU))
               .map(e => {
                 const status = statusForTab(e.tab, e.entity);
                 const def = entityEmailStatus(e.entity);
@@ -1446,6 +1546,101 @@ function ValidationsPage() {
                 <p className="val-muted val-bu-foot">
                   &ldquo;Ready&rdquo; means every expected master/child file for BU {selectedBU} has been generated. Email status is advisory —
                   it reflects which entities the team said are workable now (from the latest status email).
+                </p>
+              </>
+            );
+          })()}
+        </div>
+      )}
+
+      {activeTab === 'bufiles' && (
+        <div className="val-tab-content">
+          <div className="val-intro">
+            <h2>BU Files</h2>
+            <p>
+              Which entities (and their master/child files) each BU needs — seeded from the validation
+              report&rsquo;s <em>Present in agencies</em>. Add, edit or delete assignments as requirements change
+              (e.g. add Location to 015) and Save; assignments persist to S3 and drive the Sample by BU tab.
+            </p>
+          </div>
+
+          {valLoading && <div className="val-loading"><span className="val-spinner val-spinner-dark" /> Loading…</div>}
+          {!valLoading && !valReport && (
+            <div className="val-error">Upload the Entity Validation Report on the <button className="val-link-btn" onClick={() => setActiveTab('completeness')}>Completeness</button> tab first — it seeds this view.</div>
+          )}
+
+          {!valLoading && valReport && (() => {
+            const bus = Object.keys(buAssignments).sort();
+            const assigned = buAssignments[buFilesSel] || [];
+            const reportByTab = new Map(valReport.entities.map(e => [e.tab, e]));
+            const addable = availableEntityNames.filter(n => !assigned.some(a => normStr(a) === normStr(n)));
+            const addEntity = () => {
+              if (!addEntSel) return;
+              setBuAssignments(p => ({ ...p, [buFilesSel]: [...(p[buFilesSel] || []), addEntSel] }));
+              setAddEntSel('');
+            };
+            const removeEntity = (name: string) => setBuAssignments(p => ({ ...p, [buFilesSel]: (p[buFilesSel] || []).filter(x => x !== name) }));
+            const addBU = () => {
+              const b = newBuInput.trim();
+              if (!b || buAssignments[b]) return;
+              setBuAssignments(p => ({ ...p, [b]: [] })); setBuFilesSel(b); setNewBuInput('');
+            };
+            const deleteBU = () => {
+              if (!buFilesSel || !confirm(`Remove BU ${buFilesSel} and its assignments? (Save to persist.)`)) return;
+              setBuAssignments(p => { const n = { ...p }; delete n[buFilesSel]; return n; });
+            };
+            return (
+              <>
+                <div className="val-bu-controls">
+                  <label className="val-bu-pick">BU
+                    <select value={buFilesSel} onChange={e => setBuFilesSel(e.target.value)}>
+                      {bus.map(b => <option key={b} value={b}>{b}</option>)}
+                    </select>
+                  </label>
+                  <span className="val-muted">{assigned.length} entit{assigned.length !== 1 ? 'ies' : 'y'} assigned</span>
+                  <input className="val-search val-bu-newbu" placeholder="new BU #" value={newBuInput} onChange={e => setNewBuInput(e.target.value)} />
+                  <button className="val-btn-secondary" onClick={addBU} disabled={!newBuInput.trim()}>Add BU</button>
+                  <button className="val-btn-secondary" onClick={saveBuAssignments} disabled={buAssignSaving}>
+                    {buAssignSaving ? <><span className="val-spinner val-spinner-dark" /> Saving…</> : 'Save assignments'}
+                  </button>
+                  {buAssignSavedAt && <span className="val-muted">saved {buAssignSavedAt}</span>}
+                  {buFilesSel && <button className="val-link-btn" onClick={deleteBU}>delete BU {buFilesSel}</button>}
+                </div>
+
+                <div className="val-bu-addrow">
+                  <label className="val-bu-pick">Add entity
+                    <select value={addEntSel} onChange={e => setAddEntSel(e.target.value)}>
+                      <option value="">— select entity —</option>
+                      {addable.map(n => <option key={n} value={n}>{n}</option>)}
+                    </select>
+                  </label>
+                  <button className="val-btn-row" onClick={addEntity} disabled={!addEntSel || !buFilesSel}>+ Add to {buFilesSel || 'BU'}</button>
+                </div>
+
+                <table className="val-table val-bu">
+                  <thead><tr><th>Entity</th><th>Master / child files</th><th>In report</th><th></th></tr></thead>
+                  <tbody>
+                    {assigned.length === 0 && <tr><td colSpan={4} className="val-muted" style={{ padding: '14px' }}>No entities assigned to {buFilesSel} yet — add one above.</td></tr>}
+                    {assigned.map(name => {
+                      const e = reportByTab.get(name);
+                      return (
+                        <tr key={name}>
+                          <td className="val-bu-unit">{name}</td>
+                          <td className="val-bu-files">
+                            {e ? e.files.map((f, i) => <span key={i} className={`val-bu-file ${f.role === 'master' ? 'ok' : ''}`} title={f.role}>{f.label}</span>)
+                              : <span className="val-muted">not in the validation report — no file spec</span>}
+                          </td>
+                          <td>{e ? <span className="val-repstatus val-rep-clean">yes</span> : <span className="val-repstatus val-rep-other">no</span>}</td>
+                          <td><button className="val-remove" onClick={() => removeEntity(name)} aria-label={`Remove ${name}`}>×</button></td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+                <p className="val-muted val-bu-foot">
+                  Entities in the report bring their master/child file spec (used by Completeness &amp; Sample by BU).
+                  Entities not in the report (e.g. Location) are recorded here as a requirement but need a file spec added to
+                  the report before they can be file-checked or sampled. Changes take effect after <b>Save assignments</b>.
                 </p>
               </>
             );

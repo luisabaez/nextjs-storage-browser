@@ -268,9 +268,11 @@
 .val-bu-pick { font-size: 13px; font-weight: 600; color: #374151; display: inline-flex; align-items: center; gap: 8px; }
 .val-bu-pick select { height: 34px; padding: 0 10px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 14px; font-weight: 600; }
 .val-bu-files { display: flex; flex-wrap: wrap; gap: 5px; }
-.val-bu-file { font-size: 11px; padding: 1px 7px; border-radius: 999px; white-space: nowrap; }
+.val-bu-file { font-size: 11px; padding: 1px 7px; border-radius: 999px; white-space: nowrap; background: #f3f4f6; color: #374151; border: 1px solid #e5e7eb; }
 .val-bu-file.ok { background: #ecfdf5; color: #065f46; border: 1px solid #a7f3d0; }
 .val-bu-file.missing { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
+.val-bu-addrow { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 0 0 12px; padding: 10px 12px; background: #f8fafc; border: 1px solid #e5e8ee; border-radius: 8px; }
+.val-bu-newbu { max-width: 120px; height: 34px; }
 .val-es-note { font-size: 11px; }
 .val-bu-foot { margin-top: 12px; font-size: 12px; }
 .val-es-ready { background: #ecfdf5; color: #065f46; border: 1px solid #a7f3d0; }
@@ -288,6 +290,11 @@
 .val-readiness-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; background: #fff; border: 1px solid #e5e8ee; border-radius: 8px; padding: 5px 8px; }
 .val-readiness-name { font-size: 12.5px; font-weight: 600; color: #374151; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .val-readiness-sel { border: 1px solid #d1d5db; border-radius: 999px; font-size: 11px; font-weight: 700; padding: 2px 6px; cursor: pointer; }
+
+/* Entity Files multi-select + batch generate */
+.val-col-check { width: 34px; text-align: center; }
+.val-col-check input { cursor: pointer; width: 15px; height: 15px; }
+.val-batchbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 8px 10px; margin: -4px 0 12px; background: #f8fafc; border: 1px solid #e5e8ee; border-radius: 8px; }
 
 .val-merged-note { font-size: 11px; color: #6b7280; margin-top: 4px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .val-link-btn { border: none; background: none; color: #2563eb; font-size: 11px; font-weight: 600; cursor: pointer; padding: 0; }
