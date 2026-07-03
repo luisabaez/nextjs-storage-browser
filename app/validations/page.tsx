@@ -701,10 +701,12 @@ function ValidationsPage() {
         const g = items.find(x => matchReportEntity(valReport, x.entity)?.tab === e.tab);
         if (!g) continue;
         const manifest = await readEntityManifests(PLAN_MOCK, g.entity);
-        const tagged = await loadGeneratedTagged(g, manifest);
-        // Filter to this BU. The generated files are agency-coded (source/bu = the
-        // agency) even for PRIFAS "shared" entities, so we still scope to the BU;
-        // only fall back to the whole set if a no-agency file leaves nothing.
+        // Only download this BU's files (agency-coded source/bu), not the whole
+        // entity folder. Fall back to all files for a no-agency PRIFAS entity.
+        const buFiles = g.files.filter(fn => { const m = manifest.get(fn); return m && (m.source === bu || m.bu === bu); });
+        const downloadG = buFiles.length ? { ...g, files: buFiles } : (isSharedEntity(e.entity) ? g : { ...g, files: [] });
+        if (!downloadG.files.length) continue;
+        const tagged = await loadGeneratedTagged(downloadG, manifest);
         let forBU = tagged.filter(t => t.source === bu || t.bu === bu);
         if (!forBU.length && isSharedEntity(e.entity)) forBU = tagged;
         forBU = filterIncludedFiles(bu, e, forBU);
