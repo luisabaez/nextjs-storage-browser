@@ -553,10 +553,29 @@ function ValidationsPage() {
   useEffect(() => {
     if ((activeTab === 'completeness' || activeTab === 'bybu' || activeTab === 'bufiles') && !valLoaded) loadValReport();
   }, [activeTab, valLoaded, loadValReport]);
-  // The BU Files "add entity" dropdown also offers conversion-plan entities (e.g. Location).
+  // BU Files + Sample by BU need the conversion plan (entity names, tables).
   useEffect(() => {
-    if (activeTab === 'bufiles' && !planLoaded && !planLoading) loadPlan();
+    if ((activeTab === 'bufiles' || activeTab === 'bybu') && !planLoaded && !planLoading) loadPlan();
   }, [activeTab, planLoaded, planLoading, loadPlan]);
+
+  // Map each report entity → the conversion-plan entity name that generates it
+  // (by best overlap of the report's file labels with the plan's conversion tables;
+  // so report "Contracts" → plan "Blanket Purchase Agreements", "Projects" → "Awards").
+  const reportToPlanEntity = React.useMemo(() => {
+    const map = new Map<string, string>();
+    if (!valReport) return map;
+    for (const e of valReport.entities) {
+      let best = '', bestScore = 0;
+      for (const g of entityGroups) {
+        const tables = g.files.map(f => f.CONVERSION_TABLE_BU);
+        let score = e.files.reduce((s, f) => s + (tables.some(t => fileMatchesTable(f.label, t)) ? 1 : 0), 0);
+        if (normStr(g.entity).includes(normStr(e.tab)) || normStr(e.tab).includes(normStr(g.entity))) score += 0.5;
+        if (score > bestScore) { bestScore = score; best = g.entity; }
+      }
+      if (best && bestScore > 0) map.set(e.tab, best); // accept the best positive match (name-only ok, e.g. Customer)
+    }
+    return map;
+  }, [valReport, entityGroups]);
 
   // ── Sample by BU ──
   const [selectedBU, setSelectedBU] = useState('');
@@ -625,6 +644,43 @@ function ValidationsPage() {
       setBuLoading(false);
     }
   }, [valReport, ensureTargets, genList, refreshGenerated, addMergeResults]);
+
+  // Generate only the files a BU needs (per-BU, small/fast — no cap or timeout),
+  // for any applicable entity not already present, then load them into sampling.
+  const [buPrep, setBuPrep] = useState<{ running: boolean; done: number; total: number; current: string }>({ running: false, done: 0, total: 0, current: '' });
+  const buEntitiesToGenerate = useCallback((bu: string) => {
+    if (!valReport) return [] as { tab: string; plan: string }[];
+    const mans = valManifestsRef.current || [];
+    const applicable = valReport.entities.filter(e => (buAssignments[bu] ? buAssignments[bu].includes(e.tab) : e.agencies.includes(bu)));
+    const out: { tab: string; plan: string }[] = [];
+    for (const e of applicable) {
+      const plan = reportToPlanEntity.get(e.tab);
+      if (!plan) continue;
+      const present = e.files.every(f => { const c = f.counts[bu]; if (!c || c === 'N/A') return true; return buFilePresent(mans, e.entity, f.label, bu).present; });
+      if (!present) out.push({ tab: e.tab, plan });
+    }
+    return out;
+  }, [valReport, buAssignments, reportToPlanEntity]);
+
+  const prepareBU = useCallback(async (bu: string) => {
+    if (!valReport) return;
+    const toGen = buEntitiesToGenerate(bu);
+    if (!confirm(`Generate ${toGen.length} entit${toGen.length !== 1 ? 'ies' : 'y'} for BU ${bu} (only ${bu}'s files) and load into Sampling?\n${toGen.map(t => '• ' + t.tab).join('\n') || '(nothing missing — will just load)'}\n\nThis reads the conversion tables and writes CV_ files to S3.`)) return;
+    setBuPrep({ running: true, done: 0, total: toGen.length, current: '' });
+    const actor = userEmail ? `&actor=${encodeURIComponent(userEmail)}` : '';
+    for (let i = 0; i < toGen.length; i++) {
+      setBuPrep({ running: true, done: i, total: toGen.length, current: toGen[i].tab });
+      try {
+        const url = `${LAMBDA_URL}?action=generate_entity_files&mock=${PLAN_MOCK}&entity=${encodeURIComponent(toGen[i].plan)}&bu=${encodeURIComponent(bu)}${actor}`;
+        const d = await (await fetch(url)).json();
+        if (!d.ok) console.error('per-BU gen failed', toGen[i], d.error);
+      } catch (e) { console.error('per-BU gen error', toGen[i], e); }
+    }
+    // Refresh manifests so the present-check + load see the new files.
+    try { const mans = await readAllManifests(PLAN_MOCK); setValManifests(mans); valManifestsRef.current = mans; } catch { /* keep old */ }
+    setBuPrep({ running: false, done: 0, total: 0, current: '' });
+    await loadBUIntoSampling(bu);
+  }, [valReport, buEntitiesToGenerate, userEmail, loadBUIntoSampling]);
 
   const onRawDrop = (e: React.DragEvent) => {
     e.preventDefault();
@@ -1500,17 +1556,22 @@ function ValidationsPage() {
               });
             const readyCount = rows.filter(r => r.ready).length;
             const anyReady = rows.some(r => r.ready);
+            const needGen = buEntitiesToGenerate(selectedBU).length;
+            const busy = buLoading || buPrep.running;
             return (
               <>
                 <div className="val-bu-controls">
                   <label className="val-bu-pick">BU
-                    <select value={selectedBU} onChange={ev => setSelectedBU(ev.target.value)}>
+                    <select value={selectedBU} onChange={ev => setSelectedBU(ev.target.value)} disabled={busy}>
                       {valReport.agencies.map(a => <option key={a} value={a}>{a}</option>)}
                     </select>
                   </label>
-                  <span className="val-muted">{readyCount} of {rows.length} entities ready</span>
-                  <button className="val-btn-row" disabled={!anyReady || buLoading} onClick={() => loadBUIntoSampling(selectedBU)}>
-                    {buLoading ? <><span className="val-spinner" /> Loading…</> : `→ Load ${selectedBU}'s ready entities into Sampling`}
+                  <span className="val-muted">{readyCount} of {rows.length} ready · {needGen ? `${needGen} to generate` : 'all files present'}</span>
+                  <button className="val-btn-row" disabled={busy} onClick={() => prepareBU(selectedBU)}>
+                    {buPrep.running ? <><span className="val-spinner" /> Generating {buPrep.current} ({buPrep.done}/{buPrep.total})…</> : `⚙ Generate & load BU ${selectedBU}`}
+                  </button>
+                  <button className="val-btn-secondary" disabled={!anyReady || busy} onClick={() => loadBUIntoSampling(selectedBU)}>
+                    {buLoading ? <><span className="val-spinner val-spinner-dark" /> Loading…</> : `Load present files only`}
                   </button>
                 </div>
 
@@ -1544,8 +1605,10 @@ function ValidationsPage() {
                   </tbody>
                 </table>
                 <p className="val-muted val-bu-foot">
-                  &ldquo;Ready&rdquo; means every expected master/child file for BU {selectedBU} has been generated. Email status is advisory —
-                  it reflects which entities the team said are workable now (from the latest status email).
+                  &ldquo;Ready&rdquo; means every expected master/child file for BU {selectedBU} has been generated.
+                  <b> Generate &amp; load</b> produces only this BU&rsquo;s files for any entity that&rsquo;s missing (small, fast — no
+                  need to pre-generate every entity) and loads them into Sampling. Email status is advisory — it reflects which
+                  entities the team said are workable now.
                 </p>
               </>
             );
