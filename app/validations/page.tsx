@@ -77,6 +77,8 @@ function tableLabel(t: string): string {
   return base.split('_').filter(Boolean).map(w => w[0].toUpperCase() + w.slice(1).toLowerCase()).join(' ') || String(t);
 }
 const labelTokens = (s: string) => String(s || '').split(/[^A-Za-z0-9]+/).filter(Boolean).map(x => x.toUpperCase().replace(/S$/, '')).filter(x => x.length > 1);
+// Mock/suffix-insensitive table identity (config _VW_TBL vs generated _CONVERTED_VW).
+const normTbl = (s: string) => String(s || '').toUpperCase().replace(/_MOCK\d+.*$/, '').replace(/[^A-Z0-9]/g, '');
 // Match a generated-entity folder name (e.g. "Supplier", "AR_Invoices", "Awards")
 // to a report entity ("Suppliers", "AR Invoices", "Projects"). Also considers the
 // entity's master file label, since the report calls the awards entity "Projects"
@@ -655,13 +657,13 @@ function ValidationsPage() {
   // over-matching every child.
   const filterIncludedFiles = useCallback((bu: string, e: EntityValidation, tagged: TaggedFile[]): TaggedFile[] => {
     const included = includedFilesFor(bu, e.tab);
-    const rootSet = new Set((samplingTargetsRef.current || []).map(t => normStr(t.table)));
+    const rootSet = new Set((samplingTargetsRef.current || []).map(t => normTbl(t.table)));
     const masterIncluded = e.files.some(f => f.role === 'master' && included.includes(f.label));
     const childFiles = e.files.filter(f => f.role !== 'master');
     return tagged.filter(t => {
       if (!t.table) return true;
       const nt = normStr(t.table);
-      if (rootSet.has(nt)) return masterIncluded;
+      if (rootSet.has(normTbl(t.table))) return masterIncluded;
       let best = '', bestTok = 0;
       for (const f of childFiles) {
         const toks = labelTokens(f.label);
@@ -700,8 +702,11 @@ function ValidationsPage() {
         if (!g) continue;
         const manifest = await readEntityManifests(PLAN_MOCK, g.entity);
         const tagged = await loadGeneratedTagged(g, manifest);
-        const shared = isSharedEntity(e.entity);
-        let forBU = shared ? tagged : tagged.filter(t => t.source === bu || t.bu === bu);
+        // Filter to this BU. The generated files are agency-coded (source/bu = the
+        // agency) even for PRIFAS "shared" entities, so we still scope to the BU;
+        // only fall back to the whole set if a no-agency file leaves nothing.
+        let forBU = tagged.filter(t => t.source === bu || t.bu === bu);
+        if (!forBU.length && isSharedEntity(e.entity)) forBU = tagged;
         forBU = filterIncludedFiles(bu, e, forBU);
         if (!forBU.length) continue;
         const results = edges.length ? mergeHierarchy(forBU, targets, edges, overrides) : mergeByRelationships(forBU, targets, overrides);

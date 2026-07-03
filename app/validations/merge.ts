@@ -323,7 +323,11 @@ export interface TargetChild { table: string; link_field: string; }
 export interface SamplingTarget { table: string; display: string; children: TargetChild[]; }
 export interface TaggedFile { name: string; data: FileData; table?: string; source?: string; bu?: string; }
 
-const normTable = (s: string) => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+// Table identity for matching the relationship config to generated files. The
+// config names tables ..._MOCK14_VW_TBL while generation reads ..._MOCK14_CONVERTED_VW,
+// so we drop everything from _MOCK onward before normalizing — SCM_SUPPLIER_MOCK14_VW_TBL
+// and SCM_SUPPLIER_MOCK14_CONVERTED_VW both become SCMSUPPLIER.
+const normTable = (s: string) => String(s || '').toUpperCase().replace(/_MOCK\d+.*$/, '').replace(/[^A-Z0-9]/g, '');
 
 function shortTable(t: string): string {
   return t.replace(/_MOCK\d+.*$/i, '').replace(/_VW.*$/i, '');
