@@ -236,28 +236,35 @@ export function fileMatchesTable(label: string, table: string): boolean {
 // email; update here when a newer status email arrives.
 export type EmailStatus = 'ready' | 'completed' | 'hold' | 'notpublished' | 'unknown';
 
+// Defaults from "Due to the recent files delivered" (2026-07-02): Ready to
+// Publish / Delivered to Deloitte = AR Customer, AR Invoice, Awards/Project, AP
+// Invoice (SIFDE + non-SIFDE), Contract (BPA), GL Balance, Budget Balance, PS
+// Item, Purchase Order, Requisition; Location completed; Not delivered = Asset,
+// Inventory, Procurement Contract. Users can override + persist these in the app.
 const EMAIL_STATUS_RULES: { keys: string[]; status: EmailStatus; note?: string }[] = [
   { keys: ['ARINVOICE'], status: 'ready' },
   { keys: ['AWARD', 'PROJECT'], status: 'ready' },
-  { keys: ['APINVOICE'], status: 'ready', note: 'non-SIFDE' },
+  { keys: ['APINVOICE'], status: 'ready' },
   { keys: ['LOCATION'], status: 'completed' },
   { keys: ['SUPPLIER'], status: 'hold', note: 'until PO published' },
   { keys: ['PROCUREMENTCONTRACT'], status: 'notpublished' },
-  { keys: ['PURCHASEORDER'], status: 'notpublished' },
-  { keys: ['REQUISITION'], status: 'notpublished' },
-  { keys: ['CONTRACT', 'BPA'], status: 'notpublished' },
+  { keys: ['PURCHASEORDER'], status: 'ready' },
+  { keys: ['REQUISITION'], status: 'ready' },
+  { keys: ['CONTRACT', 'BPA'], status: 'ready' },
   { keys: ['ASSET'], status: 'notpublished' },
   { keys: ['BANK'], status: 'notpublished' },
   { keys: ['INVENTORY'], status: 'notpublished' },
-  { keys: ['PSITEM'], status: 'notpublished' },
-  { keys: ['GLBALANCE'], status: 'notpublished' },
-  { keys: ['BUDGETBALANCE'], status: 'notpublished' },
+  { keys: ['PSITEM'], status: 'ready' },
+  { keys: ['GLBALANCE'], status: 'ready' },
+  { keys: ['BUDGETBALANCE'], status: 'ready' },
   { keys: ['CUSTOMER'], status: 'ready' }, // AR Customer
 ];
 
 export const EMAIL_STATUS_LABEL: Record<EmailStatus, string> = {
-  ready: 'Ready to work', completed: 'Completed', hold: 'On hold', notpublished: 'Not published', unknown: '—',
+  ready: 'Delivered / ready', completed: 'Completed', hold: 'On hold', notpublished: 'Not ready', unknown: '—',
 };
+
+export const EMAIL_STATUS_ORDER: EmailStatus[] = ['ready', 'completed', 'hold', 'notpublished', 'unknown'];
 
 export function entityEmailStatus(entity: string): { status: EmailStatus; note?: string } {
   const n = normName(entity);

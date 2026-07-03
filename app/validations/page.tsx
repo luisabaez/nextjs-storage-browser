@@ -29,7 +29,7 @@ import { parseAgencyReport, AgencyReport, buildGroups } from './dashboard';
 import { RawFile, MergeResult, SamplingTarget, RelEdge, groupRawFiles, mergeGroup, mergeByRelationships, mergeHierarchy, resultToFileData, downloadMaster, appendValidationSheets } from './merge';
 import { PlanRow, EntityGroup, groupEntityPlan, READINESS_LABEL } from './entityFiles';
 import { GeneratedEntity, ManifestFileRow, listGeneratedEntities, loadGeneratedTagged, readEntityManifests, readAllManifests, fetchSamplingTargets, fetchSamplingRelationships, safeName } from './generated';
-import { ValidationReport, EntityValidation, parseValidationReport, fileMatchesTable, buildCompositeKeyOverrides, entityEmailStatus, isSharedEntity, EMAIL_STATUS_LABEL, EmailStatus } from './validationReport';
+import { ValidationReport, EntityValidation, parseValidationReport, fileMatchesTable, buildCompositeKeyOverrides, entityEmailStatus, isSharedEntity, EMAIL_STATUS_LABEL, EMAIL_STATUS_ORDER, EmailStatus } from './validationReport';
 
 Amplify.configure(config);
 
@@ -38,6 +38,7 @@ const LOCAL_FOLDER = 'Sampling/Local/';
 const CLIENT_FOLDER = 'Sampling/Client/';
 const REPORT_PATH = 'Sampling/_status/agency_report.xlsx';
 const VALIDATION_REPORT_PATH = 'Sampling/_status/entity_validation_report.xlsx';
+const READINESS_PATH = 'Sampling/_status/entity_readiness.json';
 const XLSX_CT = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 const LAMBDA_URL = 'https://5ahxjcxhrcopng5hjgc2n6utxq0rwcmm.lambda-url.us-east-1.on.aws/';
 
@@ -418,11 +419,48 @@ function ValidationsPage() {
   const [valManifests, setValManifests] = useState<ManifestFileRow[]>([]);
   const valReportInputRef = useRef<HTMLInputElement>(null);
 
+  // Editable delivery-status overlay (from the status emails), persisted to S3.
+  // Keyed by the report entity's normalized tab name.
+  const [readiness, setReadiness] = useState<Record<string, EmailStatus>>({});
+  const [readinessSaving, setReadinessSaving] = useState(false);
+  const [readinessSavedAt, setReadinessSavedAt] = useState('');
+  const statusForTab = useCallback((tab: string, entity: string): EmailStatus =>
+    readiness[normStr(tab)] ?? entityEmailStatus(entity).status, [readiness]);
+
+  // Load the saved overrides (else seed every entity from the hard-coded defaults).
+  const loadReadiness = useCallback(async (report: ValidationReport) => {
+    let saved: Record<string, EmailStatus> = {};
+    try {
+      const { url } = await getUrl({ path: READINESS_PATH, options: { validateObjectExistence: true } });
+      const resp = await fetch(url.toString());
+      if (resp.ok) saved = await resp.json();
+    } catch { /* not saved yet */ }
+    const merged: Record<string, EmailStatus> = {};
+    for (const e of report.entities) {
+      const k = normStr(e.tab);
+      merged[k] = saved[k] ?? entityEmailStatus(e.entity).status;
+    }
+    setReadiness(merged);
+  }, []);
+
+  const saveReadiness = useCallback(async () => {
+    setReadinessSaving(true);
+    try {
+      await uploadData({ path: READINESS_PATH, data: new Blob([JSON.stringify(readiness)], { type: 'application/json' }), options: { contentType: 'application/json' } }).result;
+      setReadinessSavedAt(new Date().toLocaleTimeString());
+    } catch (e) {
+      console.error('save readiness failed', e);
+    } finally {
+      setReadinessSaving(false);
+    }
+  }, [readiness]);
+
   const applyReport = useCallback((report: ValidationReport, manifests: ManifestFileRow[]) => {
     setValReport(report); valReportRef.current = report;
     setValManifests(manifests); valManifestsRef.current = manifests;
     compositeOverridesRef.current = buildCompositeKeyOverrides(report, samplingTargetsRef.current || []);
-  }, []);
+    loadReadiness(report);
+  }, [loadReadiness]);
 
   const ensureTargets = useCallback(async () => {
     if (!samplingTargetsRef.current) {
@@ -1198,6 +1236,36 @@ function ValidationsPage() {
                     onChange={e => { if (e.target.files?.[0]) uploadValReport(e.target.files[0]); e.target.value = ''; }} />
                 </div>
 
+                <div className="val-readiness">
+                  <div className="val-readiness-head">
+                    <div>
+                      <strong>Delivery status</strong>
+                      <span className="val-dropzone-hint"> — set from the status emails; edit a dropdown and Save to update the overlay (also drives Sample by BU). Saved to S3, auto-loads next time.</span>
+                    </div>
+                    <div className="val-readiness-actions">
+                      {readinessSavedAt && <span className="val-muted">saved {readinessSavedAt}</span>}
+                      <button className="val-btn-secondary" onClick={saveReadiness} disabled={readinessSaving}>
+                        {readinessSaving ? <><span className="val-spinner val-spinner-dark" /> Saving…</> : 'Save status'}
+                      </button>
+                    </div>
+                  </div>
+                  <div className="val-readiness-grid">
+                    {valReport.entities.map(e => {
+                      const k = normStr(e.tab);
+                      const cur = readiness[k] ?? entityEmailStatus(e.entity).status;
+                      return (
+                        <label key={e.tab} className="val-readiness-item">
+                          <span className="val-readiness-name" title={e.entity}>{e.entity}</span>
+                          <select className={`val-readiness-sel ${emailStatusClass(cur)}`} value={cur}
+                            onChange={ev => setReadiness(p => ({ ...p, [k]: ev.target.value as EmailStatus }))}>
+                            {EMAIL_STATUS_ORDER.map(sv => <option key={sv} value={sv}>{EMAIL_STATUS_LABEL[sv]}</option>)}
+                          </select>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+
                 <table className="val-table val-bu">
                   <thead>
                     <tr>
@@ -1316,7 +1384,9 @@ function ValidationsPage() {
             const rows = valReport.entities
               .filter(e => e.agencies.includes(selectedBU))
               .map(e => {
-                const es = entityEmailStatus(e.entity);
+                const status = statusForTab(e.tab, e.entity);
+                const def = entityEmailStatus(e.entity);
+                const note = status === def.status ? def.note : undefined;
                 let exp = 0, pres = 0;
                 const fileStates = e.files.map(f => {
                   const c = f.counts[selectedBU];
@@ -1326,7 +1396,7 @@ function ValidationsPage() {
                   if (st.present) pres++;
                   return { label: f.label, role: f.role, na: false, present: st.present, expected: c.rows, rows: st.rows };
                 });
-                return { e, es, exp, pres, ready: exp > 0 && pres === exp, fileStates };
+                return { e, status, note, exp, pres, ready: exp > 0 && pres === exp, fileStates };
               });
             const readyCount = rows.filter(r => r.ready).length;
             const anyReady = rows.some(r => r.ready);
@@ -1357,8 +1427,8 @@ function ValidationsPage() {
                         <td className="val-bu-unit">{r.e.entity}</td>
                         <td className="val-muted" title={r.e.howItLinks}>{r.e.key}</td>
                         <td>
-                          <span className={`val-repstatus ${emailStatusClass(r.es.status)}`}>{EMAIL_STATUS_LABEL[r.es.status]}</span>
-                          {r.es.note && <span className="val-muted val-es-note"> {r.es.note}</span>}
+                          <span className={`val-repstatus ${emailStatusClass(r.status)}`}>{EMAIL_STATUS_LABEL[r.status]}</span>
+                          {r.note && <span className="val-muted val-es-note"> {r.note}</span>}
                         </td>
                         <td className="val-col-num">{r.pres}/{r.exp}</td>
                         <td className="val-bu-files">
