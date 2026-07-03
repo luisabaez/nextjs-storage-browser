@@ -785,21 +785,40 @@ function ValidationsPage() {
   }, [linkKeys, entityTarget]);
 
   // Goal 3: resolve a file label to its real source table name (for display).
+  // Among the tables whose name contains all of the label's tokens, pick the
+  // tightest (fewest extra tokens) so "LINES" prefers ..._LINES over
+  // ..._LINE_LOCATIONS; an exact label match wins outright.
+  const bestTableForLabel = useCallback((label: string, tables: string[]): string => {
+    const lt = labelTokens(label);
+    const exact = tables.find(t => normStr(tableLabel(t)) === normStr(label));
+    if (exact) return exact;
+    if (!lt.length) return '';
+    let best = '', bestExtra = Infinity;
+    for (const t of tables) {
+      const ct = labelTokens(tableLabel(t));
+      if (!lt.every(tok => ct.includes(tok))) continue;
+      const extra = ct.length - lt.length;
+      if (extra < bestExtra) { bestExtra = extra; best = t; }
+    }
+    return best;
+  }, []);
+
   const fileTableName = useCallback((tab: string, label: string): string => {
     const tgt = entityTarget(tab);
     const ent = valReport?.entities.find(x => x.tab === tab);
     const masterLbl = ent?.files.find(f => f.role === 'master')?.label;
     if (tgt && masterLbl && normStr(masterLbl) === normStr(label)) return tgt.table;
-    const child = tgt?.children.find(c => normStr(tableLabel(c.table)) === normStr(label) || fileMatchesTable(label, c.table));
-    if (child) return child.table;
+    const fromChildren = bestTableForLabel(label, (tgt?.children || []).map(c => c.table));
+    if (fromChildren) return fromChildren;
     const plan = reportToPlanEntity.get(tab);
     if (plan) {
       const folder = safeName(plan);
-      const m = (valManifests || []).find(mm => mm.entity === folder && (normStr(tableLabel(mm.table)) === normStr(label) || fileMatchesTable(label, mm.table)));
-      if (m) return m.table;
+      const manTables = (valManifests || []).filter(mm => mm.entity === folder).map(mm => mm.table).filter(Boolean);
+      const fromMan = bestTableForLabel(label, manTables);
+      if (fromMan) return fromMan;
     }
     return '';
-  }, [entityTarget, valReport, reportToPlanEntity, valManifests]);
+  }, [entityTarget, valReport, reportToPlanEntity, valManifests, bestTableForLabel]);
 
   // ── Sample by BU ──
   const [selectedBU, setSelectedBU] = useState('');
