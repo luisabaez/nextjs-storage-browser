@@ -116,12 +116,27 @@ function resolveEntityTarget(report: ValidationReport | null, targets: SamplingT
   if (!targets.length) return undefined;
   const e = report?.entities.find(x => x.tab === tab);
   const master = e?.files.find(f => f.role === 'master');
-  const byLabel = (lbl?: string) => (lbl ? targets.find(t => fileMatchesTable(lbl, t.table)) : undefined);
-  return (
-    byLabel(master?.label) ||
-    (e && targets.find(t => e.files.some(f => fileMatchesTable(f.label, t.table)))) ||
-    targets.find(t => { const d = normStr(t.display); const x = normStr(tab); return !!d && !!x && (d.includes(x) || x.includes(d)); })
-  );
+  // 1. master-file label -> target table (most specific: Suppliers, AP, BPA, Assets).
+  const byMaster = master ? targets.find(t => fileMatchesTable(master.label, t.table)) : undefined;
+  if (byMaster) return byMaster;
+  // 2. entity name/tab exactly matches a target's display (module prefix stripped).
+  //    Catches "Purchase Orders" -> SCM_PURCHASE_ORDERS even when the master file
+  //    label ("PO FINAL") doesn't tokenize to the table name — must come before the
+  //    loose any-file match, or a generic child ("LINES") mis-hits FIN_AR_INVOICES_LINES.
+  const wants = [normStr(tab), normStr(e?.entity || '')].filter(Boolean);
+  const disp = (t: SamplingTarget) => normStr(String(t.display || t.table).replace(/^(SCM|FIN|HR|GL|AP|AR|PO)_/i, ''));
+  const exact = targets.find(t => wants.includes(disp(t)));
+  if (exact) return exact;
+  // 3. any file label -> a target table (loose; e.g. Awards children for "Projects").
+  const byAnyFile = e ? targets.find(t => e.files.some(f => fileMatchesTable(f.label, t.table))) : undefined;
+  if (byAnyFile) return byAnyFile;
+  // 4. last resort: longest substring overlap on the display name.
+  let best: SamplingTarget | undefined, bestLen = 0;
+  for (const t of targets) {
+    const d = disp(t);
+    for (const w of wants) if (w && d && (d.includes(w) || w.includes(d)) && w.length > bestLen) { bestLen = w.length; best = t; }
+  }
+  return best;
 }
 
 // Merge key overrides for the sampling merge: the report's composite keys plus any
