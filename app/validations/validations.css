@@ -273,6 +273,11 @@
 .val-bu-file.missing { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
 .val-bu-addrow { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 0 0 12px; padding: 10px 12px; background: #f8fafc; border: 1px solid #e5e8ee; border-radius: 8px; }
 .val-bu-newbu { max-width: 120px; height: 34px; }
+.val-filecheck-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 6px 14px; padding: 4px 2px 10px; }
+.val-filecheck { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: #374151; cursor: pointer; }
+.val-filecheck input { width: 14px; height: 14px; cursor: pointer; }
+.val-bu-addfile { display: flex; align-items: center; gap: 8px; }
+.val-bu-addfile input { max-width: 320px; height: 32px; }
 .val-es-note { font-size: 11px; }
 .val-bu-foot { margin-top: 12px; font-size: 12px; }
 .val-es-ready { background: #ecfdf5; color: #065f46; border: 1px solid #a7f3d0; }
