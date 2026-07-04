@@ -1335,9 +1335,17 @@ function ValidationsPage() {
         if (d.ok) planned = d.planned || [];
       }
       const rootEntries = planned.filter(p => normTbl(p.table) === rootNorm);
+      const isHcm = entityTab === HCM_PERSON_TAB;
       const rows = bus.map(bu => {
-        const hit = rootEntries.find(p => p.source === bu || p.bu === bu);
-        const N = hit ? hit.rows : rootEntries.reduce((s, p) => s + p.rows, 0);
+        let N: number;
+        if (isHcm) {
+          // #9: a BU can span several HCM source systems (and two mocks that
+          // normalize the same), so sum the current-mock entries for the BU.
+          N = rootEntries.filter(p => p.table.toUpperCase().includes(PLAN_MOCK) && (p.source === bu || p.bu === bu)).reduce((s, p) => s + p.rows, 0);
+        } else {
+          const hit = rootEntries.find(p => p.source === bu || p.bu === bu);
+          N = hit ? hit.rows : rootEntries.reduce((s, p) => s + p.rows, 0);
+        }
         const tier = confidenceTierFor(bu, entityTab, cls);
         const n = tier && N ? computeSampleSize(N, tier) : 0;
         return { bu, tierName: tier?.name || '—', N, n };
