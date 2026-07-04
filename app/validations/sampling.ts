@@ -40,6 +40,7 @@ export const ENTITY_CLASSIFICATION: Record<string, keyof typeof TIERS> = {
   'CUSTOMER': 'LOW',
   'AR': 'LOW',
   'PEOPLE SOFT ITEMS': 'LOW',
+  'PERSON': 'LOW', // HCM Person (#9); adjustable per-BU via the confidence override
 };
 
 export const ENTITY_NAMES = Object.keys(ENTITY_CLASSIFICATION);

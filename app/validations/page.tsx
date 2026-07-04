@@ -149,6 +149,34 @@ function agencyColumnForEntity(report: AgencyReport | null, valReport: Validatio
   return bestScore > 0 ? best : null;
 }
 
+// #9: HCM Person — one report entity backed by 8 SEPARATE conversion-plan
+// entities (each its own Sampling/Generated folder), all linking on PERSON_NUMBER.
+// `label` must tokenize into its table name (for presence + merge inclusion);
+// `plan` is the conversion-plan entity name used for generation.
+const HCM_PERSON_TAB = 'Person';
+const HCM_PERSON_SUB: { label: string; plan: string; role: 'master' | 'child' }[] = [
+  { label: 'Person', plan: 'Person', role: 'master' },
+  { label: 'Person Address', plan: 'Person Address', role: 'child' },
+  { label: 'Person Email', plan: 'Person Email', role: 'child' },
+  { label: 'Person Name', plan: 'Person Name', role: 'child' },
+  { label: 'Person NID', plan: 'Person National Identifier', role: 'child' },
+  { label: 'Assignment', plan: 'Assignment', role: 'child' },
+  { label: 'Supervisor', plan: 'Supervisor', role: 'child' },
+  { label: 'External Bank Account', plan: 'External Bank Accounts', role: 'child' },
+];
+function hcmPersonEntity(): EntityValidation {
+  return {
+    tab: HCM_PERSON_TAB, entity: 'Person', key: 'PERSON_NUMBER', keyParts: ['PERSON_NUMBER'],
+    howItLinks: 'Sub-entities link to the Person on PERSON_NUMBER.',
+    agencies: [], notApplicable: [],
+    files: HCM_PERSON_SUB.map(s => ({ label: s.label, role: s.role, counts: {} })),
+    integrity: [], notes: ['HCM entity — added for sampling; not part of the validation report.'],
+    verdict: '', status: 'STANDALONE',
+  };
+}
+// The generated-folder names (safeName of each sub-entity's plan entity).
+const HCM_PERSON_FOLDERS = new Set(HCM_PERSON_SUB.map(s => safeName(s.plan)));
+
 // Resolve a report entity (by tab) to its sampling target (root table + children).
 // Matches on the entity's master-file label first, then any file, then the target
 // display name — so "Supplier" → SCM_SUPPLIER_MOCK14_VW_TBL, "Projects" → Awards.
@@ -729,20 +757,31 @@ function ValidationsPage() {
   const includedFilesFor = useCallback((bu: string, tab: string): string[] =>
     buAssignments[bu]?.[tab] ?? reportFilesFor(tab), [buAssignments, reportFilesFor]);
   const assignedEntitiesFor = useCallback((bu: string): string[] => {
+    // #9: HCM Person applies to every BU but isn't in the agency report, so
+    // always surface it alongside whatever the report/assignments provide.
+    const withPerson = (tabs: string[]) => {
+      const has = valReport?.entities.some(e => e.tab === HCM_PERSON_TAB);
+      return has && !tabs.includes(HCM_PERSON_TAB) ? [...tabs, HCM_PERSON_TAB] : tabs;
+    };
     const assigned = Object.keys(buAssignments[bu] || {});
-    if (assigned.length) return assigned;
+    if (assigned.length) return withPerson(assigned);
     // Fallback for BUs beyond the validation report's 4 agencies (the agency
     // report lists 58): the entities attached to this BU in the agency report,
     // mapped to the validation report's entity tabs (files come from that spec).
-    if (!report || !valReport) return [];
+    if (!report || !valReport) return withPerson([]);
     const row = report.bus.find(b => b.unit === bu);
-    if (!row) return [];
-    return valReport.entities
+    if (!row) return withPerson([]);
+    return withPerson(valReport.entities
       .filter(e => { const col = agencyColumnForEntity(report, valReport, e.tab); return !!col && row.statuses[col] != null && String(row.statuses[col]).trim() !== ''; })
-      .map(e => e.tab);
+      .map(e => e.tab));
   }, [buAssignments, report, valReport]);
 
   const applyReport = useCallback((report: ValidationReport, manifests: ManifestFileRow[], empties: EmptyRow[]) => {
+    // #9: HCM Person isn't in the validation report — inject it so it appears in
+    // the report-driven views (Sample by BU, Completeness, BU Dashboard).
+    if (!report.entities.some(e => e.tab === HCM_PERSON_TAB)) {
+      report = { ...report, entities: [...report.entities, hcmPersonEntity()] };
+    }
     setValReport(report); valReportRef.current = report;
     setValManifests(manifests); valManifestsRef.current = manifests;
     setValEmpties(empties); valEmptiesRef.current = empties;
@@ -807,7 +846,9 @@ function ValidationsPage() {
   const reportToPlanEntity = React.useMemo(() => {
     const map = new Map<string, string>();
     if (!valReport) return map;
+    map.set(HCM_PERSON_TAB, 'Person'); // #9: pin HCM Person to its parent plan entity (many Person* groups would tie)
     for (const e of valReport.entities) {
+      if (e.tab === HCM_PERSON_TAB) continue;
       let best = '', bestScore = 0;
       for (const g of entityGroups) {
         const tables = g.files.map(f => f.CONVERSION_TABLE_BU);
@@ -997,6 +1038,20 @@ function ValidationsPage() {
     const applicable = valReport.entities.filter(e => entTabs.includes(e.tab));
     const out: { e: EntityValidation; results: MergeResult[] }[] = [];
     for (const e of applicable) {
+      if (e.tab === HCM_PERSON_TAB) {
+        // #9: Person's files live across 8 conversion-plan folders — gather every
+        // one generated for this BU and merge via the target graph (Part 1 config).
+        let tagged: TaggedFile[] = [];
+        for (const g of items.filter(x => HCM_PERSON_FOLDERS.has(x.entity))) {
+          const manifest = await readEntityManifests(PLAN_MOCK, g.entity);
+          const buFiles = g.files.filter(fn => { const m = manifest.get(fn); return m && (m.source === bu || m.bu === bu); });
+          if (!buFiles.length) continue;
+          tagged = tagged.concat(await loadGeneratedTagged({ ...g, files: buFiles }, manifest));
+        }
+        const forBU = filterIncludedFiles(bu, e, tagged.filter(t => t.source === bu || t.bu === bu));
+        if (forBU.length) out.push({ e, results: edges.length ? mergeHierarchy(forBU, targets, edges, overrides) : mergeByRelationships(forBU, targets, overrides) });
+        continue;
+      }
       const included = includedFilesFor(bu, e.tab);
       const ready = e.files.filter(f => included.includes(f.label)).every(f => {
         const c = f.counts[bu]; if (!c || c === 'N/A') return true;
@@ -1047,6 +1102,15 @@ function ValidationsPage() {
     const entTabs = assignedEntitiesFor(bu).filter(t => !onlyEntity || t === onlyEntity);
     const out: { tab: string; plan: string }[] = [];
     for (const e of valReport.entities.filter(x => entTabs.includes(x.tab))) {
+      if (e.tab === HCM_PERSON_TAB) {
+        // #9: Person spans 8 conversion-plan entities — generate each included
+        // sub-entity whose file isn't present yet for this BU.
+        const included = includedFilesFor(bu, e.tab);
+        for (const s of HCM_PERSON_SUB) {
+          if (included.includes(s.label) && !buFilePresent(mans, e.entity, s.label, bu).present) out.push({ tab: e.tab, plan: s.plan });
+        }
+        continue;
+      }
       const plan = reportToPlanEntity.get(e.tab);
       if (!plan) continue;
       const included = includedFilesFor(bu, e.tab);
@@ -2229,7 +2293,7 @@ function ValidationsPage() {
                 const fileStates = included.map(lbl => {
                   const rf = e.files.find(f => f.label === lbl);
                   const c = rf ? rf.counts[selectedBU] : undefined;
-                  if (buHasVal && rf && (!c || c === 'N/A')) return { label: lbl, role: rf.role, na: true, present: false, rows: 0, emptyReason: null as string | null };
+                  if (buHasVal && rf && e.tab !== HCM_PERSON_TAB && (!c || c === 'N/A')) return { label: lbl, role: rf.role, na: true, present: false, rows: 0, emptyReason: null as string | null };
                   exp++;
                   const st = buFilePresent(mans, e.entity, lbl, selectedBU);
                   if (st.present) pres++;
