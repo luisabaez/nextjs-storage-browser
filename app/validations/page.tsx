@@ -744,9 +744,10 @@ function ValidationsPage() {
   useEffect(() => {
     if ((activeTab === 'sampling' || activeTab === 'dashboard' || activeTab === 'completeness' || activeTab === 'bybu' || activeTab === 'bufiles') && !valLoaded) loadValReport();
   }, [activeTab, valLoaded, loadValReport]);
-  // BU Files + Sample by BU need the conversion plan (entity names, tables).
+  // Sampling (entity-run preview) + BU Files + Sample by BU need the conversion
+  // plan (entity names, tables) for the report-tab → plan-entity mapping.
   useEffect(() => {
-    if ((activeTab === 'bufiles' || activeTab === 'bybu') && !planLoaded && !planLoading) loadPlan();
+    if ((activeTab === 'sampling' || activeTab === 'bufiles' || activeTab === 'bybu') && !planLoaded && !planLoading) loadPlan();
   }, [activeTab, planLoaded, planLoading, loadPlan]);
 
   // Map each report entity → the conversion-plan entity name that generates it
