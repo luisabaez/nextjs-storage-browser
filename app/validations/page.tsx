@@ -1693,7 +1693,7 @@ function ValidationsPage() {
         <div className="val-tab-content">
           <div className="val-intro">
             <h2>BU Completion Dashboard</h2>
-            <p>Certification completion per Business Unit, drawn from the agencies-by-entity status report. Expand a BU to see which entities are still outstanding.</p>
+            <p>Sampling completion per Business Unit — how many of each BU&rsquo;s expected entities (from the agency report) have a completed sample run. Starts at 0 and checks off automatically as you run samples. Expand a BU to see which entities are still to sample.</p>
           </div>
 
           {reportLoading && <div className="val-loading"><span className="val-spinner val-spinner-dark" /> Loading report…</div>}
@@ -1714,22 +1714,35 @@ function ValidationsPage() {
             </div>
           )}
 
-          {!reportLoading && report && (
+          {!reportLoading && report && (() => {
+            // #4: completion here tracks SAMPLING, not conversion status. Expected =
+            // the entities attached to each BU (agency report); done = those with a
+            // completed sample run. Starts at 0 and checks off as runs happen.
+            const entLabel = (tab: string) => valReport?.entities.find(e => e.tab === tab)?.entity || tab;
+            const rows = filteredGroups.map(g => {
+              const ents = valReport ? assignedEntitiesFor(g.code) : [];
+              const sampledList = sampledRuns[g.code] || [];
+              const done = ents.filter(t => sampledList.includes(t)).length;
+              return { g, ents, sampledList, done, fr: ents.length ? done / ents.length : 0 };
+            }).sort((a, b) => a.fr - b.fr || a.g.code.localeCompare(b.g.code));
+            const expTotal = rows.reduce((s, r) => s + r.ents.length, 0);
+            const doneTotal = rows.reduce((s, r) => s + r.done, 0);
+            const busDone = rows.filter(r => r.ents.length > 0 && r.done === r.ents.length).length;
+            return (
             <>
               <div className="val-dash-top">
                 <div className="val-dash-chart">
-                  <Donut completed={report.totals.completed} partial={report.totals.partial} pending={report.totals.pending} />
+                  <Donut completed={doneTotal} partial={0} pending={Math.max(0, expTotal - doneTotal)} />
                 </div>
                 <div className="val-dash-stats">
                   <div className="val-legend">
-                    <span className="val-legend-item"><i className="val-dot val-dot-completed" /> Completed <b>{report.totals.completed}</b></span>
-                    <span className="val-legend-item"><i className="val-dot val-dot-partial" /> Partial <b>{report.totals.partial}</b></span>
-                    <span className="val-legend-item"><i className="val-dot val-dot-pending" /> Pending <b>{report.totals.pending}</b></span>
+                    <span className="val-legend-item"><i className="val-dot val-dot-completed" /> Sampled <b>{doneTotal}</b></span>
+                    <span className="val-legend-item"><i className="val-dot val-dot-pending" /> Remaining <b>{Math.max(0, expTotal - doneTotal)}</b></span>
                   </div>
                   <div className="val-cards">
-                    <div className="val-card"><span className="val-card-num">{groups.length}</span><span className="val-card-label">Business Units</span></div>
-                    <div className="val-card"><span className="val-card-num">{report.totals.attached}</span><span className="val-card-label">Entities attached</span></div>
-                    <div className="val-card"><span className="val-card-num">{Math.round(report.totals.pct * 100)}%</span><span className="val-card-label">Overall complete</span></div>
+                    <div className="val-card"><span className="val-card-num">{rows.length}</span><span className="val-card-label">Business Units</span></div>
+                    <div className="val-card"><span className="val-card-num">{expTotal}</span><span className="val-card-label">Entities to sample</span></div>
+                    <div className="val-card"><span className="val-card-num">{busDone}</span><span className="val-card-label">BUs fully sampled</span></div>
                   </div>
                   <button className="val-btn-secondary" onClick={() => reportInputRef.current?.click()}>Update report</button>
                   <input ref={reportInputRef} type="file" accept=".xlsx,.xlsm,.xls" style={{ display: 'none' }}
@@ -1739,7 +1752,7 @@ function ValidationsPage() {
 
               <div className="val-dash-controls">
                 <input className="val-search" placeholder="Filter by BU number or name…" value={filter} onChange={e => setFilter(e.target.value)} />
-                <span className="val-muted">{filteredGroups.length} of {groups.length} · sorted by least complete</span>
+                <span className="val-muted">{rows.length} of {groups.length} · sorted by least sampled</span>
               </div>
 
               <table className="val-table val-bu">
@@ -1748,24 +1761,15 @@ function ValidationsPage() {
                     <th className="val-col-caret"></th>
                     <th>BU</th>
                     <th>Agency</th>
-                    <th className="val-col-progress">Completion</th>
-                    <th className="val-col-num">Done</th>
-                    <th className="val-col-num">Partial</th>
-                    <th className="val-col-num">Pending</th>
-                    <th className="val-col-num">Total</th>
+                    <th className="val-col-progress">Sampling completion</th>
                     <th className="val-col-num" title="Entities sampled for this BU (a sample run checks one off)">Sampled</th>
+                    <th className="val-col-num" title="Entities attached to this BU that need a sample">Expected</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredGroups.map(g => {
+                  {rows.map(({ g, ents, sampledList, done, fr }) => {
                     const open = !!expanded[g.code];
-                    const pct = Math.round(g.pct * 100);
-                    // #6: running sampled count — expected = entities attached to this BU,
-                    // done = those with a completed sample run (starts at 0).
-                    const sampEnts = valReport ? assignedEntitiesFor(g.code) : [];
-                    const sampledList = sampledRuns[g.code] || [];
-                    const sampDone = sampEnts.filter(t => sampledList.includes(t)).length;
-                    const entLabel = (tab: string) => valReport?.entities.find(e => e.tab === tab)?.entity || tab;
+                    const pct = Math.round(fr * 100);
                     return (
                       <React.Fragment key={g.code}>
                         <tr className="val-bu-row" onClick={() => setExpanded(p => ({ ...p, [g.code]: !p[g.code] }))}>
@@ -1779,52 +1783,27 @@ function ValidationsPage() {
                             <div className="val-progress"><div className={`val-progress-bar ${pct === 100 ? 'full' : ''}`} style={{ width: `${pct}%` }} /></div>
                             <span className="val-progress-pct">{pct}%</span>
                           </td>
-                          <td className="val-col-num">{g.completed}</td>
-                          <td className="val-col-num">{g.partial || ''}</td>
-                          <td className="val-col-num">{g.pending ? <span className="val-pending-count">{g.pending}</span> : ''}</td>
-                          <td className="val-col-num">{g.total}</td>
                           <td className="val-col-num">
-                            {sampEnts.length
-                              ? <span className={sampDone === sampEnts.length ? 'val-comp-ok' : sampDone ? 'val-comp-warn' : 'val-muted'}>{sampDone}/{sampEnts.length}</span>
+                            {ents.length
+                              ? <span className={done === ents.length ? 'val-comp-ok' : done ? 'val-comp-warn' : 'val-muted'}>{done}</span>
                               : <span className="val-muted">—</span>}
                           </td>
+                          <td className="val-col-num">{ents.length || <span className="val-muted">—</span>}</td>
                         </tr>
                         {open && (
                           <tr className="val-bu-detail-row">
                             <td></td>
-                            <td colSpan={8}>
-                              {sampEnts.length > 0 && (
+                            <td colSpan={5}>
+                              {ents.length > 0 ? (
                                 <div className="val-samp-progress">
-                                  <span className="val-samp-progress-label">Sampling — {sampDone} of {sampEnts.length} sampled:</span>
-                                  {sampEnts.map(t => (
+                                  <span className="val-samp-progress-label">{done} of {ents.length} entities sampled for BU {g.code}:</span>
+                                  {ents.map(t => (
                                     <span key={t} className={`val-samp-badge ${sampledList.includes(t) ? 'done' : ''}`}>
                                       {sampledList.includes(t) ? '✓' : '○'} {entLabel(t)}
                                     </span>
                                   ))}
                                 </div>
-                              )}
-                              {g.members.map(m => (
-                                <div key={m.unit} className="val-member">
-                                  {g.multi && (
-                                    <div className="val-member-head">
-                                      <span className="val-member-code">{m.unit}</span> {m.name}
-                                      <span className="val-member-pct">{Math.round(m.pct * 100)}% · {m.completed}/{m.total}</span>
-                                    </div>
-                                  )}
-                                  <div className="val-entity-grid">
-                                    {report.entities.filter(e => m.statuses[e]).map(e => (
-                                      <span key={e} className={`val-entity-badge ${statusClass(m.statuses[e])}`}>
-                                        {e}<span className="val-entity-status">{m.statuses[e]}</span>
-                                      </span>
-                                    ))}
-                                  </div>
-                                  {m.completed < m.total && (
-                                    <div className="val-missing">
-                                      Outstanding: {report.entities.filter(e => m.statuses[e] && m.statuses[e].toLowerCase() !== 'completed').join(', ')}
-                                    </div>
-                                  )}
-                                </div>
-                              ))}
+                              ) : <span className="val-muted">No entities attached to this BU in the agency report.</span>}
                             </td>
                           </tr>
                         )}
@@ -1834,7 +1813,8 @@ function ValidationsPage() {
                 </tbody>
               </table>
             </>
-          )}
+            );
+          })()}
         </div>
       )}
 
