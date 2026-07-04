@@ -1130,6 +1130,9 @@ function ValidationsPage() {
   // ── Goal 5: run an entity across every BU it's attached to (agency report) ──
   const [entityRunSel, setEntityRunSel] = useState('');
   const [entityRun, setEntityRun] = useState<{ running: boolean; done: number; total: number; current: string; note: string }>({ running: false, done: 0, total: 0, current: '', note: '' });
+  // Sample-size preview: each attached BU with its N -> tier -> computed n, shown
+  // before the entity run (sizing stays automatic; this is confirm + transparency).
+  const [entityPreview, setEntityPreview] = useState<{ open: boolean; loading: boolean; entity: string; error: string; rows: { bu: string; tierName: string; N: number; n: number }[] }>({ open: false, loading: false, entity: '', error: '', rows: [] });
 
   const attachedBUsForEntity = useCallback((entityTab: string): string[] => {
     if (!report) return [];
@@ -1143,7 +1146,7 @@ function ValidationsPage() {
     if (!report) { setEntityRun({ running: false, done: 0, total: 0, current: '', note: 'Agency report not loaded yet — open the BU Dashboard once so it loads, then retry.' }); return; }
     const bus = attachedBUsForEntity(entityTab);
     if (!bus.length) { setEntityRun({ running: false, done: 0, total: 0, current: '', note: `No BUs are attached to "${entityTab}" in the agency report.` }); return; }
-    if (!confirm(`Generate + sample "${entityTab}" for ${bus.length} attached BU${bus.length !== 1 ? 's' : ''}?\n${bus.join(', ')}\n\nFor each BU this writes CV_ files and a sample report to Sampling/Local + Client (real ERP data).`)) return;
+    setEntityPreview(p => ({ ...p, open: false })); // preview (if open) served as the confirmation
     setEntityRun({ running: true, done: 0, total: bus.length, current: '', note: '' });
     const actor = userEmail ? `&actor=${encodeURIComponent(userEmail)}` : '';
     let reports = 0; const skipped: string[] = [];
@@ -1171,6 +1174,36 @@ function ValidationsPage() {
     }
     setEntityRun({ running: false, done: bus.length, total: bus.length, current: '', note: `Done — wrote ${reports} report${reports !== 1 ? 's' : ''} across ${bus.length} BU${bus.length !== 1 ? 's' : ''}${skipped.length ? ` · ${skipped.length} skipped (no data/classification)` : ''}. See Sampling/Local + Client.` });
   }, [valReport, report, attachedBUsForEntity, buEntitiesToGenerate, buildBUResults, sampleAndWriteResult, userEmail]);
+
+  // Preview the per-BU sample sizes for an entity before running. N is estimated
+  // from the entity's dry-run (root-table row count per BU); n = Cochran(N, tier).
+  const openEntityPreview = useCallback(async (entityTab: string) => {
+    if (!valReport || !report) return;
+    const bus = attachedBUsForEntity(entityTab);
+    if (!bus.length) { setEntityRun(s => ({ ...s, note: `No BUs are attached to "${entityTab}" in the agency report.` })); return; }
+    setEntityPreview({ open: true, loading: true, entity: entityTab, error: '', rows: [] });
+    try {
+      const plan = reportToPlanEntity.get(entityTab);
+      const rootNorm = normTbl(resolveEntityTarget(valReport, samplingTargetsRef.current || [], entityTab)?.table || '');
+      const cls = matchEntity(resolveEntityTarget(valReport, samplingTargetsRef.current || [], entityTab)?.table || '') || matchEntity(entityTab) || '';
+      let planned: { table: string; source: string; bu: string; rows: number }[] = [];
+      if (plan) {
+        const d = await (await fetch(`${LAMBDA_URL}?action=generate_entity_files&mock=${PLAN_MOCK}&entity=${encodeURIComponent(plan)}&dry_run=1`)).json();
+        if (d.ok) planned = d.planned || [];
+      }
+      const rootEntries = planned.filter(p => normTbl(p.table) === rootNorm);
+      const rows = bus.map(bu => {
+        const hit = rootEntries.find(p => p.source === bu || p.bu === bu);
+        const N = hit ? hit.rows : rootEntries.reduce((s, p) => s + p.rows, 0);
+        const tier = confidenceTierFor(bu, entityTab, cls);
+        const n = tier && N ? computeSampleSize(N, tier) : 0;
+        return { bu, tierName: tier?.name || '—', N, n };
+      });
+      setEntityPreview({ open: true, loading: false, entity: entityTab, error: rootEntries.length ? '' : 'Could not size from the conversion plan — sizes will be computed per BU during the run.', rows });
+    } catch (err) {
+      setEntityPreview({ open: true, loading: false, entity: entityTab, error: err instanceof Error ? err.message : String(err), rows: bus.map(bu => ({ bu, tierName: '—', N: 0, n: 0 })) });
+    }
+  }, [valReport, report, attachedBUsForEntity, reportToPlanEntity, confidenceTierFor, PLAN_MOCK]);
 
   // ── Reproduce a prior sample from its recorded seed ──
   const addRepFile = async (file: File) => {
@@ -1302,6 +1335,46 @@ function ValidationsPage() {
     })
     .sort((a, b) => a.pct - b.pct || a.code.localeCompare(b.code));
 
+  // Shared sample-size preview (rendered inside whichever entity-run panel is active).
+  const entityPreviewPanel = entityPreview.open ? (
+    <div className="val-preview">
+      <div className="val-preview-head">
+        <strong>Sample sizes for &ldquo;{valReport?.entities.find(e => e.tab === entityPreview.entity)?.entity || entityPreview.entity}&rdquo;</strong>
+        <span className="val-muted"> — {entityPreview.rows.length} BU{entityPreview.rows.length !== 1 ? 's' : ''}, sized automatically (N × confidence tier). Review, then run.</span>
+        <button className="val-link-btn" onClick={() => setEntityPreview(p => ({ ...p, open: false }))}>close</button>
+      </div>
+      {entityPreview.loading ? (
+        <div className="val-muted"><span className="val-spinner val-spinner-dark" /> Sizing each BU…</div>
+      ) : (
+        <>
+          {entityPreview.error && <div className="val-note val-reproduce-warn">{entityPreview.error}</div>}
+          <div className="val-preview-scroll">
+            <table className="val-table val-preview-table">
+              <thead><tr><th>BU</th><th>Confidence</th><th className="val-col-num">Population (N)</th><th className="val-col-num">Sample (n)</th></tr></thead>
+              <tbody>
+                {entityPreview.rows.map(r => (
+                  <tr key={r.bu}>
+                    <td className="val-bu-unit">{r.bu}</td>
+                    <td>{r.tierName !== '—' ? <span className={`val-class val-class-${r.tierName.toLowerCase()}`}>{r.tierName}</span> : <span className="val-muted">—</span>}</td>
+                    <td className="val-col-num">{r.N ? r.N.toLocaleString() : <span className="val-muted">on run</span>}</td>
+                    <td className="val-col-num val-n">{r.n || <span className="val-muted">—</span>}</td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot><tr><td>Total</td><td></td><td className="val-col-num">{entityPreview.rows.reduce((s, r) => s + r.N, 0).toLocaleString()}</td><td className="val-col-num val-n">{entityPreview.rows.reduce((s, r) => s + r.n, 0)}</td></tr></tfoot>
+            </table>
+          </div>
+          <div className="val-preview-actions">
+            <button className="val-btn-row" disabled={entityRun.running} onClick={() => runEntityAcrossBUs(entityPreview.entity)}>
+              ▶ Generate + sample {entityPreview.rows.length} BU{entityPreview.rows.length !== 1 ? 's' : ''} (writes real ERP data)
+            </button>
+            <button className="val-btn-secondary" onClick={() => setEntityPreview(p => ({ ...p, open: false }))}>Cancel</button>
+          </div>
+        </>
+      )}
+    </div>
+  ) : null;
+
   return (
     <div className="val-page">
       <header className="val-header">
@@ -1373,14 +1446,15 @@ function ValidationsPage() {
                     {valReport.entities.map(e => <option key={e.tab} value={e.tab}>{e.entity || e.tab}</option>)}
                   </select>
                 </label>
-                <button className="val-btn-row" disabled={!entityRunSel || entityRun.running} onClick={() => runEntityAcrossBUs(entityRunSel)}>
-                  {entityRun.running ? <><span className="val-spinner" /> {entityRun.current || 'starting'} ({entityRun.done}/{entityRun.total})…</> : '▶ Generate + sample all attached BUs'}
+                <button className="val-btn-row" disabled={!entityRunSel || entityRun.running} onClick={() => openEntityPreview(entityRunSel)}>
+                  {entityRun.running ? <><span className="val-spinner" /> {entityRun.current || 'starting'} ({entityRun.done}/{entityRun.total})…</> : '▶ Preview + sample all attached BUs'}
                 </button>
                 {entityRunSel && !entityRun.running && (
                   <span className="val-muted">{attachedBUsForEntity(entityRunSel).length} BU{attachedBUsForEntity(entityRunSel).length !== 1 ? 's' : ''} attached{!report ? ' · loading agency report…' : ''}</span>
                 )}
               </div>
               {entityRun.note && <div className="val-gen-note-inline">{entityRun.note}</div>}
+              {entityPreviewPanel}
             </div>
           ) : (
             <div className="val-note">{valLoading ? 'Loading entities from the validation report…' : 'Upload the Entity Validation Report on the Completeness tab to enable entity runs.'}</div>
@@ -2121,6 +2195,7 @@ function ValidationsPage() {
                     )}
                   </div>
                   {entityRun.note && <div className="val-gen-note-inline">{entityRun.note}</div>}
+                  {entityPreviewPanel}
                 </div>
 
                 <div className="val-bu-controls">
