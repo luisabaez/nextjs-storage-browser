@@ -272,6 +272,22 @@
 .val-bu-file.ok { background: #ecfdf5; color: #065f46; border: 1px solid #a7f3d0; }
 .val-bu-file.empty { background: #fffbeb; color: #92400e; border: 1px solid #fde68a; }
 .val-bu-file.missing { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
+
+/* #6: inline "edit expected files" editor on Sample by BU */
+.val-file-edit { margin-left: 6px; font-size: 11px; padding: 1px 8px; border-radius: 999px; background: #eef2ff; color: #3730a3; border: 1px solid #c7d2fe; cursor: pointer; white-space: nowrap; }
+.val-file-edit:hover { background: #e0e7ff; }
+.val-fileedit { padding: 10px 12px; background: #f8fafc; border: 1px solid #e5e8ee; border-radius: 8px; }
+.val-fileedit-head { font-size: 13px; margin-bottom: 8px; color: #374151; }
+.val-fileedit-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.val-fileedit-chip { display: inline-flex; align-items: center; gap: 4px; }
+.val-chip-x { border: none; background: transparent; color: #6b7280; cursor: pointer; font-size: 14px; line-height: 1; padding: 0 0 0 2px; }
+.val-chip-x:hover { color: #b91c1c; }
+.val-fileedit-add { position: relative; }
+.val-fileedit-add .val-search { width: 340px; max-width: 100%; }
+.val-tablepick { margin-top: 6px; max-height: 220px; overflow-y: auto; border: 1px solid #e5e8ee; border-radius: 6px; background: #fff; }
+.val-tablepick-item { display: block; width: 100%; text-align: left; padding: 5px 10px; border: none; border-bottom: 1px solid #f1f5f9; background: #fff; cursor: pointer; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: #334155; }
+.val-tablepick-item:hover { background: #eff6ff; color: #1e3a8a; }
+.val-tablepick .val-muted { padding: 6px 10px; }
 .val-bu-addrow { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 0 0 12px; padding: 10px 12px; background: #f8fafc; border: 1px solid #e5e8ee; border-radius: 8px; }
 .val-bu-newbu { max-width: 120px; height: 34px; }
 .val-filecheck-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 6px 14px; padding: 4px 2px 10px; }

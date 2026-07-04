@@ -625,6 +625,32 @@ function ValidationsPage() {
     finally { setBuAssignSaving(false); }
   }, [buAssignments]);
 
+  // #6: set a BU's assignments to `next` and persist immediately (inline editing
+  // on Sample by BU auto-saves, so there is no separate Save button there).
+  const persistAssign = useCallback(async (next: Record<string, Record<string, string[]>>) => {
+    setBuAssignments(next);
+    try { await uploadData({ path: BU_ASSIGN_PATH, data: new Blob([JSON.stringify(next)], { type: 'application/json' }), options: { contentType: 'application/json' } }).result; }
+    catch (e) { console.error('persist bu assignments failed', e); }
+  }, []);
+
+  // #6: the full SQL table list (~2200), fetched once, for the searchable "add a
+  // table" picker — there are far too many for a dropdown, so the user searches.
+  const [sqlTables, setSqlTables] = useState<string[]>([]);
+  const sqlTablesRef = useRef<string[]>([]);
+  const [sqlTablesLoading, setSqlTablesLoading] = useState(false);
+  const loadSqlTables = useCallback(async () => {
+    if (sqlTablesRef.current.length || sqlTablesLoading) return;
+    setSqlTablesLoading(true);
+    try {
+      const r = await (await fetch(`${LAMBDA_URL}?action=list_sql_tables&db=Hacienda_ERP`)).json();
+      const t: string[] = Array.isArray(r.tables) ? r.tables : [];
+      setSqlTables(t); sqlTablesRef.current = t;
+    } catch (e) { console.error('load sql tables failed', e); }
+    finally { setSqlTablesLoading(false); }
+  }, [sqlTablesLoading]);
+  const [sbuEditTab, setSbuEditTab] = useState('');   // Sample by BU: entity whose file editor is open
+  const [tableQuery, setTableQuery] = useState('');   // the "add a table" search text
+
   const loadLinkKeys = useCallback(async () => {
     try {
       const { url } = await getUrl({ path: LINK_KEYS_PATH, options: { validateObjectExistence: true } });
@@ -2171,6 +2197,23 @@ function ValidationsPage() {
             const emp = valEmpties;
             const entTabs = assignedEntitiesFor(selectedBU);
             const shownTabs = sampleEntitySel ? entTabs.filter(t => t === sampleEntitySel) : entTabs;
+            // #6: edit a BU's expected files inline (auto-saves). Removing drops a
+            // label; adding picks a real table from the searchable list (2000+ tables).
+            const toggleFileBU = (tab: string, label: string) => {
+              const cur = buAssignments[selectedBU]?.[tab] ?? reportFilesFor(tab);
+              const nextList = cur.includes(label) ? cur.filter(x => x !== label) : [...cur, label];
+              persistAssign({ ...buAssignments, [selectedBU]: { ...(buAssignments[selectedBU] || {}), [tab]: nextList } });
+            };
+            const addTableBU = (tab: string, table: string) => {
+              const label = tableLabel(table);
+              const cur = buAssignments[selectedBU]?.[tab] ?? reportFilesFor(tab);
+              if (!cur.some(x => normStr(x) === normStr(label))) {
+                persistAssign({ ...buAssignments, [selectedBU]: { ...(buAssignments[selectedBU] || {}), [tab]: [...cur, label] } });
+              }
+              setTableQuery('');
+            };
+            const tq = tableQuery.trim().toUpperCase();
+            const tableHits = tq.length >= 2 ? sqlTables.filter(t => t.toUpperCase().includes(tq)) : [];
             // The validation report carries expected counts only for its own
             // agencies; for the other agency-report BUs we expect every included
             // file and read presence from the generation manifest instead.
@@ -2257,7 +2300,8 @@ function ValidationsPage() {
                   </thead>
                   <tbody>
                     {rows.map(r => (
-                      <tr key={r.e.tab}>
+                      <React.Fragment key={r.e.tab}>
+                      <tr>
                         <td className="val-bu-unit">{r.e.entity}</td>
                         <td className="val-muted" title={r.e.howItLinks}>{r.e.key}</td>
                         <td>
@@ -2274,9 +2318,44 @@ function ValidationsPage() {
                               : 'not generated for this BU';
                             return <span key={i} className={`val-bu-file ${cls}`} title={title}>{sym} {f.label}</span>;
                           })}
+                          <button className="val-file-edit" title="Add or remove this entity's expected files"
+                            onClick={() => { const open = sbuEditTab === r.e.tab; setSbuEditTab(open ? '' : r.e.tab); setTableQuery(''); if (!open) loadSqlTables(); }}>
+                            {sbuEditTab === r.e.tab ? '✕ done' : '✎ edit'}
+                          </button>
                         </td>
                         <td>{r.ready ? <span className="val-repstatus val-rep-clean">Ready</span> : <span className="val-repstatus val-rep-orphans" title={r.emptyN ? `${r.emptyN} empty (table has no rows) · ${r.exp - r.pres - r.emptyN} not generated` : undefined}>{r.exp - r.pres} missing</span>}</td>
                       </tr>
+                      {sbuEditTab === r.e.tab && (
+                        <tr className="val-bu-detail-row">
+                          <td colSpan={6}>
+                            <div className="val-fileedit">
+                              <div className="val-fileedit-head">Expected files for <b>{r.e.entity}</b> · BU {selectedBU} <span className="val-muted">— changes auto-save</span></div>
+                              <div className="val-fileedit-chips">
+                                {includedFilesFor(selectedBU, r.e.tab).map(lbl => (
+                                  <span key={lbl} className="val-bu-file ok val-fileedit-chip">{lbl}
+                                    <button className="val-chip-x" title="remove this file" onClick={() => toggleFileBU(r.e.tab, lbl)}>×</button>
+                                  </span>
+                                ))}
+                                {includedFilesFor(selectedBU, r.e.tab).length === 0 && <span className="val-muted">No files — search below to add one.</span>}
+                              </div>
+                              <div className="val-fileedit-add">
+                                <input className="val-search" placeholder="search tables to add a child (e.g. SUPPLIER_SITE)…" value={tableQuery} onChange={e => setTableQuery(e.target.value)} autoFocus />
+                                {sqlTablesLoading && <span className="val-muted"> loading table list…</span>}
+                                {tq.length >= 2 && (
+                                  <div className="val-tablepick">
+                                    {tableHits.length === 0 && <div className="val-muted">no tables match &ldquo;{tableQuery}&rdquo;</div>}
+                                    {tableHits.slice(0, 30).map(t => (
+                                      <button key={t} className="val-tablepick-item" onClick={() => addTableBU(r.e.tab, t)} title={`Add as "${tableLabel(t)}"`}>{t}</button>
+                                    ))}
+                                    {tableHits.length > 30 && <div className="val-muted">+{tableHits.length - 30} more — refine your search</div>}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                      </React.Fragment>
                     ))}
                   </tbody>
                 </table>
