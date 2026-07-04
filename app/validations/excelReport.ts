@@ -304,6 +304,8 @@ export interface TrackingRunInfo {
   localPath: string;
   clientPath: string;
   reportPath: string;
+  serverPath?: string;   // where the client copy landed on the SQL Server box
+  serverStatus?: string; // SSM publish status (Success / Failed / Pending / …)
 }
 
 export function buildTrackingReport(
@@ -343,6 +345,8 @@ export function buildTrackingReport(
     ['Sample file', run.sampleFile],
     ['Local copy (full)', run.localPath],
     ['Client copy', run.clientPath],
+    ['Server copy (ToPublish)', run.serverPath || ''],
+    ['Server publish status', run.serverStatus || ''],
     ['This report', run.reportPath],
   ];
   for (const r of kv) {

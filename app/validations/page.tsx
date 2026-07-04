@@ -1081,7 +1081,23 @@ function ValidationsPage() {
     const full = buildPerFileReport(files, meta, { includeSizing: true, integrity: p.merged?.integrity });
     const client = buildPerFileReport(files, meta, { includeSizing: false });
     await uploadData({ path: `${LOCAL_FOLDER}${base}.xlsx`, data: new Blob([await reportToBuffer(full)], { type: XLSX_CT }), options: { contentType: XLSX_CT } }).result;
-    await uploadData({ path: `${CLIENT_FOLDER}${base}.xlsx`, data: new Blob([await reportToBuffer(client)], { type: XLSX_CT }), options: { contentType: XLSX_CT } }).result;
+    const clientKey = `${CLIENT_FOLDER}${base}.xlsx`;
+    await uploadData({ path: clientKey, data: new Blob([await reportToBuffer(client)], { type: XLSX_CT }), options: { contentType: XLSX_CT } }).result;
+
+    // One copy of the client file must also land in the SQL Server box's watched
+    // ToPublish folder on every run. The browser can't reach the box, so the
+    // Lambda pulls the just-uploaded client file down via SSM. Never fail the
+    // sample over this — record whatever status comes back in the tracking report.
+    let serverPath = '', serverStatus = '';
+    try {
+      const pub = await (await fetch(`${LAMBDA_URL}?action=publish_to_server&key=${encodeURIComponent(clientKey)}`)).json();
+      serverStatus = pub.status || (pub.ok ? 'Success' : 'Failed');
+      serverPath = pub.dest || '';
+      if (!pub.ok) console.error('publish to server did not confirm', pub);
+    } catch (err) {
+      serverStatus = 'Error';
+      console.error('publish to server failed', err);
+    }
 
     // Per-run tracking report → Sampling/Reports/ (one per run, timestamped) so a
     // suspect record traces to who/when/seed, the config, and the source files.
@@ -1094,7 +1110,8 @@ function ValidationsPage() {
         N: p.N, n, seed, generatedAt: now.toISOString(), generatedBy: userEmail,
         sampleFile: `${base}.xlsx`,
         localPath: `${LOCAL_FOLDER}${base}.xlsx`,
-        clientPath: `${CLIENT_FOLDER}${base}.xlsx`,
+        clientPath: clientKey,
+        serverPath, serverStatus,
         reportPath: `${REPORTS_FOLDER}${reportName}`,
       }, configForEntity(p.entity), p.merged);
       await uploadData({ path: `${REPORTS_FOLDER}${reportName}`, data: new Blob([await reportToBuffer(trk)], { type: XLSX_CT }), options: { contentType: XLSX_CT } }).result;

@@ -26,6 +26,8 @@ import boto3
 import pyodbc
 import pandas as pd
 import io
+import re
+import time
 import traceback
 from datetime import datetime
 
@@ -114,6 +116,84 @@ CONTINUATION_TIMEOUT_RESERVE_MS = 60000  # 1 min before timeout → trigger cont
 
 s3_client = boto3.client("s3")
 lambda_client = boto3.client("lambda")
+ssm_client = boto3.client("ssm", region_name="us-east-1")
+
+# ─── Sample-file publishing to the SQL Server box ─────────────────────────────
+# Every sampling run drops one copy of the client workbook into a watched folder
+# on the SQL Server EC2 instance. The browser can't reach the box, so the Lambda
+# hands the box a short-lived presigned S3 URL and it pulls the file down itself
+# via SSM Run Command (no S3 credentials needed on the box).
+SQL_SERVER_INSTANCE_ID = "i-005bc43c1a95338e4"
+PUBLISH_DIR = r"D:\Hacienda ERP Data Validation\FilePublish\ToPublish - Sample Converted Data Files"
+PUBLISH_KEY_PREFIX = "Sampling/Client/"
+_SAFE_SAMPLE_NAME = re.compile(r"^[A-Za-z0-9 ._()\-]+\.xlsx$")
+
+
+def publish_sample_to_server(bucket, key, timeout=30):
+    """Copy one client sample workbook from S3 onto the SQL Server box.
+
+    The box downloads the file itself from a short-lived presigned URL via SSM
+    Run Command, so it needs no S3 credentials — only the outbound HTTPS it
+    already has as an SSM-managed instance. The file is written to a .part file
+    first and renamed into place so the watched ToPublish folder never sees a
+    partial file. Returns {ok, status, commandId, dest, stdout, stderr}.
+    """
+    if not key.startswith(PUBLISH_KEY_PREFIX):
+        return {"ok": False, "error": "key must be under " + PUBLISH_KEY_PREFIX}
+    filename = key.rsplit("/", 1)[-1]
+    if not _SAFE_SAMPLE_NAME.match(filename):
+        return {"ok": False, "error": "unsafe sample filename"}
+
+    url = s3_client.generate_presigned_url(
+        "get_object", Params={"Bucket": bucket, "Key": key}, ExpiresIn=900)
+    if "'" in url:  # presigned URLs never contain quotes; refuse if one somehow does
+        return {"ok": False, "error": "unexpected character in download url"}
+
+    dest = PUBLISH_DIR + "\\" + filename
+    ps = (
+        "$ErrorActionPreference='Stop';"
+        "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12;"
+        "$dir='" + PUBLISH_DIR + "';"
+        "$dest='" + dest + "';"
+        "$tmp=$dest+'.part';"
+        "if(!(Test-Path -LiteralPath $dir)){New-Item -ItemType Directory -Force -Path $dir | Out-Null};"
+        "Invoke-WebRequest -Uri '" + url + "' -OutFile $tmp -UseBasicParsing;"
+        "Move-Item -LiteralPath $tmp -Destination $dest -Force;"
+        "Write-Output ('PUBLISHED ' + $dest)"
+    )
+    send = ssm_client.send_command(
+        InstanceIds=[SQL_SERVER_INSTANCE_ID],
+        DocumentName="AWS-RunPowerShellScript",
+        Comment="Publish sample converted data file",
+        Parameters={"commands": [ps]},
+        TimeoutSeconds=600,
+    )
+    command_id = send["Command"]["CommandId"]
+
+    # Poll briefly for a terminal status so the run can record whether it landed.
+    status, stdout, stderr = "Pending", "", ""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        time.sleep(2)
+        try:
+            inv = ssm_client.get_command_invocation(
+                CommandId=command_id, InstanceId=SQL_SERVER_INSTANCE_ID)
+        except ssm_client.exceptions.InvocationDoesNotExist:
+            continue
+        status = inv["Status"]
+        if status in ("Success", "Failed", "Cancelled", "TimedOut"):
+            stdout = (inv.get("StandardOutputContent") or "").strip()
+            stderr = (inv.get("StandardErrorContent") or "").strip()
+            break
+
+    return {
+        "ok": status == "Success",
+        "status": status,
+        "commandId": command_id,
+        "dest": dest,
+        "stdout": stdout[-800:],
+        "stderr": stderr[-800:],
+    }
 
 
 def get_connection_string():
@@ -1641,6 +1721,25 @@ def lambda_handler(event, context):
                                                  actor=actor, bu_filter=bu_filter)
             return {"statusCode": 200 if res.get("ok") else 400,
                     "headers": headers,
+                    "body": json.dumps(res, default=str)}
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
+    if action == "publish_to_server":
+        # ?action=publish_to_server&key=Sampling/Client/<file>.xlsx[&bucket=...]
+        # Drops one copy of the client sample workbook into the SQL Server box's
+        # watched ToPublish folder via SSM Run Command (publish_sample_to_server).
+        try:
+            p = event.get("queryStringParameters") or {}
+            key = (p.get("key") or "").strip()
+            target_bucket = p.get("bucket") or DEFAULT_BUCKET
+            if not key:
+                return {"statusCode": 400, "headers": headers,
+                        "body": json.dumps({"ok": False, "error": "key required"})}
+            res = publish_sample_to_server(target_bucket, key)
+            return {"statusCode": 200, "headers": headers,
                     "body": json.dumps(res, default=str)}
         except Exception as e:
             traceback.print_exc()
