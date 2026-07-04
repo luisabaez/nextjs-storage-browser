@@ -1287,8 +1287,17 @@ function ValidationsPage() {
   const runEntityAcrossBUs = useCallback(async (entityTab: string) => {
     if (!valReport) return;
     if (!report) { setEntityRun({ running: false, done: 0, total: 0, current: '', note: 'Agency report not loaded yet — open the BU Dashboard once so it loads, then retry.' }); return; }
-    const bus = attachedBUsForEntity(entityTab);
-    if (!bus.length) { setEntityRun({ running: false, done: 0, total: 0, current: '', note: `No BUs are attached to "${entityTab}" in the agency report.` }); return; }
+    const allBus = attachedBUsForEntity(entityTab);
+    if (!allBus.length) { setEntityRun({ running: false, done: 0, total: 0, current: '', note: `No BUs are attached to "${entityTab}" in the agency report.` }); return; }
+    // Resume-safe: skip BUs already sampled for this entity so a re-run only does
+    // the rest, and cap each run so a big batch (e.g. HCM Person) can't overrun
+    // the browser tab — reload + run again to continue until all are done.
+    const RUN_CAP = 12;
+    const alreadyDone = allBus.filter(bu => (sampledRunsRef.current[bu] || []).includes(entityTab)).length;
+    const remaining = allBus.filter(bu => !(sampledRunsRef.current[bu] || []).includes(entityTab));
+    const bus = remaining.slice(0, RUN_CAP);
+    const stillLeft = remaining.length - bus.length;
+    if (!bus.length) { setEntityRun({ running: false, done: 0, total: 0, current: '', note: `All ${allBus.length} BUs for "${entityTab}" are already sampled.` }); return; }
     setEntityPreview(p => ({ ...p, open: false })); // preview (if open) served as the confirmation
     setEntityRun({ running: true, done: 0, total: bus.length, current: '', note: '' });
     const actor = userEmail ? `&actor=${encodeURIComponent(userEmail)}` : '';
@@ -1315,7 +1324,7 @@ function ValidationsPage() {
         }
       } catch (e) { console.error('run entity across BU failed', bu, e); }
     }
-    setEntityRun({ running: false, done: bus.length, total: bus.length, current: '', note: `Done — wrote ${reports} report${reports !== 1 ? 's' : ''} across ${bus.length} BU${bus.length !== 1 ? 's' : ''}${skipped.length ? ` · ${skipped.length} skipped (no data/classification)` : ''}. See Sampling/Local + Client.` });
+    setEntityRun({ running: false, done: bus.length, total: bus.length, current: '', note: `Done — ${reports} report${reports !== 1 ? 's' : ''} across ${bus.length} BU${bus.length !== 1 ? 's' : ''}${alreadyDone ? ` (${alreadyDone} already sampled, skipped)` : ''}${stillLeft ? ` · ${stillLeft} still remaining — reload, then Preview + run again to continue` : ` · all attached BUs complete`}${skipped.length ? ` · ${skipped.length} no-data` : ''}.` });
   }, [valReport, report, attachedBUsForEntity, buEntitiesToGenerate, buildBUResults, sampleAndWriteResult, userEmail]);
 
   // Preview the per-BU sample sizes for an entity before running. N is estimated
