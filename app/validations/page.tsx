@@ -2034,6 +2034,10 @@ function ValidationsPage() {
             const mans = valManifests;
             const entTabs = assignedEntitiesFor(selectedBU);
             const shownTabs = sampleEntitySel ? entTabs.filter(t => t === sampleEntitySel) : entTabs;
+            // The validation report carries expected counts only for its own
+            // agencies; for the other agency-report BUs we expect every included
+            // file and read presence from the generation manifest instead.
+            const buHasVal = valReport.agencies.includes(selectedBU);
             const rows = valReport.entities
               .filter(e => shownTabs.includes(e.tab))
               .map(e => {
@@ -2045,7 +2049,7 @@ function ValidationsPage() {
                 const fileStates = included.map(lbl => {
                   const rf = e.files.find(f => f.label === lbl);
                   const c = rf ? rf.counts[selectedBU] : undefined;
-                  if (rf && (!c || c === 'N/A')) return { label: lbl, role: rf.role, na: true, present: false, rows: 0 };
+                  if (buHasVal && rf && (!c || c === 'N/A')) return { label: lbl, role: rf.role, na: true, present: false, rows: 0 };
                   exp++;
                   const st = buFilePresent(mans, e.entity, lbl, selectedBU);
                   if (st.present) pres++;
