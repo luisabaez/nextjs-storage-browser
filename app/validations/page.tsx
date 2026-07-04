@@ -1276,6 +1276,9 @@ function ValidationsPage() {
 
   const attachedBUsForEntity = useCallback((entityTab: string): string[] => {
     if (!report) return [];
+    // #9: HCM Person isn't in the agency report — it applies to every BU, so the
+    // entity-run spans them all (the preview then sizes each; empty BUs show N=0).
+    if (entityTab === HCM_PERSON_TAB) return report.bus.map(b => b.unit);
     const col = agencyColumnForEntity(report, valReport, entityTab);
     if (!col) return [];
     return report.bus.filter(b => { const s = b.statuses[col]; return s != null && String(s).trim() !== ''; }).map(b => b.unit);
