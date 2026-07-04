@@ -1044,7 +1044,9 @@ function ValidationsPage() {
         let tagged: TaggedFile[] = [];
         for (const g of items.filter(x => HCM_PERSON_FOLDERS.has(x.entity))) {
           const manifest = await readEntityManifests(PLAN_MOCK, g.entity);
-          const buFiles = g.files.filter(fn => { const m = manifest.get(fn); return m && (m.source === bu || m.bu === bu); });
+          // HCM tables exist in two mocks (MOCK04HCM + MOCK14) that normalize to
+          // the same identity — keep only the current mock so records aren't doubled.
+          const buFiles = g.files.filter(fn => { const m = manifest.get(fn); return m && m.table.toUpperCase().includes(PLAN_MOCK) && (m.source === bu || m.bu === bu); });
           if (!buFiles.length) continue;
           tagged = tagged.concat(await loadGeneratedTagged({ ...g, files: buFiles }, manifest));
         }
