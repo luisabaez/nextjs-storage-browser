@@ -1201,7 +1201,7 @@ function ValidationsPage() {
       ? mergeResultToReportFiles(p.merged, selectedIndices, titleCaseEntity(p.entity))
       : [singleFileReport(titleCaseEntity(p.entity), p.data.sheetName || p.entity, p.data.headers, p.data.rows, selectedIndices)];
     const full = buildPerFileReport(files, meta, { includeSizing: true, integrity: p.merged?.integrity });
-    const client = buildPerFileReport(files, meta, { includeSizing: false });
+    const client = buildPerFileReport(files, meta, { includeSizing: false, includePopulation: false }); // client + server copy: Sample sheets only
     await uploadData({ path: `${LOCAL_FOLDER}${base}.xlsx`, data: new Blob([await reportToBuffer(full)], { type: XLSX_CT }), options: { contentType: XLSX_CT } }).result;
     const clientKey = `${CLIENT_FOLDER}${base}.xlsx`;
     await uploadData({ path: clientKey, data: new Blob([await reportToBuffer(client)], { type: XLSX_CT }), options: { contentType: XLSX_CT } }).result;

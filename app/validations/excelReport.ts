@@ -113,14 +113,16 @@ function writeDataSheet(wb: ExcelJS.Workbook, f: ReportFile, kind: 'Sample' | 'P
 }
 
 // Overview sheet documenting how the files link (Goal 2).
-function relationshipsSheet(wb: ExcelJS.Workbook, files: ReportFile[], meta: SampleMeta, used: Set<string>): void {
+function relationshipsSheet(wb: ExcelJS.Workbook, files: ReportFile[], meta: SampleMeta, used: Set<string>, hasPopulation: boolean): void {
   const ws = wb.addWorksheet(fixedName('Relationships', used));
   const title = ws.addRow(['File Relationships & Linking Key']);
   title.getCell(1).font = { bold: true, size: 14, color: { argb: HDR_TXT } };
   title.height = 22;
   const sub = ws.addRow([`Entity: ${meta.entity}    Agency: ${meta.agency}    Sample: ${meta.n} of ${meta.N}`]);
   sub.getCell(1).font = { color: { argb: NOTE_TXT } };
-  const note = ws.addRow(['Every file is on its own Sample and Population sheet. All files link to the parent on the highlighted Unique ID column — the same sampled records are carried across every file by that key.']);
+  const note = ws.addRow([hasPopulation
+    ? 'Every file is on its own Sample and Population sheet. All files link to the parent on the highlighted Unique ID column — the same sampled records are carried across every file by that key.'
+    : 'Every file is on its own Sample sheet. All files link to the parent on the highlighted Unique ID column — the same sampled records are carried across every file by that key. The full population for each file is in its linked Conversion File.']);
   note.getCell(1).font = { italic: true, color: { argb: NOTE_TXT } };
   note.alignment = { wrapText: true };
   ws.addRow([]);
@@ -198,21 +200,24 @@ function integritySheet(wb: ExcelJS.Workbook, integrity: ChildIntegrity[], meta:
 }
 
 // Build the full per-file workbook. `includeSizing` gates the internal-only
-// Sizing + Data Integrity sheets (the client copy omits them).
+// Sizing + Data Integrity sheets (the client copy omits them). `includePopulation`
+// (default true) gates the per-file Population sheets — the client/server copy
+// omits them (the full population lives in the linked Conversion File).
 export function buildPerFileReport(
   files: ReportFile[],
   meta: SampleMeta,
-  opts: { includeSizing: boolean; integrity?: ChildIntegrity[] },
+  opts: { includeSizing: boolean; includePopulation?: boolean; integrity?: ChildIntegrity[] },
 ): ExcelJS.Workbook {
   const wb = new ExcelJS.Workbook();
   wb.creator = 'Validations';
   const used = new Set<string>();
+  const withPop = opts.includePopulation !== false;
 
   for (const f of files) writeDataSheet(wb, f, 'Sample', used);
-  for (const f of files) writeDataSheet(wb, f, 'Population', used);
+  if (withPop) for (const f of files) writeDataSheet(wb, f, 'Population', used);
   if (opts.includeSizing) sizingSheet(wb, meta, files, used);
   if (opts.includeSizing && opts.integrity?.length) integritySheet(wb, opts.integrity, meta, used);
-  if (files.some(f => f.role === 'child')) relationshipsSheet(wb, files, meta, used); // #2: Relationships last
+  if (files.some(f => f.role === 'child')) relationshipsSheet(wb, files, meta, used, withPop); // #2: Relationships last
 
   return wb;
 }
