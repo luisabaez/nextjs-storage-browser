@@ -18,6 +18,7 @@ Interim limitations (pending methodology confirmation with Ethree / Wanda):
 import io
 import json
 import re
+import unicodedata
 import uuid
 from collections import defaultdict
 from datetime import datetime, date
@@ -671,11 +672,27 @@ def _table_prefix(t):
     return t.strip('_').rstrip('_')
 
 
+def _clean_name(s):
+    # Mirror the conversion scripts' CLEAN_STRING_V4 on plan field names: strip
+    # accents, collapse internal whitespace, lower-case. So a plan field with
+    # padding/accents still resolves to its column and its table is not skipped.
+    s = unicodedata.normalize('NFKD', str(s or '')).encode('ascii', 'ignore').decode('ascii')
+    return re.sub(r'\s+', ' ', s).strip().lower()
+
+
 def _resolve_col(cols, name):
-    nl = str(name or '').strip().lower()
+    nl = _clean_name(name)
+    if not nl:
+        return None
     for c in cols:
-        if c.lower() == nl:
+        if _clean_name(c) == nl:
             return c
+    # last resort: alphanumeric-only match (punctuation differences)
+    an = re.sub(r'[^a-z0-9]', '', nl)
+    if an:
+        for c in cols:
+            if re.sub(r'[^a-z0-9]', '', _clean_name(c)) == an:
+                return c
     return None
 
 
@@ -778,21 +795,34 @@ def generate_entity_files(conn_str, s3, bucket, mock, entity, subentity=None,
                 cur.execute(f"SELECT DISTINCT [{src_col}] FROM {fq} WHERE [{src_col}] <> ?", (src_field,))
             combos = cur.fetchall()
 
+            used_names = set()
             for combo in combos:
-                source = str(combo[0]).strip() if combo[0] is not None else ''
-                if not source:
-                    continue
-                bu = str(combo[1]).strip() if (bu_col and len(combo) > 1 and combo[1] is not None) else ''
+                raw_source = combo[0]
+                if raw_source is None:
+                    continue  # NULL source: excluded by the enumeration and by the scripts
+                source = str(raw_source).strip()
+                has_bu = bool(bu_col) and len(combo) > 1 and combo[1] is not None
+                raw_bu = combo[1] if has_bu else None
+                bu = str(raw_bu).strip() if has_bu else ''
                 if bu_filter and bu_filter not in (source, bu):
                     continue  # per-BU generation: skip splits for other agencies
-                if bu_col and bu:
+                # Match on the EXACT stored value (like the scripts) so blank or
+                # padded source / BU values are captured, not skipped or mismatched.
+                # A value that is blank after trimming is named "NA" in the file.
+                if has_bu:
                     fname = f"CV_{prefix}__{_safe_name(source)}_{_safe_name(bu)}.xlsx"
                     cond = f"WHERE [{src_col}] = ? AND [{bu_col}] = ?"
-                    args = (source, bu)
+                    args = (raw_source, raw_bu)
                 else:
                     fname = f"CV_{prefix}__{_safe_name(source)}.xlsx"
                     cond = f"WHERE [{src_col}] = ?"
-                    args = (source,)
+                    args = (raw_source,)
+                base = fname[:-5]
+                k = 2
+                while fname in used_names:
+                    fname = f"{base}_{k}.xlsx"
+                    k += 1
+                used_names.add(fname)
 
                 if dry_run:
                     cur.execute(f"SELECT COUNT(*) FROM {fq} {cond}", args)
