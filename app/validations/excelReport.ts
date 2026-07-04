@@ -281,6 +281,124 @@ export function singleFileReport(label: string, table: string, headers: unknown[
   };
 }
 
+// ── Per-run tracking report ──────────────────────────────────────────────────
+// One workbook per sampling run, written to Sampling/Reports/, so a suspect
+// record can be traced to exactly where it came from: the run parameters (who,
+// when, seed, where the files landed), the sampling configuration for the entity,
+// and the merge provenance + integrity of the source files.
+export interface TrackingRunInfo {
+  entity: string;
+  agency: string;
+  mock: string;
+  tierName: string;
+  confidence: number;
+  Z: number;
+  e: number;
+  p: number;
+  N: number;
+  n: number;
+  seed: number;
+  generatedAt: string; // ISO
+  generatedBy: string;
+  sampleFile: string;
+  localPath: string;
+  clientPath: string;
+  reportPath: string;
+}
+
+export function buildTrackingReport(
+  run: TrackingRunInfo,
+  config: { headers: string[]; rows: unknown[][] } | null,
+  merged?: MergeResult,
+): ExcelJS.Workbook {
+  const wb = new ExcelJS.Workbook();
+  wb.creator = 'Validations';
+  const used = new Set<string>();
+
+  // 1. Run Info — who / when / seed / sizing / where the files landed.
+  const info = wb.addWorksheet(fixedName('Run Info', used));
+  const title = info.addRow(['Sampling Run — Tracking Report']);
+  title.getCell(1).font = { bold: true, size: 14, color: { argb: HDR_TXT } };
+  title.height = 22;
+  info.addRow([]);
+  const iso = run.generatedAt || '';
+  const kv: unknown[][] = [
+    ['Entity', run.entity],
+    ['Agency / BU', run.agency],
+    ['Mock', run.mock],
+    ['Run date', iso.slice(0, 10)],
+    ['Run time (UTC)', iso.slice(11, 19)],
+    ['Run by', run.generatedBy],
+    ['Classification', run.tierName],
+    ['Confidence interval', run.confidence],
+    ['Z score', run.Z],
+    ['Margin of error tolerable (e)', run.e],
+    ['Expected error rate (p)', run.p],
+    ['Population (N)', run.N],
+    ['Sample size (n)', run.n],
+    ['Random seed', run.seed],
+    ['Selection method', 'Simple random (seeded, reproducible)'],
+    ['Formula', 'n = N*Z^2*p*(1-p) / [ e^2*(N-1) + Z^2*p*(1-p) ]'],
+    [],
+    ['Sample file', run.sampleFile],
+    ['Local copy (full)', run.localPath],
+    ['Client copy', run.clientPath],
+    ['This report', run.reportPath],
+  ];
+  for (const r of kv) {
+    const row = info.addRow(r.map(cellVal));
+    if (r.length >= 2 && r[0]) row.getCell(1).font = { bold: true, color: { argb: 'FF374151' } };
+  }
+  info.getColumn(1).width = 30;
+  info.getColumn(2).width = 74;
+
+  // 2. Configuration — the sampling config rows for this entity, verbatim.
+  const cfg = wb.addWorksheet(fixedName('Configuration', used));
+  if (config && config.headers.length) {
+    const hdr = cfg.addRow(config.headers.map(h => String(h ?? '')));
+    for (let c = 1; c <= config.headers.length; c++) styleHeaderCell(hdr.getCell(c), false);
+    for (const r of config.rows) cfg.addRow(config.headers.map((_, i) => cellVal(r[i])));
+    cfg.views = [{ state: 'frozen', ySplit: 1 }];
+    setWidths(cfg, config.headers.map(String), config.rows);
+    if (!config.rows.length) cfg.addRow(['(no configuration rows matched this entity)']).getCell(1).font = { italic: true, color: { argb: NOTE_TXT } };
+  } else {
+    cfg.addRow(['Sampling configuration not loaded — seed Sampling/_status/sampling_config_<mock>.xlsx.']).getCell(1).font = { italic: true, color: { argb: NOTE_TXT } };
+  }
+
+  // 3. Source & Integrity — the merge provenance (traceability + coverage).
+  if (merged) {
+    const prov = wb.addWorksheet(fixedName('Source & Integrity', used));
+    prov.addRow(['Where this sample came from']).getCell(1).font = { bold: true, size: 13, color: { argb: HDR_TXT } };
+    prov.addRow([]);
+    const src: unknown[][] = [
+      ['Parent file', merged.parentName],
+      ['Parent entity token', merged.entityToken],
+      ['Linking Unique ID', merged.key],
+      ['Parent records (N)', merged.recordCount],
+      ['BU', merged.bu],
+    ];
+    for (const r of src) { const row = prov.addRow(r.map(cellVal)); row.getCell(1).font = { bold: true, color: { argb: 'FF374151' } }; }
+    prov.addRow([]);
+    const h = prov.addRow(['Child file', 'Join', 'Rows', 'Orphans', 'Parents covered', 'Parents total', 'Gaps', 'Integrity']);
+    for (let c = 1; c <= 8; c++) styleHeaderCell(h.getCell(c), false);
+    const integ = new Map(merged.integrity.map(i => [i.child, i]));
+    for (const ci of merged.children) {
+      const it = integ.get(ci.label);
+      const row = prov.addRow([ci.label, ci.strategy, it ? it.rows : ci.rowCount, it ? it.orphans : '', it ? it.parentsCovered : '', it ? it.parentsTotal : '', it ? it.gaps : '', it ? it.status : ''].map(cellVal));
+      if (it && it.status !== 'CLEAN') row.getCell(8).font = { bold: true, color: { argb: 'FFB91C1C' } };
+      else if (it) row.getCell(8).font = { color: { argb: 'FF059669' } };
+    }
+    if (merged.warnings.length) {
+      prov.addRow([]);
+      prov.addRow(['Flags']).getCell(1).font = { bold: true, color: { argb: 'FFB45309' } };
+      for (const w of merged.warnings) prov.addRow(['', w].map(cellVal));
+    }
+    [30, 12, 10, 10, 16, 14, 10, 12].forEach((w, i) => { prov.getColumn(i + 1).width = w; });
+  }
+
+  return wb;
+}
+
 // Serialize for upload to S3.
 export async function reportToBuffer(wb: ExcelJS.Workbook): Promise<ArrayBuffer> {
   return (await wb.xlsx.writeBuffer()) as unknown as ArrayBuffer;

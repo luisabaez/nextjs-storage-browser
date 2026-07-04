@@ -29,6 +29,7 @@ const FOLDERS = [
   "FailedAPInvoices",
   "Sampling",
   "Sampling/Generated",
+  "Sampling/Reports",
 ];
 
 export const storage = defineStorage({

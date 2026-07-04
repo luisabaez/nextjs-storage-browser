@@ -26,10 +26,11 @@ import {
   parsePriorSample,
   verifyReproduction,
   PriorSample,
+  parseWorkbookBuffer,
 } from './sampling';
 import { parseAgencyReport, AgencyReport, buildGroups } from './dashboard';
 import { RawFile, MergeResult, SamplingTarget, RelEdge, TaggedFile, groupRawFiles, mergeGroup, mergeByRelationships, mergeHierarchy, resultToFileData, downloadMaster } from './merge';
-import { buildPerFileReport, mergeResultToReportFiles, singleFileReport, reportToBuffer, downloadReport } from './excelReport';
+import { buildPerFileReport, mergeResultToReportFiles, singleFileReport, reportToBuffer, downloadReport, buildTrackingReport } from './excelReport';
 import { PlanRow, EntityGroup, groupEntityPlan, READINESS_LABEL } from './entityFiles';
 import { GeneratedEntity, ManifestFileRow, listGeneratedEntities, loadGeneratedTagged, readEntityManifests, readAllManifests, fetchSamplingTargets, fetchSamplingRelationships, safeName } from './generated';
 import { ValidationReport, EntityValidation, parseValidationReport, fileMatchesTable, buildCompositeKeyOverrides, entityEmailStatus, isSharedEntity, EMAIL_STATUS_LABEL, EMAIL_STATUS_ORDER, EmailStatus } from './validationReport';
@@ -39,6 +40,8 @@ Amplify.configure(config);
 const SAMPLING_FOLDER = 'Sampling/';
 const LOCAL_FOLDER = 'Sampling/Local/';
 const CLIENT_FOLDER = 'Sampling/Client/';
+const REPORTS_FOLDER = 'Sampling/Reports/';
+const SAMPLING_CONFIG_PATH = 'Sampling/_status/sampling_config_MOCK14.xlsx';
 const REPORT_PATH = 'Sampling/_status/agency_report.xlsx';
 const VALIDATION_REPORT_PATH = 'Sampling/_status/entity_validation_report.xlsx';
 const READINESS_PATH = 'Sampling/_status/entity_readiness.json';
@@ -974,6 +977,39 @@ function ValidationsPage() {
     if (e.dataTransfer.files?.length) addRawFiles(e.dataTransfer.files);
   };
 
+  // Sampling config (the example report's data) loaded once from S3; drives the
+  // Configuration sheet of each per-run tracking report.
+  const samplingConfigRef = useRef<{ headers: string[]; rows: unknown[][] } | null>(null);
+  const samplingConfigLoadingRef = useRef(false);
+  const ensureSamplingConfig = useCallback(async () => {
+    if (samplingConfigRef.current || samplingConfigLoadingRef.current) return;
+    samplingConfigLoadingRef.current = true;
+    try {
+      const { url } = await getUrl({ path: SAMPLING_CONFIG_PATH, options: { validateObjectExistence: true } });
+      const resp = await fetch(url.toString());
+      const fd = resp.ok ? parseWorkbookBuffer(await resp.arrayBuffer()) : null;
+      samplingConfigRef.current = fd ? { headers: fd.headers.map(String), rows: fd.rows } : { headers: [], rows: [] };
+    } catch {
+      samplingConfigRef.current = { headers: [], rows: [] };
+    } finally {
+      samplingConfigLoadingRef.current = false;
+    }
+  }, []);
+
+  // The config rows for one entity (matched on the config's Entity column).
+  const configForEntity = useCallback((entity: string): { headers: string[]; rows: unknown[][] } | null => {
+    const cfg = samplingConfigRef.current;
+    if (!cfg || !cfg.headers.length) return cfg;
+    const entIdx = cfg.headers.findIndex(h => String(h).trim().toLowerCase() === 'entity');
+    if (entIdx < 0) return { headers: cfg.headers, rows: cfg.rows };
+    const target = normStr(entity);
+    const rows = cfg.rows.filter(r => {
+      const ce = normStr(String(r[entIdx] ?? ''));
+      return !!ce && !!target && (ce === target || ce.includes(target) || target.includes(ce));
+    });
+    return { headers: cfg.headers, rows };
+  }, []);
+
   // Size, seed-select, build the per-file report, and write it to Local (full) +
   // Client (no Sizing). Shared by the single-entry Generate button and the
   // entity-wide batch run. `download` triggers a local copy (skipped for batches).
@@ -999,9 +1035,29 @@ function ValidationsPage() {
     const client = buildPerFileReport(files, meta, { includeSizing: false });
     await uploadData({ path: `${LOCAL_FOLDER}${base}.xlsx`, data: new Blob([await reportToBuffer(full)], { type: XLSX_CT }), options: { contentType: XLSX_CT } }).result;
     await uploadData({ path: `${CLIENT_FOLDER}${base}.xlsx`, data: new Blob([await reportToBuffer(client)], { type: XLSX_CT }), options: { contentType: XLSX_CT } }).result;
+
+    // Per-run tracking report → Sampling/Reports/ (one per run, timestamped) so a
+    // suspect record traces to who/when/seed, the config, and the source files.
+    try {
+      await ensureSamplingConfig();
+      const reportName = `${base} - Tracking Report ${stamp(now)}.xlsx`;
+      const trk = buildTrackingReport({
+        entity: p.entity, agency, mock: PLAN_MOCK,
+        tierName: tier.name, confidence: tier.confidence, Z: tier.Z, e: tier.e, p: tier.p,
+        N: p.N, n, seed, generatedAt: now.toISOString(), generatedBy: userEmail,
+        sampleFile: `${base}.xlsx`,
+        localPath: `${LOCAL_FOLDER}${base}.xlsx`,
+        clientPath: `${CLIENT_FOLDER}${base}.xlsx`,
+        reportPath: `${REPORTS_FOLDER}${reportName}`,
+      }, configForEntity(p.entity), p.merged);
+      await uploadData({ path: `${REPORTS_FOLDER}${reportName}`, data: new Blob([await reportToBuffer(trk)], { type: XLSX_CT }), options: { contentType: XLSX_CT } }).result;
+    } catch (err) {
+      console.error('tracking report failed', err); // never fail the sample over the report
+    }
+
     if (p.download) await downloadReport(full, `${base}.xlsx`);
     return { seed, n };
-  }, [userEmail]);
+  }, [userEmail, ensureSamplingConfig, configForEntity, PLAN_MOCK]);
 
   // ── Sampling: generate → upload to Local (full) + Client (no Sizing) + local download ──
   const generate = async (entry: FileEntry) => {
