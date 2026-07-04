@@ -708,7 +708,8 @@ def _rows_to_xlsx_bytes(headers, rows):
 
 
 def _write_gen_manifest(s3, bucket, mock, entity, subentity, db, actor,
-                        out_prefix, generated, missing, capped=None, bu_filter=None):
+                        out_prefix, generated, missing, capped=None, bu_filter=None,
+                        empties=None):
     """Audit trail for one generation run: which CV_ files were written, from
     which conversion table / source / BU, their row counts, and who ran it and
     when. Lets a suspect generated file be traced back to its source later.
@@ -727,6 +728,7 @@ def _write_gen_manifest(s3, bucket, mock, entity, subentity, db, actor,
         "total_rows": sum(g.get("rows", 0) for g in generated),
         "generated": generated,
         "missing": missing,
+        "empties": empties or [],
     }
     if bu_filter:
         manifest["bu_filter"] = bu_filter
@@ -741,6 +743,15 @@ def _write_gen_manifest(s3, bucket, mock, entity, subentity, db, actor,
     return key
 
 
+def _empty_entry(table, prefix, bu_filter, reason):
+    """One record for an expected conversion table that produced no file this run,
+    so the UI can distinguish empty / not-built from never-generated (both would
+    otherwise just look 'missing'). reason ∈ not_built | no_source_field |
+    empty_table | no_rows_for_bu."""
+    return {"table": table, "prefix": prefix, "source": "",
+            "bu": bu_filter or "", "rows": 0, "reason": reason}
+
+
 def generate_entity_files(conn_str, s3, bucket, mock, entity, subentity=None,
                           dry_run=False, source_db=None, actor="", bu_filter=None):
     # bu_filter: when set, only source[/BU] splits whose source OR BU value equals
@@ -750,7 +761,7 @@ def generate_entity_files(conn_str, s3, bucket, mock, entity, subentity=None,
     db = source_db or SOURCE_DATABASE
     plan_table = f"SETUP_CONVERSION_PLAN_{mock}"
     out_prefix = f"{GENERATED_FOLDER}{mock}/{_safe_name(entity)}/"
-    planned, generated, missing = [], [], []
+    planned, generated, missing, empties = [], [], [], []
 
     with pyodbc.connect(conn_str) as conn:
         cur = conn.cursor()
@@ -775,16 +786,18 @@ def generate_entity_files(conn_str, s3, bucket, mock, entity, subentity=None,
             bu_field = (bu_field or '').strip()
             if not table or not src_field:
                 continue
+            prefix = _table_prefix(table)
             _, cols = _object_meta(cur, db, table)
             if not cols:
                 missing.append(table)
+                empties.append(_empty_entry(table, prefix, bu_filter, "not_built"))
                 continue
             src_col = _resolve_col(cols, src_field)
             if not src_col:
                 missing.append(f"{table} (no source field '{src_field}')")
+                empties.append(_empty_entry(table, prefix, bu_filter, "no_source_field"))
                 continue
             bu_col = _resolve_col(cols, bu_field) if bu_field else None
-            prefix = _table_prefix(table)
             fq = f"[{db}].[dbo].[{table}]"
 
             # Distinct source[/BU] combinations (excluding the header-as-value quirk).
@@ -796,6 +809,7 @@ def generate_entity_files(conn_str, s3, bucket, mock, entity, subentity=None,
             combos = cur.fetchall()
 
             used_names = set()
+            produced = 0  # files this table yields for the current run / BU filter
             for combo in combos:
                 raw_source = combo[0]
                 if raw_source is None:
@@ -806,6 +820,7 @@ def generate_entity_files(conn_str, s3, bucket, mock, entity, subentity=None,
                 bu = str(raw_bu).strip() if has_bu else ''
                 if bu_filter and bu_filter not in (source, bu):
                     continue  # per-BU generation: skip splits for other agencies
+                produced += 1
                 # Match on the EXACT stored value (like the scripts) so blank or
                 # padded source / BU values are captured, not skipped or mismatched.
                 # A value that is blank after trimming is named "NA" in the file.
@@ -834,9 +849,9 @@ def generate_entity_files(conn_str, s3, bucket, mock, entity, subentity=None,
                     cap = f"stopped at {GEN_MAX_FILES} files"
                     mkey = _write_gen_manifest(s3, bucket, mock, entity, subentity, db,
                                                actor, out_prefix, generated, missing, capped=cap,
-                                               bu_filter=bu_filter)
+                                               bu_filter=bu_filter, empties=empties)
                     return {"ok": True, "entity": entity, "mock": mock, "folder": out_prefix,
-                            "generated": generated, "missing": missing,
+                            "generated": generated, "missing": missing, "empties": empties,
                             "capped": cap, "manifest_key": mkey}
 
                 cur.execute(f"SELECT * FROM {fq} {cond}", args)
@@ -847,11 +862,18 @@ def generate_entity_files(conn_str, s3, bucket, mock, entity, subentity=None,
                 generated.append({"file": fname, "key": out_prefix + fname, "table": table,
                                   "source": source, "bu": bu, "rows": len(rows)})
 
+            if produced == 0:  # table exists but yielded no file for this run/BU
+                empties.append(_empty_entry(
+                    table, prefix, bu_filter,
+                    "no_rows_for_bu" if bu_filter else "empty_table"))
+
     if dry_run:
         return {"ok": True, "entity": entity, "mock": mock, "dry_run": True,
                 "folder": out_prefix, "planned": planned, "missing": missing,
-                "plan_count": len(plans)}
+                "empties": empties, "plan_count": len(plans)}
     mkey = _write_gen_manifest(s3, bucket, mock, entity, subentity, db, actor,
-                               out_prefix, generated, missing, bu_filter=bu_filter)
+                               out_prefix, generated, missing, bu_filter=bu_filter,
+                               empties=empties)
     return {"ok": True, "entity": entity, "mock": mock, "folder": out_prefix,
-            "generated": generated, "missing": missing, "manifest_key": mkey}
+            "generated": generated, "missing": missing, "empties": empties,
+            "manifest_key": mkey}

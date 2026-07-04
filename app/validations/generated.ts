@@ -106,18 +106,27 @@ export async function readEntityManifests(mock: string, entity: string): Promise
 
 export interface ManifestFileRow extends ManifestEntry { entity: string; file: string; }
 
-// Read every generation manifest under a mock → flat rows (entity, file, table,
-// source, bu, rows). Used by the completeness check to see what's actually been
-// generated vs what the validation report expects. Newest run wins per file.
-export async function readAllManifests(mock: string): Promise<ManifestFileRow[]> {
+// An expected conversion table that produced NO file in a generation run, with
+// why (not_built | no_source_field | empty_table | no_rows_for_bu). Lets the UI
+// tell "table is empty / not built" apart from "never generated" — both of which
+// otherwise show as a missing file. bu is the BU the run targeted, or '' when the
+// table was empty for the whole entity.
+export interface EmptyRow { entity: string; table: string; bu: string; reason: string; }
+
+// Read every generation manifest under a mock → generated file rows (entity,
+// file, table, source, bu, rows) AND the empties (tables that yielded nothing).
+// Used by the completeness check + Sample by BU to see what's actually been
+// generated vs what the validation report expects. Newest run wins per key.
+export async function readAllManifests(mock: string): Promise<{ files: ManifestFileRow[]; empties: EmptyRow[] }> {
   const base = `${GENERATED_PREFIX}_manifests/${mock}/`;
   let res;
   try { res = await list({ path: base, options: { listAll: true } }); }
-  catch { return []; }
+  catch { return { files: [], empties: [] }; }
   const jsons = res.items
     .filter(it => it.path.endsWith('.json'))
     .sort((a, b) => (+new Date(a.lastModified || 0)) - (+new Date(b.lastModified || 0)));
-  const byKey = new Map<string, ManifestFileRow>(); // entity|file -> newest row
+  const byKey = new Map<string, ManifestFileRow>();  // entity|file -> newest row
+  const emptyByKey = new Map<string, EmptyRow>();     // entity|table|bu -> newest empty
   for (const it of jsons) {
     try {
       const { url } = await getUrl({ path: it.path, options: { expiresIn: 3600 } });
@@ -132,9 +141,16 @@ export async function readAllManifests(mock: string): Promise<ManifestFileRow[]>
           source: String(gf.source ?? ''), bu: String(gf.bu ?? ''), rows: gf.rows || 0,
         });
       }
+      for (const ef of (m.empties || [])) {
+        if (!ef.table) continue;
+        const bu = String(ef.bu ?? '');
+        emptyByKey.set(`${entity}|${ef.table}|${bu}`, {
+          entity, table: String(ef.table), bu, reason: String(ef.reason ?? 'empty_table'),
+        });
+      }
     } catch { /* skip */ }
   }
-  return Array.from(byKey.values());
+  return { files: Array.from(byKey.values()), empties: Array.from(emptyByKey.values()) };
 }
 
 // Download an entity's generated files, parse them, and tag each with its real

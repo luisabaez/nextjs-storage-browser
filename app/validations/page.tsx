@@ -32,7 +32,7 @@ import { parseAgencyReport, AgencyReport, buildGroups } from './dashboard';
 import { RawFile, MergeResult, SamplingTarget, RelEdge, TaggedFile, groupRawFiles, mergeGroup, mergeByRelationships, mergeHierarchy, resultToFileData, downloadMaster } from './merge';
 import { buildPerFileReport, mergeResultToReportFiles, singleFileReport, reportToBuffer, downloadReport, buildTrackingReport } from './excelReport';
 import { PlanRow, EntityGroup, groupEntityPlan, READINESS_LABEL } from './entityFiles';
-import { GeneratedEntity, ManifestFileRow, listGeneratedEntities, loadGeneratedTagged, readEntityManifests, readAllManifests, fetchSamplingTargets, fetchSamplingRelationships, safeName } from './generated';
+import { GeneratedEntity, ManifestFileRow, EmptyRow, listGeneratedEntities, loadGeneratedTagged, readEntityManifests, readAllManifests, fetchSamplingTargets, fetchSamplingRelationships, safeName } from './generated';
 import { ValidationReport, EntityValidation, parseValidationReport, fileMatchesTable, buildCompositeKeyOverrides, entityEmailStatus, isSharedEntity, EMAIL_STATUS_LABEL, EMAIL_STATUS_ORDER, EmailStatus } from './validationReport';
 
 Amplify.configure(config);
@@ -113,6 +113,24 @@ function buFilePresent(mans: ManifestFileRow[], entity: string, label: string, b
   }
   const p = presentFor(mans, label, bu);
   return { present: p.present, rows: p.rows, shared: false };
+}
+
+// Plain-English text for why an expected file yielded nothing (for the tooltip).
+const EMPTY_REASON_TEXT: Record<string, string> = {
+  not_built: 'table not built in Hacienda_ERP yet',
+  no_source_field: 'table has no matching source column',
+  empty_table: 'table is empty (0 rows)',
+  no_rows_for_bu: 'table has no rows for this BU',
+};
+
+// If an expected file isn't present, did a generation run process its table but
+// find it empty (or not built)? Returns the reason, else null — so the UI can
+// show a distinct "empty" state instead of a plain "missing". Matches the
+// empties by table + the BU the run targeted (bu === '' = empty entity-wide).
+function buFileEmptyReason(empties: EmptyRow[], entity: string, label: string, bu: string): string | null {
+  const shared = isSharedEntity(entity);
+  const hit = empties.find(m => fileMatchesTable(label, m.table) && (shared || m.bu === bu || m.bu === ''));
+  return hit ? hit.reason : null;
 }
 
 // Match a validation-report entity (by tab) to its column in the agency report
@@ -426,6 +444,7 @@ function ValidationsPage() {
   const compositeOverridesRef = useRef<Map<string, string[]> | null>(null);
   const valReportRef = useRef<ValidationReport | null>(null);
   const valManifestsRef = useRef<ManifestFileRow[] | null>(null);
+  const valEmptiesRef = useRef<EmptyRow[] | null>(null);
 
   // "N/M expected files present" for a generated entity, per the validation report.
   const completenessNote = useCallback((folder: string): string => {
@@ -518,6 +537,7 @@ function ValidationsPage() {
   const [valLoaded, setValLoaded] = useState(false);
   const [valExpanded, setValExpanded] = useState<Record<string, boolean>>({});
   const [valManifests, setValManifests] = useState<ManifestFileRow[]>([]);
+  const [valEmpties, setValEmpties] = useState<EmptyRow[]>([]);
   const valReportInputRef = useRef<HTMLInputElement>(null);
 
   // Editable delivery-status overlay (from the status emails), persisted to S3.
@@ -692,9 +712,10 @@ function ValidationsPage() {
       .map(e => e.tab);
   }, [buAssignments, report, valReport]);
 
-  const applyReport = useCallback((report: ValidationReport, manifests: ManifestFileRow[]) => {
+  const applyReport = useCallback((report: ValidationReport, manifests: ManifestFileRow[], empties: EmptyRow[]) => {
     setValReport(report); valReportRef.current = report;
     setValManifests(manifests); valManifestsRef.current = manifests;
+    setValEmpties(empties); valEmptiesRef.current = empties;
     compositeOverridesRef.current = buildCompositeKeyOverrides(report, samplingTargetsRef.current || []);
     loadReadiness(report);
     loadBuAssignments(report);
@@ -714,11 +735,11 @@ function ValidationsPage() {
     setValLoading(true); setValError('');
     try {
       await ensureTargets();
-      const manifests = await readAllManifests(PLAN_MOCK).catch(() => [] as ManifestFileRow[]);
+      const md = await readAllManifests(PLAN_MOCK).catch(() => ({ files: [] as ManifestFileRow[], empties: [] as EmptyRow[] }));
       const { url } = await getUrl({ path: VALIDATION_REPORT_PATH, options: { validateObjectExistence: true } });
       const resp = await fetch(url.toString());
       if (!resp.ok) throw new Error('fetch failed');
-      applyReport(parseValidationReport(await resp.arrayBuffer()), manifests);
+      applyReport(parseValidationReport(await resp.arrayBuffer()), md.files, md.empties);
     } catch {
       setValReport(null); // not uploaded yet — prompt to upload
     } finally {
@@ -732,8 +753,8 @@ function ValidationsPage() {
       const buf = await file.arrayBuffer();
       await uploadData({ path: VALIDATION_REPORT_PATH, data: new Blob([buf], { type: XLSX_CT }), options: { contentType: XLSX_CT } }).result;
       await ensureTargets();
-      const manifests = await readAllManifests(PLAN_MOCK).catch(() => [] as ManifestFileRow[]);
-      applyReport(parseValidationReport(buf), manifests);
+      const md = await readAllManifests(PLAN_MOCK).catch(() => ({ files: [] as ManifestFileRow[], empties: [] as EmptyRow[] }));
+      applyReport(parseValidationReport(buf), md.files, md.empties);
     } catch (e) {
       setValError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -1019,7 +1040,7 @@ function ValidationsPage() {
         if (!d.ok) console.error('per-BU gen failed', toGen[i], d.error);
       } catch (e) { console.error('per-BU gen error', toGen[i], e); }
     }
-    try { const mans = await readAllManifests(PLAN_MOCK); setValManifests(mans); valManifestsRef.current = mans; } catch { /* keep old */ }
+    try { const md = await readAllManifests(PLAN_MOCK); setValManifests(md.files); valManifestsRef.current = md.files; setValEmpties(md.empties); valEmptiesRef.current = md.empties; } catch { /* keep old */ }
     setBuPrep({ running: false, done: 0, total: 0, current: '' });
     await loadBUIntoSampling(bu, onlyEntity);
   }, [valReport, buEntitiesToGenerate, userEmail, loadBUIntoSampling]);
@@ -1178,7 +1199,7 @@ function ValidationsPage() {
           try { const d = await (await fetch(`${LAMBDA_URL}?action=generate_entity_files&mock=${PLAN_MOCK}&entity=${encodeURIComponent(t.plan)}&bu=${encodeURIComponent(bu)}${actor}`)).json(); if (!d.ok) console.error('gen failed', bu, t, d.error); }
           catch (e) { console.error('gen error', bu, t, e); }
         }
-        if (toGen.length) { try { const mans = await readAllManifests(PLAN_MOCK); setValManifests(mans); valManifestsRef.current = mans; } catch { /* keep old */ } }
+        if (toGen.length) { try { const md = await readAllManifests(PLAN_MOCK); setValManifests(md.files); valManifestsRef.current = md.files; setValEmpties(md.empties); valEmptiesRef.current = md.empties; } catch { /* keep old */ } }
         // 2) build + sample each master for this BU
         const built = await buildBUResults(bu, entityTab);
         for (const { e, results } of built) {
@@ -2160,6 +2181,7 @@ function ValidationsPage() {
 
           {!valLoading && valReport && (() => {
             const mans = valManifests;
+            const emp = valEmpties;
             const entTabs = assignedEntitiesFor(selectedBU);
             const shownTabs = sampleEntitySel ? entTabs.filter(t => t === sampleEntitySel) : entTabs;
             // The validation report carries expected counts only for its own
@@ -2177,13 +2199,15 @@ function ValidationsPage() {
                 const fileStates = included.map(lbl => {
                   const rf = e.files.find(f => f.label === lbl);
                   const c = rf ? rf.counts[selectedBU] : undefined;
-                  if (buHasVal && rf && (!c || c === 'N/A')) return { label: lbl, role: rf.role, na: true, present: false, rows: 0 };
+                  if (buHasVal && rf && (!c || c === 'N/A')) return { label: lbl, role: rf.role, na: true, present: false, rows: 0, emptyReason: null as string | null };
                   exp++;
                   const st = buFilePresent(mans, e.entity, lbl, selectedBU);
                   if (st.present) pres++;
-                  return { label: lbl, role: rf ? rf.role : 'child', na: false, present: st.present, rows: st.rows };
+                  const emptyReason = st.present ? null : buFileEmptyReason(emp, e.entity, lbl, selectedBU);
+                  return { label: lbl, role: rf ? rf.role : 'child', na: false, present: st.present, rows: st.rows, emptyReason };
                 });
-                return { e, status, note, exp, pres, ready: exp > 0 && pres === exp, fileStates };
+                const emptyN = fileStates.filter(f => !f.na && !f.present && f.emptyReason).length;
+                return { e, status, note, exp, pres, emptyN, ready: exp > 0 && pres === exp, fileStates };
               });
             const readyCount = rows.filter(r => r.ready).length;
             const anyReady = rows.some(r => r.ready);
@@ -2241,7 +2265,7 @@ function ValidationsPage() {
                   <thead>
                     <tr>
                       <th>Entity</th><th>Linking key</th><th>Email status</th>
-                      <th className="val-col-num">Files</th><th>Expected files (✓ present / ✗ missing)</th><th>Ready</th>
+                      <th className="val-col-num">Files</th><th>Expected files (✓ present / ⊘ empty / ✗ not generated)</th><th>Ready</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -2255,13 +2279,16 @@ function ValidationsPage() {
                         </td>
                         <td className="val-col-num">{r.pres}/{r.exp}</td>
                         <td className="val-bu-files">
-                          {r.fileStates.filter(f => !f.na).map((f, i) => (
-                            <span key={i} className={`val-bu-file ${f.present ? 'ok' : 'missing'}`} title={f.present ? `${f.rows.toLocaleString()} rows generated` : 'not generated for this BU'}>
-                              {f.present ? '✓' : '✗'} {f.label}
-                            </span>
-                          ))}
+                          {r.fileStates.filter(f => !f.na).map((f, i) => {
+                            const cls = f.present ? 'ok' : (f.emptyReason ? 'empty' : 'missing');
+                            const sym = f.present ? '✓' : (f.emptyReason ? '⊘' : '✗');
+                            const title = f.present ? `${f.rows.toLocaleString()} rows generated`
+                              : f.emptyReason ? `empty — ${EMPTY_REASON_TEXT[f.emptyReason] || f.emptyReason}`
+                              : 'not generated for this BU';
+                            return <span key={i} className={`val-bu-file ${cls}`} title={title}>{sym} {f.label}</span>;
+                          })}
                         </td>
-                        <td>{r.ready ? <span className="val-repstatus val-rep-clean">Ready</span> : <span className="val-repstatus val-rep-orphans">{r.exp - r.pres} missing</span>}</td>
+                        <td>{r.ready ? <span className="val-repstatus val-rep-clean">Ready</span> : <span className="val-repstatus val-rep-orphans" title={r.emptyN ? `${r.emptyN} empty (table has no rows) · ${r.exp - r.pres - r.emptyN} not generated` : undefined}>{r.exp - r.pres} missing</span>}</td>
                       </tr>
                     ))}
                   </tbody>
