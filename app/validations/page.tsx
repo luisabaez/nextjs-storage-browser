@@ -164,7 +164,11 @@ function resolveEntityTarget(report: ValidationReport | null, targets: SamplingT
   //    label ("PO FINAL") doesn't tokenize to the table name — must come before the
   //    loose any-file match, or a generic child ("LINES") mis-hits FIN_AR_INVOICES_LINES.
   const wants = [normStr(tab), normStr(e?.entity || '')].filter(Boolean);
-  const disp = (t: SamplingTarget) => normStr(String(t.display || t.table).replace(/^(SCM|FIN|HR|GL|AP|AR|PO)_/i, ''));
+  // Ignore the conversion-pipeline suffixes (_FINAL header view, _BY_BU split) so
+  // "Purchase Orders" resolves to SCM_PURCHASE_ORDERS_FINAL (its real root table)
+  // — the per-source 911/RETIRO roots keep their suffix and stay distinct.
+  const disp = (t: SamplingTarget) => normStr(String(t.display || t.table)
+    .replace(/^(SCM|FIN|HR|GL|AP|AR|PO)_/i, '').replace(/_FINAL(?=_|$)/i, '').replace(/_BY_BU/i, ''));
   const exact = targets.find(t => wants.includes(disp(t)));
   if (exact) return exact;
   // 3. any file label -> a target table (loose; e.g. Awards children for "Projects").
