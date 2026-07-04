@@ -30,6 +30,7 @@ export interface ChildDetail {
   rows: unknown[][];
   keyIdx: number;              // index of the link column in headers
   strategy: 'join' | 'aggregate';
+  sourceFile?: string;         // the CV_ conversion file this child came from (if known)
 }
 
 // Parent/child integrity + coverage for one child (automates the manual
@@ -208,6 +209,7 @@ export function mergeGroup(group: RawFile[]): MergeResult {
     rows: m.child.data.rows,
     keyIdx: m.kIdx,
     strategy: m.strategy,
+    sourceFile: m.child.name,
   }));
 
   const warnings: string[] = [];
@@ -370,6 +372,7 @@ interface RelChild {
   rows: unknown[][];
   parentLinkIdxs: number[]; // parent columns the child links on (1 = single, >1 = composite)
   childLinkIdxs: number[];  // matching child columns carrying the link value
+  sourceFile?: string;      // CV_ conversion file this child came from
 }
 
 // Composite link value: the link columns joined so a multi-part key (e.g.
@@ -394,7 +397,7 @@ function assembleMaster(
     keep: { h: string; i: number }[];
     map: Map<string, unknown[][]>;
     total: number; parentLinkIdxs: number[]; childLinkIdxs: number[];
-    headers: string[]; rows: unknown[][];
+    headers: string[]; rows: unknown[][]; sourceFile?: string;
   }
   const cms: CM[] = relChildren.map(c => {
     const dropSet = new Set([...c.childLinkIdxs.map(i => lc(c.headers[i])), ...CONTEXT_COLS]);
@@ -411,7 +414,7 @@ function assembleMaster(
     return {
       label: c.label, strategy: (maxPer <= 1 ? 'join' : 'aggregate') as 'join' | 'aggregate',
       keep, map, total, parentLinkIdxs: c.parentLinkIdxs, childLinkIdxs: c.childLinkIdxs,
-      headers: c.headers, rows: c.rows,
+      headers: c.headers, rows: c.rows, sourceFile: c.sourceFile,
     };
   });
 
@@ -464,7 +467,7 @@ function assembleMaster(
 
   const childrenData: ChildDetail[] = cms.map(m => ({
     label: m.label, headers: m.headers.map(String), rows: m.rows,
-    keyIdx: m.childLinkIdxs[0], strategy: m.strategy,
+    keyIdx: m.childLinkIdxs[0], strategy: m.strategy, sourceFile: m.sourceFile,
   }));
 
   const warnings = [...extraWarnings];
@@ -574,6 +577,7 @@ export function mergeByRelationships(
         label: childLabel(rootFile.table!, f.table!),
         headers: childHeaders, rows: f.data.rows,
         parentLinkIdxs: pIdxs, childLinkIdxs: cIdxs,
+        sourceFile: f.name,
       });
       parentLinkCount.set(pIdxs[0], (parentLinkCount.get(pIdxs[0]) || 0) + 1);
     }
@@ -610,6 +614,7 @@ interface HChild {
   rows: unknown[][];
   rootIdxPerRow: number[][]; // for each child row, the root row-indices it belongs to
   dropCols: number[];        // child link columns (excluded from the merged output)
+  sourceFile?: string;       // CV_ conversion file this child came from
 }
 
 function assembleFromRootIdx(
@@ -675,7 +680,7 @@ function assembleFromRootIdx(
     const src = children[ci];
     const hdr = [`Belongs To (${keyName})`, ...m.headers.map(String)];
     const rws = m.rows.map((r, i) => [ (src.rootIdxPerRow[i] || []).map(j => rootKeyVal(j)).join(', '), ...r ]);
-    return { label: m.label, headers: hdr, rows: rws, keyIdx: 0, strategy: m.strategy };
+    return { label: m.label, headers: hdr, rows: rws, keyIdx: 0, strategy: m.strategy, sourceFile: src.sourceFile };
   });
 
   const warnings = [...extraWarnings];
@@ -791,6 +796,7 @@ export function mergeHierarchy(
         label: childLabel(rootFile.table!, t.file.table!),
         headers: t.file.data.headers.map(String), rows: t.file.data.rows,
         rootIdxPerRow: rootIdxByTable.get(cN)!, dropCols: t.dropCols,
+        sourceFile: t.file.name,
       };
     });
     results.push(assembleFromRootIdx(rootFile.name, src === '(none)' ? '' : src, rootLabel, rootHeaders, rootFile.data.rows, keyCols, hchildren, warnings));

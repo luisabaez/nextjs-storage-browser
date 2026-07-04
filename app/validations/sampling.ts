@@ -107,7 +107,12 @@ export function parseFilename(filename: string): ParsedName {
   const base = filename.replace(/\.[^.]+$/, '');
   const tokens = base.split(/[_\-\s]+/).filter(Boolean);
   const numeric = tokens.filter(t => /^\d+$/.test(t));
-  const agency = numeric.length ? numeric[numeric.length - 1] : '';
+  // Prefer the code right after a "BU" token — sample files end with a numeric
+  // timestamp ("… BU 015 - Sample Converted Data 20260704-153000"), so plain
+  // last-numeric would grab the timestamp instead of the BU.
+  const buTok = tokens.findIndex(t => t.toUpperCase() === 'BU');
+  const agency = (buTok >= 0 && /^\d+$/.test(tokens[buTok + 1] || '')) ? tokens[buTok + 1]
+    : (numeric.length ? numeric[numeric.length - 1] : '');
   const words = tokens.filter(t => !/^\d+$/.test(t) && norm(t) !== 'CONSOLIDATED');
   const entity =
     matchEntity(words.join(' ')) ||
@@ -234,8 +239,12 @@ function parseSizingSheet(ws: XLSX.WorkSheet): PriorSizing {
 export function parsePriorSample(buf: ArrayBuffer): PriorSample {
   const wb = XLSX.read(buf, { type: 'array', cellDates: true });
   const popName = findSheet(wb, 'Population');
-  const sampName = findSheet(wb, 'Sample');
   const sizeName = findSheet(wb, 'Sizing');
+  // The parent Sample sheet is written first. Older reports named it "<label>
+  // Sample"; newer ones name it just "<label>" — so fall back to the first sheet
+  // that isn't a Population / Sizing / Relationships / Integrity sheet.
+  const internalSheet = (s: string) => { const l = s.toLowerCase(); return l.includes('population') || l.includes('sizing') || l.includes('relationship') || l.includes('integrity'); };
+  const sampName = findSheet(wb, 'Sample') || wb.SheetNames.find(s => !internalSheet(s)) || null;
   return {
     sheetNames: wb.SheetNames.slice(),
     population: popName ? sheetToFileData(wb.Sheets[popName], popName) : null,
@@ -244,9 +253,10 @@ export function parsePriorSample(buf: ArrayBuffer): PriorSample {
   };
 }
 
-// Compare a reproduced selection against the original Sample sheet, positionally
-// (both are written in ascending index order). Returns how many of the original
-// sampled rows the re-draw reproduces exactly.
+// Compare a reproduced selection against the original Sample sheet. The Sample
+// sheet is written sorted by the linking key while a re-draw yields rows in
+// population order, so compare as a multiset (order-independent) — how many of
+// the original sampled rows the re-draw reproduces exactly.
 export function verifyReproduction(
   population: FileData,
   sample: FileData,
@@ -254,10 +264,13 @@ export function verifyReproduction(
 ): { matched: number; total: number; identical: boolean } {
   const serial = (row: unknown[] | undefined) => JSON.stringify((row ?? []).map(c => c ?? null));
   const total = sample.rows.length;
-  const count = Math.min(indices.length, total);
+  const drawn = new Map<string, number>();
+  for (const i of indices) { const s = serial(population.rows[i]); drawn.set(s, (drawn.get(s) || 0) + 1); }
   let matched = 0;
-  for (let k = 0; k < count; k++) {
-    if (serial(population.rows[indices[k]]) === serial(sample.rows[k])) matched++;
+  for (const row of sample.rows) {
+    const s = serial(row);
+    const c = drawn.get(s) || 0;
+    if (c > 0) { matched++; drawn.set(s, c - 1); }
   }
   return { matched, total, identical: total > 0 && indices.length === total && matched === total };
 }

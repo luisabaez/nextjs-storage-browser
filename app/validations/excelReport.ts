@@ -38,7 +38,9 @@ export interface ReportFile {
 const sanitize = (s: string) => String(s || '').replace(/[\\/?*[\]:]/g, ' ').replace(/\s+/g, ' ').trim();
 
 function dataSheetName(label: string, kind: 'Sample' | 'Population', used: Set<string>): string {
-  const suffix = ` ${kind}`;
+  // Sample sheets are just the file label (e.g. "Awards"); Population sheets keep
+  // the " Population" suffix so the two are still distinguishable.
+  const suffix = kind === 'Population' ? ' Population' : '';
   let lab = sanitize(label) || 'File';
   if (lab.length + suffix.length > 31) lab = lab.slice(0, 31 - suffix.length).trim();
   let name = lab + suffix;
@@ -123,18 +125,20 @@ function relationshipsSheet(wb: ExcelJS.Workbook, files: ReportFile[], meta: Sam
   note.alignment = { wrapText: true };
   ws.addRow([]);
 
-  const head = ws.addRow(['File', 'Role', 'Population rows', 'Sampled rows', 'Linking Unique ID', 'Source table / file']);
+  const head = ws.addRow(['File', 'Role', 'Population rows', 'Sampled rows', 'Linking Unique ID', 'Conversion File']);
   for (let c = 1; c <= 6; c++) styleHeaderCell(head.getCell(c), c === 5);
   const headRowNum = head.number;
 
   for (const f of files) {
     const role = f.role === 'parent' ? 'Parent (sampled)' : `Child (${f.strategy === 'aggregate' ? 'many per parent' : 'one per parent'})`;
     const link = f.role === 'parent' ? `${f.linkName}  (key)` : f.linkName;
-    const row = ws.addRow([f.label, role, f.population.length, f.sample.length, link, f.table]);
+    // #8: the conversion file to check against — the CV_ file, blank if unknown.
+    const cv = /^CV/i.test(String(f.table || '')) ? f.table : '';
+    const row = ws.addRow([f.label, role, f.population.length, f.sample.length, link, cv]);
     highlightLinkCell(row.getCell(5));
   }
 
-  [22, 22, 15, 13, 26, 34].forEach((w, i) => { ws.getColumn(i + 1).width = w; });
+  [22, 22, 15, 13, 26, 46].forEach((w, i) => { ws.getColumn(i + 1).width = w; });
   ws.views = [{ state: 'frozen', ySplit: headRowNum }];
 }
 
@@ -204,11 +208,11 @@ export function buildPerFileReport(
   wb.creator = 'Validations';
   const used = new Set<string>();
 
-  if (files.some(f => f.role === 'child')) relationshipsSheet(wb, files, meta, used);
   for (const f of files) writeDataSheet(wb, f, 'Sample', used);
   for (const f of files) writeDataSheet(wb, f, 'Population', used);
   if (opts.includeSizing) sizingSheet(wb, meta, files, used);
   if (opts.includeSizing && opts.integrity?.length) integritySheet(wb, opts.integrity, meta, used);
+  if (files.some(f => f.role === 'child')) relationshipsSheet(wb, files, meta, used); // #2: Relationships last
 
   return wb;
 }
@@ -217,6 +221,13 @@ export function buildPerFileReport(
 // master's parent columns (aligned with the sampling indices so a re-draw still
 // reproduces); each child's Sample is the rows whose link value is in the sampled
 // parent set.
+// #3: sampled rows are written in ascending order of the linking Unique ID, the
+// same order in every sheet, so row N is the same record across files (natural
+// order — "2" before "10", and alphabetical for names). Population keeps its
+// original order so a seeded re-draw still reproduces by index.
+const cmpByKey = (idx: number) => (a: unknown[], b: unknown[]) =>
+  (idx < 0 ? 0 : String(a?.[idx] ?? '').trim().localeCompare(String(b?.[idx] ?? '').trim(), undefined, { numeric: true, sensitivity: 'base' }));
+
 export function mergeResultToReportFiles(r: MergeResult, selectedIndices: number[], parentLabel?: string): ReportFile[] {
   const parentHeaders = r.parentHeaders.map(h => String(h ?? ''));
   const P = parentHeaders.length;
@@ -224,6 +235,7 @@ export function mergeResultToReportFiles(r: MergeResult, selectedIndices: number
   const keyIdx = parentHeaders.findIndex(h => h.trim().toLowerCase() === String(r.key).trim().toLowerCase());
 
   const sampleParent = selectedIndices.map(i => popParent[i]).filter((x): x is unknown[] => Array.isArray(x));
+  if (keyIdx >= 0) sampleParent.sort(cmpByKey(keyIdx));
   const selKeys = new Set<string>();
   if (keyIdx >= 0) {
     for (const i of selectedIndices) {
@@ -240,7 +252,7 @@ export function mergeResultToReportFiles(r: MergeResult, selectedIndices: number
 
   const files: ReportFile[] = [{
     label: parentLabel || r.entityToken || 'Master',
-    table: r.parentName || r.entityToken,
+    table: r.parentName || '',           // #8: the parent CV_ conversion file
     headers: parentHeaders,
     population: popParent,
     sample: sampleParent,
@@ -252,9 +264,10 @@ export function mergeResultToReportFiles(r: MergeResult, selectedIndices: number
   for (const c of r.childrenData) {
     const headers = c.headers.map(h => String(h ?? ''));
     const sample = selKeys.size ? c.rows.filter(row => matches(row[c.keyIdx])) : [];
+    if (c.keyIdx >= 0) sample.sort(cmpByKey(c.keyIdx));
     files.push({
       label: c.label,
-      table: c.label,
+      table: c.sourceFile || '',         // #8: the child CV_ conversion file (blank if unknown)
       headers,
       population: c.rows,
       sample,

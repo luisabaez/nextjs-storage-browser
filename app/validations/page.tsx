@@ -1091,8 +1091,11 @@ function ValidationsPage() {
     const selectedIndices = selectSample(p.N, n, seed);
     const now = new Date();
     const agency = p.agency || 'NA';
-    // Client naming convention: "<Parent Entity> BU <3-digit BU>-Sample Converted Data.xlsx"
-    const base = `${parentEntityLabel(p.entity)} BU ${bu3(agency)}-Sample Converted Data`;
+    const st = stamp(now);
+    // Client naming convention: "<Parent Entity> BU <3-digit BU>-Sample Converted Data <timestamp>.xlsx".
+    // #7: the trailing timestamp makes every run its own file (no overwrite) and
+    // matches it to its tracking report, which shares the same stamp via `base`.
+    const base = `${parentEntityLabel(p.entity)} BU ${bu3(agency)}-Sample Converted Data ${st}`;
     const meta = { entity: p.entity, agency, tier, N: p.N, n, seed, generatedAt: now.toISOString(), generatedBy: userEmail, selectedIndices };
     // Each source file gets its own Sample + Population sheet, linked by the shared
     // Unique ID (highlighted); a merged entry contributes its parent + every child.
@@ -1124,7 +1127,7 @@ function ValidationsPage() {
     // suspect record traces to who/when/seed, the config, and the source files.
     try {
       await ensureSamplingConfig();
-      const reportName = `${base} - Tracking Report ${stamp(now)}.xlsx`;
+      const reportName = `${base} - Tracking Report.xlsx`; // base already carries the run stamp (#7)
       const trk = buildTrackingReport({
         entity: p.entity, agency, mock: PLAN_MOCK,
         tierName: tier.name, confidence: tier.confidence, Z: tier.Z, e: tier.e, p: tier.p,
