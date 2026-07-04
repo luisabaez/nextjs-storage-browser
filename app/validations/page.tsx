@@ -61,6 +61,7 @@ interface FileEntry {
   entity: string;
   agency: string;
   tab?: string;   // validation-report tab (for confidence + sampled-run tracking)
+  sampleBu?: string; // the BU this was loaded for (dashboard check-off); = agency except for HCM (agency is the source)
   N: number;
   loading: boolean;
   error: string;
@@ -438,7 +439,7 @@ function ValidationsPage() {
 
   // ── Merge raw parent + child files → master, added straight to the sampling list ──
   // Add one sampling entry per merged master.
-  const addMergeResults = useCallback((results: MergeResult[], tab?: string) => {
+  const addMergeResults = useCallback((results: MergeResult[], tab?: string, sampleBu?: string) => {
     results.forEach((result, i) => {
       const id = `m-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 8)}`;
       setEntries(prev => [...prev, {
@@ -447,6 +448,7 @@ function ValidationsPage() {
         entity: matchEntity(result.entityToken) || '',
         agency: result.bu,
         tab,
+        sampleBu: sampleBu ?? result.bu, // dashboard tracks the loading BU; for HCM that differs from agency (source)
         N: result.recordCount,
         loading: false, error: '', data: resultToFileData(result),
         genStatus: 'idle', genError: '', generated: null, merged: result,
@@ -1085,7 +1087,7 @@ function ValidationsPage() {
     try {
       const built = await buildBUResults(bu, onlyEntity);
       let loadedEntities = 0, masters = 0;
-      for (const { e, results } of built) { addMergeResults(results, e.tab); loadedEntities++; masters += results.length; }
+      for (const { e, results } of built) { addMergeResults(results, e.tab, bu); loadedEntities++; masters += results.length; }
       setActiveTab('sampling');
       setGenNote(`BU ${bu}${onlyEntity ? ' · ' + onlyEntity : ''}: loaded ${loadedEntities} entit${loadedEntities !== 1 ? 'ies' : 'y'} → ${masters} master${masters !== 1 ? 's' : ''} into the sampling list.`);
     } catch (e) {
@@ -1178,7 +1180,7 @@ function ValidationsPage() {
   // Client (no Sizing). Shared by the single-entry Generate button and the
   // entity-wide batch run. `download` triggers a local copy (skipped for batches).
   const sampleAndWriteResult = useCallback(async (
-    p: { entity: string; agency: string; tab?: string; N: number; data: FileData; merged?: MergeResult; download: boolean }
+    p: { entity: string; agency: string; tab?: string; bu?: string; N: number; data: FileData; merged?: MergeResult; download: boolean }
   ): Promise<{ seed: number; n: number } | null> => {
     const tier = confidenceTierFor(p.agency, p.tab, p.entity); // #5: per-BU confidence override, else default
     if (!tier || !p.N) return null;
@@ -1240,7 +1242,7 @@ function ValidationsPage() {
     }
 
     if (p.download) await downloadReport(full, `${base}.xlsx`);
-    if (p.tab) await recordSampled(agency, p.tab); // #6: mark this BU+entity sampled
+    if (p.tab) await recordSampled(p.bu ?? agency, p.tab); // #6: check off the loading BU (= agency except HCM)
     return { seed, n };
   }, [userEmail, ensureSamplingConfig, configForEntity, PLAN_MOCK, confidenceTierFor, recordSampled]);
 
@@ -1249,7 +1251,7 @@ function ValidationsPage() {
     if (!entry.data || !entry.entity) return;
     patch(entry.id, { genStatus: 'working', genError: '' });
     try {
-      const r = await sampleAndWriteResult({ entity: entry.entity, agency: entry.agency || 'NA', tab: entry.tab, N: entry.N, data: entry.data, merged: entry.merged || undefined, download: true });
+      const r = await sampleAndWriteResult({ entity: entry.entity, agency: entry.agency || 'NA', tab: entry.tab, bu: entry.sampleBu ?? entry.agency, N: entry.N, data: entry.data, merged: entry.merged || undefined, download: true });
       if (!r) { patch(entry.id, { genStatus: 'error', genError: 'No sampling classification for this entity.' }); return; }
       patch(entry.id, { genStatus: 'done', generated: { seed: r.seed, n: r.n, at: new Date().toLocaleString() } });
     } catch (err) {
@@ -1304,7 +1306,7 @@ function ValidationsPage() {
         for (const { e, results } of built) {
           for (const result of results) {
             const entity = matchEntity(result.entityToken) || e.entity;
-            const r = await sampleAndWriteResult({ entity, agency: result.bu || bu, tab: e.tab, N: result.recordCount, data: resultToFileData(result), merged: result, download: false });
+            const r = await sampleAndWriteResult({ entity, agency: result.bu || bu, tab: e.tab, bu, N: result.recordCount, data: resultToFileData(result), merged: result, download: false });
             if (r) reports++; else skipped.push(`${bu}/${entity}`);
           }
         }
