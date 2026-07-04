@@ -1301,7 +1301,7 @@ function ValidationsPage() {
     setEntityPreview(p => ({ ...p, open: false })); // preview (if open) served as the confirmation
     setEntityRun({ running: true, done: 0, total: bus.length, current: '', note: '' });
     const actor = userEmail ? `&actor=${encodeURIComponent(userEmail)}` : '';
-    let reports = 0; const skipped: string[] = [];
+    let reports = 0; const skipped: string[] = []; const tooLarge: string[] = [];
     for (let i = 0; i < bus.length; i++) {
       const bu = bus[i];
       setEntityRun({ running: true, done: i, total: bus.length, current: bu, note: '' });
@@ -1318,13 +1318,17 @@ function ValidationsPage() {
         for (const { e, results } of built) {
           for (const result of results) {
             const entity = matchEntity(result.entityToken) || e.entity;
+            // Skip masters too large to build client-side — a huge person population
+            // hangs the in-browser workbook build. Flagged; the CV_ files hold the data.
+            const childRows = result.childrenData.reduce((s, c) => s + c.rows.length, 0);
+            if (result.recordCount > 10000 || result.recordCount + childRows > 60000) { tooLarge.push(`${bu} (${result.recordCount.toLocaleString()})`); continue; }
             const r = await sampleAndWriteResult({ entity, agency: result.bu || bu, tab: e.tab, bu, N: result.recordCount, data: resultToFileData(result), merged: result, download: false });
             if (r) reports++; else skipped.push(`${bu}/${entity}`);
           }
         }
       } catch (e) { console.error('run entity across BU failed', bu, e); }
     }
-    setEntityRun({ running: false, done: bus.length, total: bus.length, current: '', note: `Done — ${reports} report${reports !== 1 ? 's' : ''} across ${bus.length} BU${bus.length !== 1 ? 's' : ''}${alreadyDone ? ` (${alreadyDone} already sampled, skipped)` : ''}${stillLeft ? ` · ${stillLeft} still remaining — reload, then Preview + run again to continue` : ` · all attached BUs complete`}${skipped.length ? ` · ${skipped.length} no-data` : ''}.` });
+    setEntityRun({ running: false, done: bus.length, total: bus.length, current: '', note: `Done — ${reports} sampled across ${bus.length} BU${bus.length !== 1 ? 's' : ''}${alreadyDone ? ` (+${alreadyDone} earlier)` : ''}${tooLarge.length ? ` · ${tooLarge.length} too large to build here: ${tooLarge.join(', ')}` : ''}${stillLeft ? ` · ${stillLeft} more remaining — reload + run again` : ''}${skipped.length ? ` · ${skipped.length} no-data` : ''}.` });
   }, [valReport, report, attachedBUsForEntity, buEntitiesToGenerate, buildBUResults, sampleAndWriteResult, userEmail]);
 
   // Preview the per-BU sample sizes for an entity before running. N is estimated
