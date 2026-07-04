@@ -1321,7 +1321,7 @@ function ValidationsPage() {
             // Skip masters too large to build client-side — a huge person population
             // hangs the in-browser workbook build. Flagged; the CV_ files hold the data.
             const childRows = result.childrenData.reduce((s, c) => s + c.rows.length, 0);
-            if (result.recordCount > 10000 || result.recordCount + childRows > 60000) { tooLarge.push(`${bu} (${result.recordCount.toLocaleString()})`); continue; }
+            if (result.recordCount > 3000 || result.recordCount + childRows > 100000) { tooLarge.push(`${bu} (${result.recordCount.toLocaleString()})`); continue; }
             const r = await sampleAndWriteResult({ entity, agency: result.bu || bu, tab: e.tab, bu, N: result.recordCount, data: resultToFileData(result), merged: result, download: false });
             if (r) reports++; else skipped.push(`${bu}/${entity}`);
           }
