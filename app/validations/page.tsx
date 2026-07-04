@@ -14,6 +14,7 @@ import {
   ENTITY_NAMES,
   ENTITY_CLASSIFICATION,
   TIERS,
+  Tier,
   tierForEntity,
   computeSampleSize,
   parseFilename,
@@ -46,6 +47,8 @@ const VALIDATION_REPORT_PATH = 'Sampling/_status/entity_validation_report.xlsx';
 const READINESS_PATH = 'Sampling/_status/entity_readiness.json';
 const BU_ASSIGN_PATH = 'Sampling/_status/bu_assignments.json';
 const LINK_KEYS_PATH = 'Sampling/_status/entity_link_keys.json';
+const ENTITY_CONFIDENCE_PATH = 'Sampling/_status/entity_confidence.json';
+const SAMPLED_RUNS_PATH = 'Sampling/_status/sampled_runs.json';
 const XLSX_CT = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 const LAMBDA_URL = 'https://5ahxjcxhrcopng5hjgc2n6utxq0rwcmm.lambda-url.us-east-1.on.aws/';
 
@@ -57,6 +60,7 @@ interface FileEntry {
   fileName: string;
   entity: string;
   agency: string;
+  tab?: string;   // validation-report tab (for confidence + sampled-run tracking)
   N: number;
   loading: boolean;
   error: string;
@@ -384,7 +388,7 @@ function ValidationsPage() {
 
   // ── Merge raw parent + child files → master, added straight to the sampling list ──
   // Add one sampling entry per merged master.
-  const addMergeResults = useCallback((results: MergeResult[]) => {
+  const addMergeResults = useCallback((results: MergeResult[], tab?: string) => {
     results.forEach((result, i) => {
       const id = `m-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 8)}`;
       setEntries(prev => [...prev, {
@@ -392,6 +396,7 @@ function ValidationsPage() {
         fileName: `Consolidated_${result.entityToken}_${result.bu || 'NA'}`,
         entity: matchEntity(result.entityToken) || '',
         agency: result.bu,
+        tab,
         N: result.recordCount,
         loading: false, error: '', data: resultToFileData(result),
         genStatus: 'idle', genError: '', generated: null, merged: result,
@@ -612,6 +617,48 @@ function ValidationsPage() {
     } catch (e) { console.error('save link keys failed', e); }
   }, []);
 
+  // #5: per-BU, per-entity confidence override (tier name). bu -> tab -> tierName.
+  const [entityConfidence, setEntityConfidence] = useState<Record<string, Record<string, string>>>({});
+  const entityConfidenceRef = useRef<Record<string, Record<string, string>>>({});
+  const loadEntityConfidence = useCallback(async () => {
+    try {
+      const { url } = await getUrl({ path: ENTITY_CONFIDENCE_PATH, options: { validateObjectExistence: true } });
+      const resp = await fetch(url.toString());
+      if (resp.ok) { const j = await resp.json(); if (j && typeof j === 'object') { setEntityConfidence(j); entityConfidenceRef.current = j; } }
+    } catch { /* not saved yet */ }
+  }, []);
+  const saveEntityConfidence = useCallback(async (next: Record<string, Record<string, string>>) => {
+    setEntityConfidence(next); entityConfidenceRef.current = next;
+    try { await uploadData({ path: ENTITY_CONFIDENCE_PATH, data: new Blob([JSON.stringify(next)], { type: 'application/json' }), options: { contentType: 'application/json' } }).result; }
+    catch (e) { console.error('save confidence failed', e); }
+  }, []);
+  // Resolve the tier for a BU+entity: the override if set, else the entity default.
+  const confidenceTierFor = useCallback((bu: string, tab: string | undefined, entity: string): Tier | undefined => {
+    const name = (tab && entityConfidenceRef.current[bu]?.[tab]) || '';
+    return (name && TIERS[name]) || tierForEntity(entity) || undefined;
+  }, []);
+
+  // #6: which (BU, entity tab) have been sampled. bu -> [tab, ...]. Persisted.
+  const [sampledRuns, setSampledRuns] = useState<Record<string, string[]>>({});
+  const sampledRunsRef = useRef<Record<string, string[]>>({});
+  const loadSampledRuns = useCallback(async () => {
+    try {
+      const { url } = await getUrl({ path: SAMPLED_RUNS_PATH, options: { validateObjectExistence: true } });
+      const resp = await fetch(url.toString());
+      if (resp.ok) { const j = await resp.json(); if (j && typeof j === 'object') { setSampledRuns(j); sampledRunsRef.current = j; } }
+    } catch { /* not saved yet */ }
+  }, []);
+  const recordSampled = useCallback(async (bu: string, tab: string) => {
+    if (!bu || !tab) return;
+    const cur = sampledRunsRef.current;
+    const list = cur[bu] || [];
+    if (list.includes(tab)) return;
+    const next = { ...cur, [bu]: [...list, tab] };
+    setSampledRuns(next); sampledRunsRef.current = next;
+    try { await uploadData({ path: SAMPLED_RUNS_PATH, data: new Blob([JSON.stringify(next)], { type: 'application/json' }), options: { contentType: 'application/json' } }).result; }
+    catch (e) { console.error('save sampled runs failed', e); }
+  }, []);
+
   // Fetch (and cache) a table's column names from SQL for the link picker.
   const fetchTableColumns = useCallback(async (table: string) => {
     if (!table || tableColsRef.current[table]) return;
@@ -652,7 +699,9 @@ function ValidationsPage() {
     loadReadiness(report);
     loadBuAssignments(report);
     loadLinkKeys();
-  }, [loadReadiness, loadBuAssignments, loadLinkKeys]);
+    loadEntityConfidence();
+    loadSampledRuns();
+  }, [loadReadiness, loadBuAssignments, loadLinkKeys, loadEntityConfidence, loadSampledRuns]);
 
   const ensureTargets = useCallback(async () => {
     if (!samplingTargetsRef.current) {
@@ -693,7 +742,7 @@ function ValidationsPage() {
   }, [applyReport, ensureTargets, PLAN_MOCK]);
 
   useEffect(() => {
-    if ((activeTab === 'sampling' || activeTab === 'completeness' || activeTab === 'bybu' || activeTab === 'bufiles') && !valLoaded) loadValReport();
+    if ((activeTab === 'sampling' || activeTab === 'dashboard' || activeTab === 'completeness' || activeTab === 'bybu' || activeTab === 'bufiles') && !valLoaded) loadValReport();
   }, [activeTab, valLoaded, loadValReport]);
   // BU Files + Sample by BU need the conversion plan (entity names, tables).
   useEffect(() => {
@@ -927,7 +976,7 @@ function ValidationsPage() {
     try {
       const built = await buildBUResults(bu, onlyEntity);
       let loadedEntities = 0, masters = 0;
-      for (const { results } of built) { addMergeResults(results); loadedEntities++; masters += results.length; }
+      for (const { e, results } of built) { addMergeResults(results, e.tab); loadedEntities++; masters += results.length; }
       setActiveTab('sampling');
       setGenNote(`BU ${bu}${onlyEntity ? ' · ' + onlyEntity : ''}: loaded ${loadedEntities} entit${loadedEntities !== 1 ? 'ies' : 'y'} → ${masters} master${masters !== 1 ? 's' : ''} into the sampling list.`);
     } catch (e) {
@@ -1011,9 +1060,9 @@ function ValidationsPage() {
   // Client (no Sizing). Shared by the single-entry Generate button and the
   // entity-wide batch run. `download` triggers a local copy (skipped for batches).
   const sampleAndWriteResult = useCallback(async (
-    p: { entity: string; agency: string; N: number; data: FileData; merged?: MergeResult; download: boolean }
+    p: { entity: string; agency: string; tab?: string; N: number; data: FileData; merged?: MergeResult; download: boolean }
   ): Promise<{ seed: number; n: number } | null> => {
-    const tier = tierForEntity(p.entity);
+    const tier = confidenceTierFor(p.agency, p.tab, p.entity); // #5: per-BU confidence override, else default
     if (!tier || !p.N) return null;
     const n = computeSampleSize(p.N, tier);
     const seed = Math.floor(Math.random() * 2 ** 32) >>> 0;
@@ -1053,15 +1102,16 @@ function ValidationsPage() {
     }
 
     if (p.download) await downloadReport(full, `${base}.xlsx`);
+    if (p.tab) await recordSampled(agency, p.tab); // #6: mark this BU+entity sampled
     return { seed, n };
-  }, [userEmail, ensureSamplingConfig, configForEntity, PLAN_MOCK]);
+  }, [userEmail, ensureSamplingConfig, configForEntity, PLAN_MOCK, confidenceTierFor, recordSampled]);
 
   // ── Sampling: generate → upload to Local (full) + Client (no Sizing) + local download ──
   const generate = async (entry: FileEntry) => {
     if (!entry.data || !entry.entity) return;
     patch(entry.id, { genStatus: 'working', genError: '' });
     try {
-      const r = await sampleAndWriteResult({ entity: entry.entity, agency: entry.agency || 'NA', N: entry.N, data: entry.data, merged: entry.merged || undefined, download: true });
+      const r = await sampleAndWriteResult({ entity: entry.entity, agency: entry.agency || 'NA', tab: entry.tab, N: entry.N, data: entry.data, merged: entry.merged || undefined, download: true });
       if (!r) { patch(entry.id, { genStatus: 'error', genError: 'No sampling classification for this entity.' }); return; }
       patch(entry.id, { genStatus: 'done', generated: { seed: r.seed, n: r.n, at: new Date().toLocaleString() } });
     } catch (err) {
@@ -1070,10 +1120,12 @@ function ValidationsPage() {
   };
 
   const nFor = (entry: FileEntry): number | null => {
-    const tier = entry.entity ? tierForEntity(entry.entity) : null;
+    const tier = entry.entity ? confidenceTierFor(entry.agency, entry.tab, entry.entity) : null;
     if (!tier || !entry.N) return null;
     return computeSampleSize(entry.N, tier);
   };
+  const tierFor = (entry: FileEntry): Tier | undefined =>
+    (entry.entity ? confidenceTierFor(entry.agency, entry.tab, entry.entity) : undefined);
 
   // ── Goal 5: run an entity across every BU it's attached to (agency report) ──
   const [entityRunSel, setEntityRunSel] = useState('');
@@ -1111,7 +1163,7 @@ function ValidationsPage() {
         for (const { e, results } of built) {
           for (const result of results) {
             const entity = matchEntity(result.entityToken) || e.entity;
-            const r = await sampleAndWriteResult({ entity, agency: result.bu || bu, N: result.recordCount, data: resultToFileData(result), merged: result, download: false });
+            const r = await sampleAndWriteResult({ entity, agency: result.bu || bu, tab: e.tab, N: result.recordCount, data: resultToFileData(result), merged: result, download: false });
             if (r) reports++; else skipped.push(`${bu}/${entity}`);
           }
         }
@@ -1415,7 +1467,7 @@ function ValidationsPage() {
               </thead>
               <tbody>
                 {entries.map(entry => {
-                  const cls = entry.entity ? ENTITY_CLASSIFICATION[entry.entity] : null;
+                  const cls = tierFor(entry)?.name || null; // reflects the per-BU confidence override
                   const n = nFor(entry);
                   return (
                     <tr key={entry.id}>
@@ -1581,12 +1633,19 @@ function ValidationsPage() {
                     <th className="val-col-num">Partial</th>
                     <th className="val-col-num">Pending</th>
                     <th className="val-col-num">Total</th>
+                    <th className="val-col-num" title="Entities sampled for this BU (a sample run checks one off)">Sampled</th>
                   </tr>
                 </thead>
                 <tbody>
                   {filteredGroups.map(g => {
                     const open = !!expanded[g.code];
                     const pct = Math.round(g.pct * 100);
+                    // #6: running sampled count — expected = entities attached to this BU,
+                    // done = those with a completed sample run (starts at 0).
+                    const sampEnts = valReport ? assignedEntitiesFor(g.code) : [];
+                    const sampledList = sampledRuns[g.code] || [];
+                    const sampDone = sampEnts.filter(t => sampledList.includes(t)).length;
+                    const entLabel = (tab: string) => valReport?.entities.find(e => e.tab === tab)?.entity || tab;
                     return (
                       <React.Fragment key={g.code}>
                         <tr className="val-bu-row" onClick={() => setExpanded(p => ({ ...p, [g.code]: !p[g.code] }))}>
@@ -1604,11 +1663,26 @@ function ValidationsPage() {
                           <td className="val-col-num">{g.partial || ''}</td>
                           <td className="val-col-num">{g.pending ? <span className="val-pending-count">{g.pending}</span> : ''}</td>
                           <td className="val-col-num">{g.total}</td>
+                          <td className="val-col-num">
+                            {sampEnts.length
+                              ? <span className={sampDone === sampEnts.length ? 'val-comp-ok' : sampDone ? 'val-comp-warn' : 'val-muted'}>{sampDone}/{sampEnts.length}</span>
+                              : <span className="val-muted">—</span>}
+                          </td>
                         </tr>
                         {open && (
                           <tr className="val-bu-detail-row">
                             <td></td>
-                            <td colSpan={7}>
+                            <td colSpan={8}>
+                              {sampEnts.length > 0 && (
+                                <div className="val-samp-progress">
+                                  <span className="val-samp-progress-label">Sampling — {sampDone} of {sampEnts.length} sampled:</span>
+                                  {sampEnts.map(t => (
+                                    <span key={t} className={`val-samp-badge ${sampledList.includes(t) ? 'done' : ''}`}>
+                                      {sampledList.includes(t) ? '✓' : '○'} {entLabel(t)}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
                               {g.members.map(m => (
                                 <div key={m.unit} className="val-member">
                                   {g.multi && (
@@ -1817,11 +1891,14 @@ function ValidationsPage() {
 
           {!valLoading && valReport && (() => {
             const mans = valManifests;
+            // #7: an entity marked "Delivered / ready" counts as present everywhere
+            // (all its tables are updated and ready to sample).
+            const deliveredFor = (e: EntityValidation) => statusForTab(e.tab, e.entity) === 'ready';
             let totExp = 0, totPresent = 0;
-            valReport.entities.forEach(e => e.files.forEach(f => e.agencies.forEach(ag => {
+            valReport.entities.forEach(e => { const d = deliveredFor(e); e.files.forEach(f => e.agencies.forEach(ag => {
               const c = f.counts[ag]; if (!c || c === 'N/A') return; totExp++;
-              if (presentFor(mans, f.label, ag).present) totPresent++;
-            })));
+              if (d || presentFor(mans, f.label, ag).present) totPresent++;
+            })); });
             return (
               <>
                 <div className="val-cards" style={{ margin: '4px 0 14px' }}>
@@ -1883,8 +1960,9 @@ function ValidationsPage() {
                   <tbody>
                     {valReport.entities.map(e => {
                       const open = !!valExpanded[e.tab];
+                      const delivered = deliveredFor(e);
                       let exp = 0, pres = 0;
-                      e.files.forEach(f => e.agencies.forEach(ag => { const c = f.counts[ag]; if (!c || c === 'N/A') return; exp++; if (presentFor(mans, f.label, ag).present) pres++; }));
+                      e.files.forEach(f => e.agencies.forEach(ag => { const c = f.counts[ag]; if (!c || c === 'N/A') return; exp++; if (delivered || presentFor(mans, f.label, ag).present) pres++; }));
                       return (
                         <React.Fragment key={e.tab}>
                           <tr className="val-bu-row" onClick={() => setValExpanded(p => ({ ...p, [e.tab]: !p[e.tab] }))}>
@@ -1915,6 +1993,11 @@ function ValidationsPage() {
                                           if (!c || c === 'N/A') return <td key={ag} className="val-col-num val-muted">—</td>;
                                           const st = presentFor(mans, f.label, ag);
                                           const exact = st.present && st.rows === c.rows;
+                                          if (delivered && !st.present) return (
+                                            <td key={ag} className="val-col-num" title="Delivered / ready — tables updated and available to sample">
+                                              {c.rows.toLocaleString()} <span className="val-comp-ok">✓</span>
+                                            </td>
+                                          );
                                           return (
                                             <td key={ag} className="val-col-num"
                                               title={st.present ? `generated: ${st.rows.toLocaleString()} rows (${st.tables.join(', ')})` : 'not found in Sampling/Generated'}>
@@ -2156,6 +2239,13 @@ function ValidationsPage() {
               if (!buFilesSel || !confirm(`Remove BU ${buFilesSel} and its assignments? (Save to persist.)`)) return;
               setBuAssignments(p => { const n = { ...p }; delete n[buFilesSel]; return n; });
             };
+            const setConfidence = (tab: string, val: string) => setEntityConfidence(p => {
+              const inner = { ...(p[buFilesSel] || {}) };
+              if (val) inner[tab] = val; else delete inner[tab];
+              const next = { ...p, [buFilesSel]: inner };
+              entityConfidenceRef.current = next;
+              return next;
+            });
             return (
               <>
                 <div className="val-bu-controls">
@@ -2167,7 +2257,7 @@ function ValidationsPage() {
                   <span className="val-muted">{assigned.length} entit{assigned.length !== 1 ? 'ies' : 'y'} assigned</span>
                   <input className="val-search val-bu-newbu" placeholder="new BU #" value={newBuInput} onChange={e => setNewBuInput(e.target.value)} />
                   <button className="val-btn-secondary" onClick={addBU} disabled={!newBuInput.trim()}>Add BU</button>
-                  <button className="val-btn-secondary" onClick={() => { saveBuAssignments(); saveLinkKeys(linkKeysRef.current); }} disabled={buAssignSaving}>
+                  <button className="val-btn-secondary" onClick={() => { saveBuAssignments(); saveLinkKeys(linkKeysRef.current); saveEntityConfidence(entityConfidenceRef.current); }} disabled={buAssignSaving}>
                     {buAssignSaving ? <><span className="val-spinner val-spinner-dark" /> Saving…</> : 'Save assignments'}
                   </button>
                   {buAssignSavedAt && <span className="val-muted">saved {buAssignSavedAt}</span>}
@@ -2186,9 +2276,9 @@ function ValidationsPage() {
                 </div>
 
                 <table className="val-table val-bu">
-                  <thead><tr><th className="val-col-caret"></th><th>Entity</th><th>Files included</th><th>In report</th><th></th></tr></thead>
+                  <thead><tr><th className="val-col-caret"></th><th>Entity</th><th>Files included</th><th>Confidence</th><th>In report</th><th></th></tr></thead>
                   <tbody>
-                    {assigned.length === 0 && <tr><td colSpan={5} className="val-muted" style={{ padding: '14px' }}>No entities assigned to {buFilesSel} yet — add one above.</td></tr>}
+                    {assigned.length === 0 && <tr><td colSpan={6} className="val-muted" style={{ padding: '14px' }}>No entities assigned to {buFilesSel} yet — add one above.</td></tr>}
                     {assigned.map(name => {
                       const ent = reportByTab.get(name);
                       const options = entityFileOptions(name);
@@ -2208,13 +2298,22 @@ function ValidationsPage() {
                               {tgt && <div className="val-bu-tablename" title={tgt.table}>{tgt.table}</div>}
                             </td>
                             <td className="val-muted">{included.length} of {total} file{total !== 1 ? 's' : ''}</td>
+                            <td onClick={e => e.stopPropagation()}>
+                              <select className="val-conf-select" value={entityConfidence[buFilesSel]?.[name] || ''} onChange={e => setConfidence(name, e.target.value)}>
+                                <option value="">Default</option>
+                                <option value="HIGH">HIGH · 99%</option>
+                                <option value="MODERATE">MODERATE · 95%</option>
+                                <option value="LOW">LOW · 90%</option>
+                                <option value="AUTO">AUTO · 85%</option>
+                              </select>
+                            </td>
                             <td>{ent ? <span className="val-repstatus val-rep-clean">yes</span> : <span className="val-repstatus val-rep-other">no</span>}</td>
                             <td><button className="val-remove" onClick={e => { e.stopPropagation(); removeEntity(name); }} aria-label={`Remove ${name}`}>×</button></td>
                           </tr>
                           {open && (
                             <tr className="val-bu-detail-row">
                               <td></td>
-                              <td colSpan={4}>
+                              <td colSpan={5}>
                                 {tgt && (
                                   <div className="val-linkpick">
                                     <label className="val-bu-pick">Link parent&nbsp;→&nbsp;children on
