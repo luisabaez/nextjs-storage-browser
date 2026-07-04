@@ -112,6 +112,22 @@ function buFilePresent(mans: ManifestFileRow[], entity: string, label: string, b
   return { present: p.present, rows: p.rows, shared: false };
 }
 
+// Match a validation-report entity (by tab) to its column in the agency report
+// (REPORTE DE AGENCIAS), so a BU's attached entities / an entity's BUs can be read.
+function agencyColumnForEntity(report: AgencyReport | null, valReport: ValidationReport | null, tab: string): string | null {
+  if (!report) return null;
+  const e = valReport?.entities.find(x => x.tab === tab);
+  const cands = [tab, e?.entity, e?.files.find(f => f.role === 'master')?.label].filter(Boolean).map(s => normStr(s as string));
+  let best: string | null = null, bestScore = 0;
+  for (const col of report.entities) {
+    const nc = normStr(col);
+    let score = 0;
+    for (const c of cands) { if (!c) continue; if (nc === c) score = Math.max(score, 3); else if (nc.includes(c) || c.includes(nc)) score = Math.max(score, 2); }
+    if (score > bestScore) { bestScore = score; best = col; }
+  }
+  return bestScore > 0 ? best : null;
+}
+
 // Resolve a report entity (by tab) to its sampling target (root table + children).
 // Matches on the entity's master-file label first, then any file, then the target
 // display name — so "Supplier" → SCM_SUPPLIER_MOCK14_VW_TBL, "Projects" → Awards.
@@ -652,8 +668,19 @@ function ValidationsPage() {
   }, [valReport]);
   const includedFilesFor = useCallback((bu: string, tab: string): string[] =>
     buAssignments[bu]?.[tab] ?? reportFilesFor(tab), [buAssignments, reportFilesFor]);
-  const assignedEntitiesFor = useCallback((bu: string): string[] =>
-    Object.keys(buAssignments[bu] || {}), [buAssignments]);
+  const assignedEntitiesFor = useCallback((bu: string): string[] => {
+    const assigned = Object.keys(buAssignments[bu] || {});
+    if (assigned.length) return assigned;
+    // Fallback for BUs beyond the validation report's 4 agencies (the agency
+    // report lists 58): the entities attached to this BU in the agency report,
+    // mapped to the validation report's entity tabs (files come from that spec).
+    if (!report || !valReport) return [];
+    const row = report.bus.find(b => b.unit === bu);
+    if (!row) return [];
+    return valReport.entities
+      .filter(e => { const col = agencyColumnForEntity(report, valReport, e.tab); return !!col && row.statuses[col] != null && String(row.statuses[col]).trim() !== ''; })
+      .map(e => e.tab);
+  }, [buAssignments, report, valReport]);
 
   const applyReport = useCallback((report: ValidationReport, manifests: ManifestFileRow[]) => {
     setValReport(report); valReportRef.current = report;
@@ -830,6 +857,18 @@ function ValidationsPage() {
   useEffect(() => {
     if (valReport && !selectedBU && valReport.agencies.length) setSelectedBU(valReport.agencies[0]);
   }, [valReport, selectedBU]);
+
+  // Every BU we can sample: the agency report's 58 BUs, plus the validation
+  // report's agencies and any manually-assigned BUs. Sorted, deduped.
+  const sampleBUOptions = React.useMemo(() => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    const add = (b: string) => { const v = String(b || '').trim(); if (v && !seen.has(v)) { seen.add(v); out.push(v); } };
+    (report?.bus || []).forEach(b => add(b.unit));
+    (valReport?.agencies || []).forEach(add);
+    Object.keys(buAssignments).forEach(add);
+    return out.sort();
+  }, [report, valReport, buAssignments]);
 
   // ── BU Files editor state ──
   const [buFilesSel, setBuFilesSel] = useState('');
@@ -1082,28 +1121,12 @@ function ValidationsPage() {
   const [entityRunSel, setEntityRunSel] = useState('');
   const [entityRun, setEntityRun] = useState<{ running: boolean; done: number; total: number; current: string; note: string }>({ running: false, done: 0, total: 0, current: '', note: '' });
 
-  // Match a report entity (tab) to its column in the agency report, then list the
-  // BUs where that column has any status (attached).
-  const agencyColForEntity = useCallback((entityTab: string): string | null => {
-    if (!report) return null;
-    const e = valReport?.entities.find(x => x.tab === entityTab);
-    const cands = [entityTab, e?.entity, e?.files.find(f => f.role === 'master')?.label].filter(Boolean).map(s => normStr(s as string));
-    let best: string | null = null, bestScore = 0;
-    for (const col of report.entities) {
-      const nc = normStr(col);
-      let score = 0;
-      for (const c of cands) { if (!c) continue; if (nc === c) score = Math.max(score, 3); else if (nc.includes(c) || c.includes(nc)) score = Math.max(score, 2); }
-      if (score > bestScore) { bestScore = score; best = col; }
-    }
-    return bestScore > 0 ? best : null;
-  }, [report, valReport]);
-
   const attachedBUsForEntity = useCallback((entityTab: string): string[] => {
     if (!report) return [];
-    const col = agencyColForEntity(entityTab);
+    const col = agencyColumnForEntity(report, valReport, entityTab);
     if (!col) return [];
     return report.bus.filter(b => { const s = b.statuses[col]; return s != null && String(s).trim() !== ''; }).map(b => b.unit);
-  }, [report, agencyColForEntity]);
+  }, [report, valReport]);
 
   const runEntityAcrossBUs = useCallback(async (entityTab: string) => {
     if (!valReport) return;
@@ -1990,11 +2013,13 @@ function ValidationsPage() {
           <div className="val-intro">
             <h2>Sample by BU</h2>
             <p>
-              Pick a business unit to see every entity and master/child file it expects
-              (from the validation report&rsquo;s <em>Present in agencies</em>), whether those files
+              Pick a business unit — every BU from the agency report (all with expected FIN/SCM
+              files) — to see the entities and master/child files it expects, whether those files
               have been generated, and the latest email status. When a BU&rsquo;s files are ready,
-              load them into the Sampling tab to run the sample. PRIFAS entities (Suppliers,
-              Projects) share one file across all their agencies.
+              load them into the Sampling tab to run the sample. For BUs beyond the validation
+              report&rsquo;s agencies, the entity list is derived from the agency report and the file
+              spec comes from the validation report. PRIFAS entities (Suppliers, Projects) share
+              one file across all their agencies.
             </p>
           </div>
 
@@ -2061,7 +2086,7 @@ function ValidationsPage() {
                 <div className="val-bu-controls">
                   <label className="val-bu-pick">BU
                     <select value={selectedBU} onChange={ev => { setSelectedBU(ev.target.value); setSampleEntitySel(''); }} disabled={busy}>
-                      {valReport.agencies.map(a => <option key={a} value={a}>{a}</option>)}
+                      {sampleBUOptions.map(a => <option key={a} value={a}>{a}</option>)}
                     </select>
                   </label>
                   <label className="val-bu-pick">Entity
