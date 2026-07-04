@@ -18,7 +18,6 @@ import {
   computeSampleSize,
   parseFilename,
   selectSample,
-  readWorkbook,
   buildWorkbook,
   downloadWorkbook,
   matchEntity,
@@ -256,8 +255,6 @@ function ValidationsPage() {
 
   // ── Sampling state ──
   const [entries, setEntries] = useState<FileEntry[]>([]);
-  const [isDragOver, setIsDragOver] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // ── Reproduce-by-seed state ──
   const repInputRef = useRef<HTMLInputElement>(null);
@@ -270,6 +267,12 @@ function ValidationsPage() {
   const [repSeed, setRepSeed] = useState('');
   const [repResult, setRepResult] = useState<{ indices: number[]; checked: boolean; matched: number; total: number; identical: boolean } | null>(null);
   const [repError, setRepError] = useState('');
+  // Manual reproduce (seed only, no file): compute the sampled row positions.
+  const [manN, setManN] = useState('');
+  const [mann, setMann] = useState('');
+  const [manSeed, setManSeed] = useState('');
+  const [manIndices, setManIndices] = useState<number[] | null>(null);
+  const [manError, setManError] = useState('');
 
   // ── Dashboard state ──
   const [report, setReport] = useState<AgencyReport | null>(null);
@@ -379,37 +382,7 @@ function ValidationsPage() {
     setEntries(prev => prev.map(e => (e.id === id ? { ...e, ...p } : e)));
   }, []);
 
-  // ── Sampling: add + read files ──
-  const addFiles = useCallback(async (files: FileList | File[]) => {
-    const list = Array.from(files).filter(f => /\.(xlsx|xlsm|xls)$/i.test(f.name));
-    for (const file of list) {
-      const id = `f-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      const parsed = parseFilename(file.name);
-      setEntries(prev => [...prev, {
-        id, fileName: file.name,
-        entity: parsed.entity || '', agency: parsed.agency,
-        N: 0, loading: true, error: '', data: null,
-        genStatus: 'idle', genError: '', generated: null, merged: null,
-      }]);
-      try {
-        const data = await readWorkbook(file);
-        patch(id, { data, N: data.rows.length, loading: false });
-      } catch (err) {
-        patch(id, { loading: false, error: err instanceof Error ? err.message : String(err) });
-      }
-    }
-  }, [patch]);
-
-  const onDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragOver(false);
-    if (e.dataTransfer.files?.length) addFiles(e.dataTransfer.files);
-  };
-
   // ── Merge raw parent + child files → master, added straight to the sampling list ──
-  const [isRawDragOver, setIsRawDragOver] = useState(false);
-  const rawInputRef = useRef<HTMLInputElement>(null);
-
   // Add one sampling entry per merged master.
   const addMergeResults = useCallback((results: MergeResult[]) => {
     results.forEach((result, i) => {
@@ -435,16 +408,6 @@ function ValidationsPage() {
     addMergeResults(results);
   }, [addMergeResults]);
 
-  const addRawFiles = useCallback(async (files: FileList | File[]) => {
-    const list = Array.from(files).filter(f => /\.(xlsx|xlsm|xls)$/i.test(f.name));
-    if (!list.length) return;
-    const raws: RawFile[] = [];
-    for (const file of list) {
-      try { raws.push({ name: file.name, data: await readWorkbook(file) }); }
-      catch (e) { console.error('read failed', file.name, e); }
-    }
-    addRawResults(raws);
-  }, [addRawResults]);
 
   // ── Bridge: load server-generated CV_ files straight from S3 into the list ──
   const [genList, setGenList] = useState<GeneratedEntity[] | null>(null);
@@ -730,7 +693,7 @@ function ValidationsPage() {
   }, [applyReport, ensureTargets, PLAN_MOCK]);
 
   useEffect(() => {
-    if ((activeTab === 'completeness' || activeTab === 'bybu' || activeTab === 'bufiles') && !valLoaded) loadValReport();
+    if ((activeTab === 'sampling' || activeTab === 'completeness' || activeTab === 'bybu' || activeTab === 'bufiles') && !valLoaded) loadValReport();
   }, [activeTab, valLoaded, loadValReport]);
   // BU Files + Sample by BU need the conversion plan (entity names, tables).
   useEffect(() => {
@@ -877,9 +840,10 @@ function ValidationsPage() {
   const [buFilesExpanded, setBuFilesExpanded] = useState<Record<string, boolean>>({});
   const [addFileInput, setAddFileInput] = useState<Record<string, string>>({});
   useEffect(() => {
-    const keys = Object.keys(buAssignments);
-    if (keys.length && (!buFilesSel || !keys.includes(buFilesSel))) setBuFilesSel(keys.sort()[0]);
-  }, [buAssignments, buFilesSel]);
+    if (sampleBUOptions.length && (!buFilesSel || !sampleBUOptions.includes(buFilesSel))) {
+      setBuFilesSel(Object.keys(buAssignments).sort()[0] || sampleBUOptions[0]);
+    }
+  }, [sampleBUOptions, buFilesSel, buAssignments]);
 
   // Entities available to assign: report entities (by tab) + conversion-plan entities.
   const availableEntityNames = React.useMemo(() => {
@@ -1009,12 +973,6 @@ function ValidationsPage() {
     setBuPrep({ running: false, done: 0, total: 0, current: '' });
     await loadBUIntoSampling(bu, onlyEntity);
   }, [valReport, buEntitiesToGenerate, userEmail, loadBUIntoSampling]);
-
-  const onRawDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    setIsRawDragOver(false);
-    if (e.dataTransfer.files?.length) addRawFiles(e.dataTransfer.files);
-  };
 
   // Sampling config (the example report's data) loaded once from S3; drives the
   // Configuration sheet of each per-run tracking report.
@@ -1194,6 +1152,16 @@ function ValidationsPage() {
     if (f) addRepFile(f);
   };
 
+  // Manual: compute the seeded selection (row positions) from N / n / seed alone.
+  const computeManualSelection = () => {
+    setManError(''); setManIndices(null);
+    const N = parseInt(manN, 10), n = parseInt(mann, 10), seed = Number(manSeed);
+    if (!Number.isFinite(N) || N <= 0) { setManError('Enter a valid population size (N).'); return; }
+    if (!Number.isFinite(n) || n <= 0) { setManError('Enter the sample size (n).'); return; }
+    if (!Number.isInteger(seed)) { setManError('Enter a numeric integer seed.'); return; }
+    setManIndices(selectSample(N, n, seed));
+  };
+
   const reproduce = () => {
     setRepError('');
     const pop = repFile?.parsed.population;
@@ -1247,7 +1215,7 @@ function ValidationsPage() {
   }, []);
 
   useEffect(() => {
-    if ((activeTab === 'dashboard' || activeTab === 'bybu') && !reportLoaded) loadReport();
+    if ((activeTab === 'sampling' || activeTab === 'dashboard' || activeTab === 'bybu') && !reportLoaded) loadReport();
   }, [activeTab, reportLoaded, loadReport]);
 
   const uploadReport = async (file: File) => {
@@ -1327,12 +1295,11 @@ function ValidationsPage() {
           <div className="val-intro">
             <h2>Record Sampling</h2>
             <p>
-              Drop one or more consolidated master files (one per agency). Each file&rsquo;s
-              population is sized with the Data Validation Framework V2 formula, a simple random
-              sample is drawn, and the workbook is written to two folders in the Sampling area:
-              the full copy (Sample, Population, Sizing) to <strong>Local</strong>, and a
-              client copy without the Sizing sheet to <strong>Client</strong>. A full copy also
-              downloads to your machine. Files are read and sampled in your browser.
+              Sampling is automated. Pick an entity below to generate and sample every BU it&rsquo;s
+              attached to, or use the <button className="val-link-btn" onClick={() => setActiveTab('bybu')}>Sample by BU</button> tab
+              to run a single business unit. Each run sizes the population with the Framework V2
+              formula, draws a seeded random sample, and writes the workbook to <strong>Local</strong> +
+              <strong> Client</strong> plus a tracking report to <strong>Reports</strong>. Everything runs in your browser.
             </p>
             <div className="val-note">
               n = N·Z²·p·(1−p) / [ e²·(N−1) + Z²·p·(1−p) ], rounded up. Tiers: HIGH 99% ·
@@ -1341,52 +1308,38 @@ function ValidationsPage() {
             </div>
           </div>
 
+          {valReport ? (
+            <div className="val-entityrun val-entityrun-primary">
+              <div className="val-entityrun-head">
+                <strong>Run one entity across every BU it&rsquo;s attached to</strong>
+                <span className="val-dropzone-hint"> — generates each BU&rsquo;s files and writes a sample + tracking report to Sampling/Local + Client + Reports, using the agency report for the BU list.</span>
+              </div>
+              <div className="val-entityrun-row">
+                <label className="val-bu-pick">Entity
+                  <select value={entityRunSel} onChange={ev => setEntityRunSel(ev.target.value)} disabled={entityRun.running}>
+                    <option value="">— select entity —</option>
+                    {valReport.entities.map(e => <option key={e.tab} value={e.tab}>{e.entity || e.tab}</option>)}
+                  </select>
+                </label>
+                <button className="val-btn-row" disabled={!entityRunSel || entityRun.running} onClick={() => runEntityAcrossBUs(entityRunSel)}>
+                  {entityRun.running ? <><span className="val-spinner" /> {entityRun.current || 'starting'} ({entityRun.done}/{entityRun.total})…</> : '▶ Generate + sample all attached BUs'}
+                </button>
+                {entityRunSel && !entityRun.running && (
+                  <span className="val-muted">{attachedBUsForEntity(entityRunSel).length} BU{attachedBUsForEntity(entityRunSel).length !== 1 ? 's' : ''} attached{!report ? ' · loading agency report…' : ''}</span>
+                )}
+              </div>
+              {entityRun.note && <div className="val-gen-note-inline">{entityRun.note}</div>}
+            </div>
+          ) : (
+            <div className="val-note">{valLoading ? 'Loading entities from the validation report…' : 'Upload the Entity Validation Report on the Completeness tab to enable entity runs.'}</div>
+          )}
+
           <div className="val-reproduce-cta">
             <div>
               <strong>Reproduce a prior sample</strong>
               <span className="val-dropzone-hint"> — re-draw an earlier run&rsquo;s exact selection from its recorded seed, for audit or a row-by-row comparison.</span>
             </div>
             <button className="val-btn-secondary" onClick={() => setActiveTab('reproduce')}>🎯 Reproduce by seed →</button>
-          </div>
-
-          <div
-            className={`val-dropzone ${isDragOver ? 'drag-over' : ''}`}
-            onDragOver={e => { e.preventDefault(); setIsDragOver(true); }}
-            onDragLeave={() => setIsDragOver(false)}
-            onDrop={onDrop}
-            onClick={() => fileInputRef.current?.click()}
-          >
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".xlsx,.xlsm,.xls"
-              multiple
-              style={{ display: 'none' }}
-              onChange={e => { if (e.target.files) addFiles(e.target.files); e.target.value = ''; }}
-            />
-            <span className="val-dropzone-icon">📥</span>
-            <p><strong>Drop consolidated master files here</strong> or click to browse</p>
-            <p className="val-dropzone-hint">.xlsx — one file per agency (e.g. Consolidated_Suppliers_015.xlsx)</p>
-          </div>
-
-          <div
-            className={`val-dropzone val-dropzone-alt ${isRawDragOver ? 'drag-over' : ''}`}
-            onDragOver={e => { e.preventDefault(); setIsRawDragOver(true); }}
-            onDragLeave={() => setIsRawDragOver(false)}
-            onDrop={onRawDrop}
-            onClick={() => rawInputRef.current?.click()}
-          >
-            <input
-              ref={rawInputRef}
-              type="file"
-              accept=".xlsx,.xlsm,.xls"
-              multiple
-              style={{ display: 'none' }}
-              onChange={e => { if (e.target.files) addRawFiles(e.target.files); e.target.value = ''; }}
-            />
-            <span className="val-dropzone-icon">🧩</span>
-            <p><strong>Or drop the raw parent + child files</strong> — they&rsquo;ll be merged into a master on the common identifier</p>
-            <p className="val-dropzone-hint">e.g. the CV_SCM_SUPPLIER_… set for one agency; grouped by agency automatically</p>
           </div>
 
           <div className="val-generated">
@@ -2169,7 +2122,7 @@ function ValidationsPage() {
           )}
 
           {!valLoading && valReport && (() => {
-            const bus = Object.keys(buAssignments).sort();
+            const bus = sampleBUOptions;
             const assigned = assignedEntitiesFor(buFilesSel);
             const reportByTab = new Map(valReport.entities.map(e => [e.tab, e]));
             const addable = availableEntityNames.filter(n => !assigned.some(a => normStr(a) === normStr(n)));
@@ -2343,6 +2296,31 @@ function ValidationsPage() {
               the selected rows may differ — the verification below will flag that.
             </div>
           </div>
+
+          <div className="val-reproduce-panel">
+            <div className="val-reproduce-file"><strong>Reproduce from a seed</strong> <span className="val-muted">— enter the population size, sample size and seed to get the exact sampled row positions (no file needed).</span></div>
+            <div className="val-reproduce-grid">
+              <label>Population (N)
+                <input inputMode="numeric" value={manN} onChange={e => { setManN(e.target.value); setManIndices(null); }} />
+              </label>
+              <label>Sample (n)
+                <input inputMode="numeric" value={mann} onChange={e => { setMann(e.target.value); setManIndices(null); }} />
+              </label>
+              <label>Seed
+                <input inputMode="numeric" value={manSeed} onChange={e => { setManSeed(e.target.value); setManIndices(null); }} />
+              </label>
+            </div>
+            {manError && <div className="val-error">{manError}</div>}
+            <button className="val-btn-row" onClick={computeManualSelection}>🎲 Compute selection</button>
+            {manIndices && (
+              <div className="val-reproduce-idx">
+                <span className="val-muted">Selected row positions (0-based, {manIndices.length} of {manN}): </span>
+                <code>{manIndices.join(', ')}</code>
+              </div>
+            )}
+          </div>
+
+          <div className="val-reproduce-or">— or drop the workbook to verify against and re-export its rows —</div>
 
           <div
             className={`val-dropzone ${isRepDragOver ? 'drag-over' : ''}`}
