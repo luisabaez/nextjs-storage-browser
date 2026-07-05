@@ -1517,10 +1517,13 @@ function ValidationsPage() {
           }
           for (const result of results) {
             const entity = matchEntity(result.entityToken) || e.entity;
-            // Skip masters too large to build client-side — a huge person population
-            // hangs the in-browser workbook build. Flagged; the CV_ files hold the data.
+            // Skip masters too large to build client-side. Only HCM Person's wide,
+            // multi-sub-entity workbooks need the tight cap; flatter entities (e.g.
+            // PS Items) build fine with far more rows. The total-rows guard still
+            // catches genuinely huge parent+child sets. Flagged; the CV_ files hold it.
             const childRows = result.childrenData.reduce((s, c) => s + c.rows.length, 0);
-            if (result.recordCount > 3000 || result.recordCount + childRows > 100000) { tooLarge.push(`${bu} (${result.recordCount.toLocaleString()})`); continue; }
+            const cap = e.tab === HCM_PERSON_TAB ? 3000 : 50000;
+            if (result.recordCount > cap || result.recordCount + childRows > 100000) { tooLarge.push(`${bu} (${result.recordCount.toLocaleString()})`); continue; }
             const r = await sampleAndWriteResult({ entity, agency: result.bu || bu, tab: e.tab, bu, N: result.recordCount, data: resultToFileData(result), merged: result, download: false });
             if (r) reports++; else skipped.push(`${bu}/${entity}`);
           }
