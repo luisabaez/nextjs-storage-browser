@@ -1379,13 +1379,19 @@ function ValidationsPage() {
         // 2) build + sample each master for this BU
         const built = await buildBUResults(bu, entityTab);
         for (const { e, results } of built) {
+          const extra = EXTRA_ENTITY_TABS.has(e.tab);
           for (const result of results) {
-            const entity = matchEntity(result.entityToken) || e.entity;
+            // Injected entities own their label + BU: the merge token can resolve to
+            // a sibling table (e.g. Revenue Budget) and the ledger BU is the 7-digit
+            // segment, so use the run's entity/BU directly.
+            const entity = extra ? e.entity : (matchEntity(result.entityToken) || e.entity);
             // Skip masters too large to build client-side — a huge person population
-            // hangs the in-browser workbook build. Flagged; the CV_ files hold the data.
+            // hangs the in-browser workbook build. Injected entities are flat (one
+            // sheet), so they tolerate far more rows before the build slows.
             const childRows = result.childrenData.reduce((s, c) => s + c.rows.length, 0);
-            if (result.recordCount > 3000 || result.recordCount + childRows > 100000) { tooLarge.push(`${bu} (${result.recordCount.toLocaleString()})`); continue; }
-            const r = await sampleAndWriteResult({ entity, agency: result.bu || bu, tab: e.tab, bu, N: result.recordCount, data: resultToFileData(result), merged: result, download: false });
+            const cap = extra ? 50000 : 3000;
+            if (result.recordCount > cap || result.recordCount + childRows > 100000) { tooLarge.push(`${bu} (${result.recordCount.toLocaleString()})`); continue; }
+            const r = await sampleAndWriteResult({ entity, agency: extra ? bu : (result.bu || bu), tab: e.tab, bu, N: result.recordCount, data: resultToFileData(result), merged: result, download: false });
             if (r) reports++; else skipped.push(`${bu}/${entity}`);
           }
         }

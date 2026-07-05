@@ -52,7 +52,9 @@ export const ENTITY_CLASSIFICATION: Record<string, keyof typeof TIERS> = {
 export const ENTITY_NAMES = Object.keys(ENTITY_CLASSIFICATION);
 
 export function tierForEntity(entity: string): Tier | null {
-  const key = ENTITY_CLASSIFICATION[entity];
+  // Accept the exact classification key ('GL BUDGET BALANCES') or a friendlier
+  // label ('GL Budget Balance') by normalizing through matchEntity.
+  const key = ENTITY_CLASSIFICATION[entity] || ENTITY_CLASSIFICATION[matchEntity(entity) || ''];
   return key ? TIERS[key] : null;
 }
 
