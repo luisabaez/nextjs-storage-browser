@@ -1322,7 +1322,10 @@ function ValidationsPage() {
     const files = p.merged
       ? mergeResultToReportFiles(p.merged, selectedIndices, titleCaseEntity(p.entity))
       : [singleFileReport(titleCaseEntity(p.entity), p.data.sheetName || p.entity, p.data.headers, p.data.rows, selectedIndices)];
-    const full = buildPerFileReport(files, meta, { includeSizing: true, integrity: p.merged?.integrity });
+    // HCM Person's Population sheets are enormous (165-col Person Name × 8 sub-entities),
+    // so even the internal copy omits them — the team reads the full data from the DB.
+    const withPop = p.tab !== HCM_PERSON_TAB;
+    const full = buildPerFileReport(files, meta, { includeSizing: true, includePopulation: withPop, integrity: p.merged?.integrity });
     const client = buildPerFileReport(files, meta, { includeSizing: false, includePopulation: false }); // client + server copy: Sample sheets only
     await uploadData({ path: `${LOCAL_FOLDER}${base}.xlsx`, data: new Blob([await reportToBuffer(full)], { type: XLSX_CT }), options: { contentType: XLSX_CT } }).result;
     const clientKey = `${CLIENT_FOLDER}${base}.xlsx`;
@@ -1459,11 +1462,10 @@ function ValidationsPage() {
     const allBus = attachedBUsForEntity(entityTab);
     if (!allBus.length) { setEntityRun({ running: false, done: 0, total: 0, current: '', note: `No BUs are attached to "${entityTab}" in the agency report.` }); return; }
     // Resume-safe: skip BUs already sampled for this entity so a re-run only does
-    // the rest. Only HCM Person needs a small cap — its wide, multi-sub-entity
-    // workbooks can overrun the tab in bulk. Every other entity builds normal-sized
-    // workbooks (and an oversized BU is skipped by the size guard below), so it runs
-    // all its BUs in one pass instead of forcing reload+run cycles.
-    const RUN_CAP = entityTab === HCM_PERSON_TAB ? 12 : 500;
+    // the rest. Every entity runs all its BUs in one pass now — HCM Person's copies
+    // no longer carry the huge Population sheets, so the bulk build is light. An
+    // individual oversized BU is still skipped by the size guard below.
+    const RUN_CAP = 500;
     const alreadyDone = allBus.filter(bu => (sampledRunsRef.current[bu] || []).includes(entityTab)).length;
     const remaining = allBus.filter(bu => !(sampledRunsRef.current[bu] || []).includes(entityTab));
     const bus = remaining.slice(0, RUN_CAP);
