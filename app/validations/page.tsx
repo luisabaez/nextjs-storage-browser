@@ -1468,9 +1468,10 @@ function ValidationsPage() {
     const allBus = attachedBUsForEntity(entityTab);
     if (!allBus.length) { setEntityRun({ running: false, done: 0, total: 0, current: '', note: `No BUs are attached to "${entityTab}" in the agency report.` }); return; }
     // Resume-safe: skip BUs already sampled for this entity so a re-run only does
-    // the rest, and cap each run so a big batch (e.g. HCM Person) can't overrun
-    // the browser tab — reload + run again to continue until all are done.
-    const RUN_CAP = 12;
+    // the rest. The cap keeps a heavy batch (HCM Person's wide workbooks) from
+    // overrunning the tab — but the injected flat entities build tiny workbooks,
+    // so they run all their BUs in one pass instead of forcing reload+run cycles.
+    const RUN_CAP = EXTRA_ENTITY_TABS.has(entityTab) ? 500 : 12;
     const alreadyDone = allBus.filter(bu => (sampledRunsRef.current[bu] || []).includes(entityTab)).length;
     const remaining = allBus.filter(bu => !(sampledRunsRef.current[bu] || []).includes(entityTab));
     const bus = remaining.slice(0, RUN_CAP);
