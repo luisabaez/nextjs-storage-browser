@@ -1178,7 +1178,13 @@ function ValidationsPage() {
         return buFilePresent(valManifestsRef.current || [], e.entity, f.label, bu).present;
       });
       if (!ready) continue;
-      const g = items.find(x => matchReportEntity(valReport, x.entity)?.tab === e.tab);
+      // Find the generated folder by the plan entity that produced it (the same
+      // mapping used to generate), so a tab whose name doesn't overlap its folder
+      // still resolves — e.g. "Contracts" → Blanket_Purchase_Agreements. Fall back
+      // to the folder→tab name match for anything not in the plan map.
+      const planFolder = reportToPlanEntity.get(e.tab);
+      const g = (planFolder && items.find(x => x.entity === safeName(planFolder)))
+        || items.find(x => matchReportEntity(valReport, x.entity)?.tab === e.tab);
       if (!g) continue;
       const manifest = await readEntityManifests(PLAN_MOCK, g.entity);
       // Only download this BU's files (agency-coded source/bu), not the whole
@@ -1240,7 +1246,12 @@ function ValidationsPage() {
       // would always read "present"), so (re)generate to ensure this BU's files exist.
       if (EXTRA_ENTITY_TABS.has(e.tab)) { out.push({ tab: e.tab, plan }); continue; }
       const included = includedFilesFor(bu, e.tab);
-      const present = e.files.filter(f => included.includes(f.label)).every(f => { const c = f.counts[bu]; if (!c || c === 'N/A') return true; return buFilePresent(mans, e.entity, f.label, bu).present; });
+      // Skip only files explicitly marked not-applicable for this agency (N/A or a
+      // dash). An undefined count means the BU is beyond the validation report's
+      // agencies — the agency report still attaches the entity there, so require the
+      // actual file and generate it if missing (otherwise a whole entity like
+      // Contracts only ever generates its 4 report agencies).
+      const present = e.files.filter(f => included.includes(f.label)).every(f => { const c = f.counts[bu]; if (c === 'N/A' || c === null) return true; return buFilePresent(mans, e.entity, f.label, bu).present; });
       if (!present) out.push({ tab: e.tab, plan });
     }
     return out;
