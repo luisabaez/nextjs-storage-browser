@@ -30,7 +30,7 @@ import {
 } from './sampling';
 import { parseAgencyReport, AgencyReport, buildGroups } from './dashboard';
 import { RawFile, MergeResult, SamplingTarget, RelEdge, TaggedFile, groupRawFiles, mergeGroup, mergeByRelationships, mergeHierarchy, resultToFileData, downloadMaster } from './merge';
-import { buildPerFileReport, mergeResultToReportFiles, singleFileReport, reportToBuffer, downloadReport, buildTrackingReport } from './excelReport';
+import { buildPerFileReport, mergeResultToReportFiles, singleFileReport, reportToBuffer, downloadReport, buildTrackingReport, ReportFile } from './excelReport';
 import { PlanRow, EntityGroup, groupEntityPlan, READINESS_LABEL } from './entityFiles';
 import { GeneratedEntity, ManifestFileRow, EmptyRow, listGeneratedEntities, loadGeneratedTagged, readEntityManifests, readAllManifests, fetchSamplingTargets, fetchSamplingRelationships, safeName } from './generated';
 import { ValidationReport, EntityValidation, parseValidationReport, fileMatchesTable, buildCompositeKeyOverrides, entityEmailStatus, isSharedEntity, EMAIL_STATUS_LABEL, EMAIL_STATUS_ORDER, EmailStatus } from './validationReport';
@@ -213,6 +213,33 @@ function buMatchesGen(bu: string, source: string | undefined, buVal: string | un
     for (const v of [source, buVal]) if (v && /^\d{7}$/.test(v) && ((v.slice(0, 3).replace(/^0+/, '')) || '0') === want) return true;
   }
   return false;
+}
+
+// Pool several generated files of one sub-entity (an agency's source-system
+// segment splits of one flat table) into a single parent-only MergeResult: union
+// the rows, aligning by column name so a variant with an extra column still fits.
+function poolFlatResult(bu: string, label: string, key: string, files: TaggedFile[]): MergeResult {
+  const headers: string[] = [];
+  const at = new Map<string, number>();
+  for (const f of files) for (const h of f.data.headers) {
+    const k = String(h ?? ''); const lk = k.toLowerCase();
+    if (!at.has(lk)) { at.set(lk, headers.length); headers.push(k); }
+  }
+  const rows: unknown[][] = [];
+  for (const f of files) {
+    const cols = f.data.headers.map(h => at.get(String(h ?? '').toLowerCase()) ?? -1);
+    for (const r of f.data.rows) {
+      const row: unknown[] = new Array(headers.length).fill(null);
+      for (let i = 0; i < cols.length; i++) if (cols[i] >= 0) row[cols[i]] = r[i];
+      rows.push(row);
+    }
+  }
+  return {
+    bu, entityToken: label, parentName: label, key,
+    headers, rows, parentHeaders: headers,
+    children: [], childrenData: [], integrity: [], warnings: [],
+    recordCount: rows.length,
+  };
 }
 
 // Resolve a report entity (by tab) to its sampling target (root table + children).
@@ -1079,6 +1106,25 @@ function ValidationsPage() {
     });
   }, [includedFilesFor]);
 
+  // An injected entity's sub-entities from the live plan, each with the converted
+  // tables it covers — only rows flagged "On Conversion Plan" = Y (so a table
+  // flipped to Y later is picked up on its own). Files are grouped by sub-entity
+  // so each becomes its own pooled, sampled sheet.
+  const injectedSubEntities = useCallback((planEntity: string): { label: string; tables: Set<string> }[] => {
+    const g = entityGroups.find(x => x.entity === planEntity);
+    if (!g) return [];
+    const bySub = new Map<string, Set<string>>();
+    for (const f of g.files) {
+      if (String(f['On Conversion Plan'] || '').trim().toUpperCase() !== 'Y') continue;
+      const t = normTbl(f.CONVERSION_TABLE_BU || '');
+      if (!t) continue;
+      const sub = (f.SubEntity || '').trim() || planEntity;
+      if (!bySub.has(sub)) bySub.set(sub, new Set());
+      bySub.get(sub)!.add(t);
+    }
+    return Array.from(bySub.entries()).map(([label, tables]) => ({ label, tables }));
+  }, [entityGroups]);
+
   // Load the BU's entities (all, or just onlyEntity) into the sampling list —
   // filtered to the BU and to the files that BU includes for each entity.
   // Build (but don't add) the merge results for a BU's entities — the merge core,
@@ -1113,6 +1159,28 @@ function ValidationsPage() {
         if (forBU.length) out.push({ e, results: edges.length ? mergeHierarchy(forBU, targets, edges, overrides) : mergeByRelationships(forBU, targets, overrides) });
         continue;
       }
+      if (EXTRA_ENTITY_TABS.has(e.tab)) {
+        // Injected flat entities: pool each Y sub-entity's source-system segments for
+        // this agency into one population, so the agency yields one sampled sheet per
+        // sub-entity (not one per 7-digit ledger segment).
+        const plan = reportToPlanEntity.get(e.tab);
+        const subs = plan ? injectedSubEntities(plan) : [];
+        if (!subs.length) continue; // nothing flagged On Conversion Plan = Y (e.g. Location until they flip it)
+        const g = items.find(x => matchReportEntity(valReport, x.entity)?.tab === e.tab);
+        if (!g) continue;
+        const manifest = await readEntityManifests(PLAN_MOCK, g.entity);
+        const ledger = LEDGER_ENTITY_TABS.has(e.tab);
+        const buFiles = g.files.filter(fn => { const m = manifest.get(fn); return m && buMatchesGen(bu, m.source, m.bu, ledger); });
+        if (!buFiles.length) continue;
+        const tagged = await loadGeneratedTagged({ ...g, files: buFiles }, manifest);
+        const results: MergeResult[] = [];
+        for (const sub of subs) {
+          const subFiles = tagged.filter(t => sub.tables.has(normTbl(t.table || '')));
+          if (subFiles.length) results.push(poolFlatResult(bu, sub.label, e.key, subFiles));
+        }
+        if (results.length) out.push({ e, results });
+        continue;
+      }
       const included = includedFilesFor(bu, e.tab);
       const ready = e.files.filter(f => included.includes(f.label)).every(f => {
         const c = f.counts[bu]; if (!c || c === 'N/A') return true;
@@ -1139,7 +1207,7 @@ function ValidationsPage() {
       out.push({ e, results });
     }
     return out;
-  }, [valReport, ensureTargets, genList, refreshGenerated, assignedEntitiesFor, includedFilesFor, filterIncludedFiles]);
+  }, [valReport, ensureTargets, refreshGenerated, assignedEntitiesFor, includedFilesFor, filterIncludedFiles, reportToPlanEntity, injectedSubEntities]);
 
   const loadBUIntoSampling = useCallback(async (bu: string, onlyEntity?: string) => {
     if (!valReport) return;
@@ -1309,6 +1377,53 @@ function ValidationsPage() {
     return { seed, n };
   }, [userEmail, ensureSamplingConfig, configForEntity, PLAN_MOCK, confidenceTierFor, recordSampled]);
 
+  // Injected entities: one workbook per agency with a sampled sheet per sub-entity
+  // (each pooled population sized independently), written to Local + Client + box.
+  const sampleAndWriteInjected = useCallback(async (e: EntityValidation, bu: string, results: MergeResult[]): Promise<{ seed: number; n: number } | null> => {
+    const tier = confidenceTierFor(bu, e.tab, e.entity);
+    if (!tier) return null;
+    const files: ReportFile[] = [];
+    let totalN = 0, totaln = 0, firstSeed = 0;
+    for (const r of results) {
+      if (!r.recordCount) continue;
+      const n = computeSampleSize(r.recordCount, tier);
+      const seed = Math.floor(Math.random() * 2 ** 32) >>> 0;
+      if (!firstSeed) firstSeed = seed;
+      files.push(...mergeResultToReportFiles(r, selectSample(r.recordCount, n, seed), r.entityToken));
+      totalN += r.recordCount; totaln += n;
+    }
+    if (!files.length) return null;
+    const now = new Date();
+    const st = stamp(now);
+    const agency = bu || 'NA';
+    const base = `${parentEntityLabel(e.entity)} BU ${bu3(agency)}-Sample Converted Data ${st}`;
+    const meta = { entity: e.entity, agency, tier, N: totalN, n: totaln, seed: firstSeed, generatedAt: now.toISOString(), generatedBy: userEmail, selectedIndices: [] as number[] };
+    const full = buildPerFileReport(files, meta, { includeSizing: true });
+    const client = buildPerFileReport(files, meta, { includeSizing: false, includePopulation: false });
+    await uploadData({ path: `${LOCAL_FOLDER}${base}.xlsx`, data: new Blob([await reportToBuffer(full)], { type: XLSX_CT }), options: { contentType: XLSX_CT } }).result;
+    const clientKey = `${CLIENT_FOLDER}${base}.xlsx`;
+    await uploadData({ path: clientKey, data: new Blob([await reportToBuffer(client)], { type: XLSX_CT }), options: { contentType: XLSX_CT } }).result;
+    let serverPath = '', serverStatus = '';
+    try {
+      const pub = await (await fetch(`${LAMBDA_URL}?action=publish_to_server&key=${encodeURIComponent(clientKey)}`)).json();
+      serverStatus = pub.status || (pub.ok ? 'Success' : 'Failed'); serverPath = pub.dest || '';
+    } catch { serverStatus = 'Error'; }
+    try {
+      await ensureSamplingConfig();
+      const reportName = `${base} - Tracking Report.xlsx`;
+      const trk = buildTrackingReport({
+        entity: e.entity, agency, mock: PLAN_MOCK,
+        tierName: tier.name, confidence: tier.confidence, Z: tier.Z, e: tier.e, p: tier.p,
+        N: totalN, n: totaln, seed: firstSeed, generatedAt: now.toISOString(), generatedBy: userEmail,
+        sampleFile: `${base}.xlsx`, localPath: `${LOCAL_FOLDER}${base}.xlsx`, clientPath: clientKey,
+        serverPath, serverStatus, reportPath: `${REPORTS_FOLDER}${reportName}`,
+      }, configForEntity(e.entity), undefined);
+      await uploadData({ path: `${REPORTS_FOLDER}${reportName}`, data: new Blob([await reportToBuffer(trk)], { type: XLSX_CT }), options: { contentType: XLSX_CT } }).result;
+    } catch (err) { console.error('tracking report failed', err); }
+    await recordSampled(bu, e.tab);
+    return { seed: firstSeed, n: totaln };
+  }, [userEmail, ensureSamplingConfig, configForEntity, PLAN_MOCK, confidenceTierFor, recordSampled]);
+
   // ── Sampling: generate → upload to Local (full) + Client (no Sizing) + local download ──
   const generate = async (entry: FileEntry) => {
     if (!entry.data || !entry.entity) return;
@@ -1379,26 +1494,29 @@ function ValidationsPage() {
         // 2) build + sample each master for this BU
         const built = await buildBUResults(bu, entityTab);
         for (const { e, results } of built) {
-          const extra = EXTRA_ENTITY_TABS.has(e.tab);
+          if (EXTRA_ENTITY_TABS.has(e.tab)) {
+            // Injected entity: one workbook per agency, a sampled sheet per pooled
+            // sub-entity. Flat sheets tolerate far more rows than a wide HCM master.
+            const totalRows = results.reduce((s, r) => s + r.recordCount, 0);
+            if (totalRows > 50000) { tooLarge.push(`${bu} (${totalRows.toLocaleString()})`); continue; }
+            const r = await sampleAndWriteInjected(e, bu, results);
+            if (r) reports++; else skipped.push(`${bu}/${e.entity}`);
+            continue;
+          }
           for (const result of results) {
-            // Injected entities own their label + BU: the merge token can resolve to
-            // a sibling table (e.g. Revenue Budget) and the ledger BU is the 7-digit
-            // segment, so use the run's entity/BU directly.
-            const entity = extra ? e.entity : (matchEntity(result.entityToken) || e.entity);
+            const entity = matchEntity(result.entityToken) || e.entity;
             // Skip masters too large to build client-side — a huge person population
-            // hangs the in-browser workbook build. Injected entities are flat (one
-            // sheet), so they tolerate far more rows before the build slows.
+            // hangs the in-browser workbook build. Flagged; the CV_ files hold the data.
             const childRows = result.childrenData.reduce((s, c) => s + c.rows.length, 0);
-            const cap = extra ? 50000 : 3000;
-            if (result.recordCount > cap || result.recordCount + childRows > 100000) { tooLarge.push(`${bu} (${result.recordCount.toLocaleString()})`); continue; }
-            const r = await sampleAndWriteResult({ entity, agency: extra ? bu : (result.bu || bu), tab: e.tab, bu, N: result.recordCount, data: resultToFileData(result), merged: result, download: false });
+            if (result.recordCount > 3000 || result.recordCount + childRows > 100000) { tooLarge.push(`${bu} (${result.recordCount.toLocaleString()})`); continue; }
+            const r = await sampleAndWriteResult({ entity, agency: result.bu || bu, tab: e.tab, bu, N: result.recordCount, data: resultToFileData(result), merged: result, download: false });
             if (r) reports++; else skipped.push(`${bu}/${entity}`);
           }
         }
       } catch (e) { console.error('run entity across BU failed', bu, e); }
     }
     setEntityRun({ running: false, done: bus.length, total: bus.length, current: '', note: `Done — ${reports} sampled across ${bus.length} BU${bus.length !== 1 ? 's' : ''}${alreadyDone ? ` (+${alreadyDone} earlier)` : ''}${tooLarge.length ? ` · ${tooLarge.length} too large to build here: ${tooLarge.join(', ')}` : ''}${stillLeft ? ` · ${stillLeft} more remaining — reload + run again` : ''}${skipped.length ? ` · ${skipped.length} no-data` : ''}.` });
-  }, [valReport, report, attachedBUsForEntity, buEntitiesToGenerate, buildBUResults, sampleAndWriteResult, userEmail]);
+  }, [valReport, report, attachedBUsForEntity, buEntitiesToGenerate, buildBUResults, sampleAndWriteResult, sampleAndWriteInjected, userEmail]);
 
   // Preview the per-BU sample sizes for an entity before running. N is estimated
   // from the entity's dry-run (root-table row count per BU); n = Cochran(N, tier).

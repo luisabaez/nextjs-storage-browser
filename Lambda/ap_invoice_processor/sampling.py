@@ -615,6 +615,7 @@ ENTITY_PLAN_COLUMNS = [
     'Pillar', 'Module', 'Entity', 'SubEntity', 'SOURCE', 'BU',
     'CONVERSION_TABLE_BU', 'CONVERSION_TABLE_SourceField', 'CONVERSION_TABLE_BU_Field',
     'Conversion_Table_Sourcefield_ForSampling', 'FileImportStatus', 'SourceFileName',
+    'On Conversion Plan',
 ]
 
 
@@ -778,6 +779,13 @@ def _empty_entry(table, prefix, bu_filter, reason):
 # 3-digit BU against that agency prefix, not the exact 7-digit value.
 _LEDGER_SEGMENT_ENTITIES = {'gl balances', 'gl budget balances'}
 
+# Entities whose conversion tables are gated by the plan's "On Conversion Plan"
+# flag: only tables marked Y are generated, checked live each run. Scoped to the
+# sampling-wired entities so an all-N entity elsewhere (e.g. BPA) is unaffected.
+# When a table is flipped to Y in the plan (e.g. Finance Location), it is picked
+# up automatically with no code change.
+_ON_PLAN_ENTITIES = {'gl balances', 'gl budget balances', 'finance location'}
+
 
 def _bu_matches(bu_filter, source, bu, ledger_segment=False):
     """Whether a source/BU split belongs to the requested BU. Exact match for
@@ -814,6 +822,10 @@ def generate_entity_files(conn_str, s3, bucket, mock, entity, subentity=None,
         where = ("ISNULL([CONVERSION_TABLE_BU],'') <> '' AND ISNULL([ENRICHMENT_SYSTEM],'') <> 'Y' "
                  "AND ISNULL([CONVERSION_TABLE_SourceField],'') <> '' AND [Entity] = ?")
         params = [entity]
+        # Sampling-wired entities: honour the plan's "On Conversion Plan" flag live,
+        # so only Y tables are generated (and a later Y flip is picked up on its own).
+        if (entity or '').strip().lower() in _ON_PLAN_ENTITIES:
+            where += " AND ISNULL([On Conversion Plan],'') = 'Y'"
         if subentity:
             where += " AND [SubEntity] = ?"
             params.append(subentity)

@@ -16,6 +16,7 @@ export interface PlanRow {
   Conversion_Table_Sourcefield_ForSampling: string;
   FileImportStatus: string; // 'Y' imported / 'N' not
   SourceFileName: string;
+  'On Conversion Plan'?: string; // 'Y' on the active conversion plan / 'N' not
   tableRows?: number | null; // conversion-table row count (null = table missing)
 }
 
