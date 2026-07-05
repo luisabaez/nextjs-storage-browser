@@ -190,15 +190,18 @@ const HCM_PERSON_FOLDERS = new Set(HCM_PERSON_SUB.map(s => safeName(s.plan)));
 // name used for generation; `target` = its MOCK14 converted view (pinned so target
 // resolution is exact); `masterLabel` tokenizes into `target` for presence + merge
 // inclusion; `ledger` marks the FIN entities whose source value is a 7-digit ledger
-// segment (0150000) whose first 3 digits are the BU.
-const EXTRA_ENTITIES: { tab: string; entity: string; plan: string; target: string; key: string; masterLabel: string; ledger?: boolean }[] = [
+// segment (0150000) whose first 3 digits are the BU. `allBUs` marks an entity the
+// agency report doesn't track (Location) — it attaches to every BU and the run
+// samples whichever have data.
+const EXTRA_ENTITIES: { tab: string; entity: string; plan: string; target: string; key: string; masterLabel: string; ledger?: boolean; allBUs?: boolean }[] = [
   { tab: 'GL Balance', entity: 'GL Balance', plan: 'GL Balances', target: 'FIN_GL_BALANCES_MOCK14_VW_TBL', key: 'Segment2 - Agency', masterLabel: 'GL Balances', ledger: true },
   { tab: 'GL Budget Balance', entity: 'GL Budget Balance', plan: 'GL Budget Balances', target: 'FIN_BUDGET_BALANCE_MOCK14_VW_TBL', key: 'Segment2 - Agency', masterLabel: 'Budget Balance', ledger: true },
-  { tab: 'Location', entity: 'Location', plan: 'Finance Location', target: 'SCM_LOCATION_MOCK14_VW_CONVERTED', key: 'LOCATION_CODE', masterLabel: 'Location' },
+  { tab: 'Location', entity: 'Location', plan: 'Finance Location', target: 'SCM_LOCATION_MOCK14_VW_CONVERTED', key: 'LOCATION_CODE', masterLabel: 'Location', allBUs: true },
 ];
 const EXTRA_ENTITY_TABS = new Set(EXTRA_ENTITIES.map(x => x.tab));
 const EXTRA_ENTITY_TARGET: Record<string, string> = Object.fromEntries(EXTRA_ENTITIES.map(x => [x.tab, x.target]));
 const LEDGER_ENTITY_TABS = new Set(EXTRA_ENTITIES.filter(x => x.ledger).map(x => x.tab));
+const EXTRA_ENTITY_ALLBUS = new Set(EXTRA_ENTITIES.filter(x => x.allBUs).map(x => x.tab));
 function extraEntity(x: { tab: string; entity: string; key: string; masterLabel: string }): EntityValidation {
   return {
     tab: x.tab, entity: x.entity, key: x.key, keyParts: [x.key],
@@ -833,8 +836,10 @@ function ValidationsPage() {
       const out = [...tabs];
       const add = (tab: string) => { if (valReport?.entities.some(e => e.tab === tab) && !out.includes(tab)) out.push(tab); };
       add(HCM_PERSON_TAB); // #9: HCM Person applies to every BU
+      EXTRA_ENTITY_ALLBUS.forEach(tab => add(tab)); // untracked injected entities (Location) apply to every BU
       const r = report?.bus.find(b => b.unit === bu);
       if (r) for (const x of EXTRA_ENTITIES) {
+        if (EXTRA_ENTITY_ALLBUS.has(x.tab)) continue; // already added above
         const col = agencyColumnForEntity(report, valReport, x.tab);
         if (col && r.statuses[col] != null && String(r.statuses[col]).trim() !== '') add(x.tab);
       }
@@ -1110,9 +1115,12 @@ function ValidationsPage() {
   const injectedSubEntities = useCallback((planEntity: string): { label: string; tables: Set<string> }[] => {
     const g = entityGroups.find(x => x.entity === planEntity);
     if (!g) return [];
+    // Finance Location was added by request while its plan rows are still flagged N,
+    // so it's exempt from the On-Conversion-Plan gate (the others honour the flag).
+    const requireY = planEntity.trim().toLowerCase() !== 'finance location';
     const bySub = new Map<string, Set<string>>();
     for (const f of g.files) {
-      if (String(f['On Conversion Plan'] || '').trim().toUpperCase() !== 'Y') continue;
+      if (requireY && String(f['On Conversion Plan'] || '').trim().toUpperCase() !== 'Y') continue;
       const t = normTbl(f.CONVERSION_TABLE_BU || '');
       if (!t) continue;
       const sub = (f.SubEntity || '').trim() || planEntity;
@@ -1477,9 +1485,10 @@ function ValidationsPage() {
 
   const attachedBUsForEntity = useCallback((entityTab: string): string[] => {
     if (!report) return [];
-    // #9: HCM Person isn't in the agency report — it applies to every BU, so the
-    // entity-run spans them all (the preview then sizes each; empty BUs show N=0).
-    if (entityTab === HCM_PERSON_TAB) return report.bus.map(b => b.unit);
+    // HCM Person and untracked injected entities (Location) aren't in the agency
+    // report — they apply to every BU, so the entity-run spans them all (the preview
+    // sizes each; BUs with no data show N=0).
+    if (entityTab === HCM_PERSON_TAB || EXTRA_ENTITY_ALLBUS.has(entityTab)) return report.bus.map(b => b.unit);
     const col = agencyColumnForEntity(report, valReport, entityTab);
     if (!col) return [];
     return report.bus.filter(b => { const s = b.statuses[col]; return s != null && String(s).trim() !== ''; }).map(b => b.unit);

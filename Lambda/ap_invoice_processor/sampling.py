@@ -782,9 +782,9 @@ _LEDGER_SEGMENT_ENTITIES = {'gl balances', 'gl budget balances'}
 # Entities whose conversion tables are gated by the plan's "On Conversion Plan"
 # flag: only tables marked Y are generated, checked live each run. Scoped to the
 # sampling-wired entities so an all-N entity elsewhere (e.g. BPA) is unaffected.
-# When a table is flipped to Y in the plan (e.g. Finance Location), it is picked
-# up automatically with no code change.
-_ON_PLAN_ENTITIES = {'gl balances', 'gl budget balances', 'finance location'}
+# Finance Location was added by request while its rows are still flagged N, so it
+# is intentionally NOT gated — it generates regardless of the flag.
+_ON_PLAN_ENTITIES = {'gl balances', 'gl budget balances'}
 
 
 def _bu_matches(bu_filter, source, bu, ledger_segment=False):
