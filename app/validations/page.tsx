@@ -536,9 +536,7 @@ function ValidationsPage() {
 
   // ── Bridge: load server-generated CV_ files straight from S3 into the list ──
   const [genList, setGenList] = useState<GeneratedEntity[] | null>(null);
-  const [genListLoading, setGenListLoading] = useState(false);
   const [genListError, setGenListError] = useState('');
-  const [genLoading, setGenLoading] = useState<Record<string, { done: number; total: number }>>({});
   const [genNote, setGenNote] = useState('');
   const [showFlags, setShowFlags] = useState(false);
   const samplingTargetsRef = useRef<SamplingTarget[] | null>(null);
@@ -565,7 +563,6 @@ function ValidationsPage() {
   }, []);
 
   const refreshGenerated = useCallback(async (): Promise<GeneratedEntity[]> => {
-    setGenListLoading(true);
     setGenListError('');
     try {
       const items = await listGeneratedEntities(PLAN_MOCK);
@@ -574,13 +571,10 @@ function ValidationsPage() {
     } catch (e) {
       setGenListError(e instanceof Error ? e.message : String(e));
       return [];
-    } finally {
-      setGenListLoading(false);
     }
   }, [PLAN_MOCK]);
 
   const loadFromGenerated = useCallback(async (g: GeneratedEntity) => {
-    setGenLoading(p => ({ ...p, [g.entity]: { done: 0, total: g.files.length } }));
     setGenNote('');
     try {
       // Fetch the relationship graph + full edge list (once), then download + tag.
@@ -593,8 +587,7 @@ function ValidationsPage() {
         catch (e) { console.error('sampling_relationships failed', e); relationshipEdgesRef.current = []; }
       }
       const manifest = await readEntityManifests(PLAN_MOCK, g.entity);
-      const tagged = await loadGeneratedTagged(g, manifest, (done, total) =>
-        setGenLoading(p => ({ ...p, [g.entity]: { done, total } })));
+      const tagged = await loadGeneratedTagged(g, manifest);
 
       const label = g.entity.replace(/_/g, ' ');
       const targets = samplingTargetsRef.current || [];
@@ -618,8 +611,6 @@ function ValidationsPage() {
     } catch (e) {
       console.error('load-from-generated failed', e);
       setGenListError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setGenLoading(p => { const n = { ...p }; delete n[g.entity]; return n; });
     }
   }, [addMergeResults, addRawResults, completenessNote]);
 
@@ -1821,15 +1812,6 @@ function ValidationsPage() {
           </div>
 
           <div className="val-generated">
-            <div className="val-generated-head">
-              <div>
-                <strong>Or load generated files from S3</strong>
-                <span className="val-dropzone-hint"> — pull an entity&rsquo;s CV_ files straight from Sampling/Generated and merge them by agency (same grouping as the drop above), no download needed</span>
-              </div>
-              <button className="val-btn-secondary" onClick={() => refreshGenerated()} disabled={genListLoading}>
-                {genListLoading ? <><span className="val-spinner val-spinner-dark" /> Loading…</> : (genList ? '↻ Refresh' : '📂 Browse generated')}
-              </button>
-            </div>
             {genListError && <div className="val-file-err">{genListError}</div>}
             {genNote && <div className="val-gen-note-inline">{genNote}</div>}
             {(() => {
@@ -1851,30 +1833,6 @@ function ValidationsPage() {
                 </div>
               );
             })()}
-            {genList && genList.length === 0 && !genListLoading && (
-              <div className="val-muted val-generated-empty">No generated files yet — generate them from the Entity Files tab.</div>
-            )}
-            {genList && genList.length > 0 && (
-              <div className="val-generated-grid">
-                {genList.map(g => {
-                  const prog = genLoading[g.entity];
-                  return (
-                    <div key={g.entity} className="val-generated-item">
-                      <div className="val-generated-info">
-                        <span className="val-generated-entity" title={g.entity}>{g.entity.replace(/_/g, ' ')}</span>
-                        <span className="val-muted">
-                          {g.files.length} file{g.files.length !== 1 ? 's' : ''}
-                          {g.lastModified ? ` · ${g.lastModified.toLocaleDateString()}` : ''}
-                        </span>
-                      </div>
-                      <button className="val-btn-row" disabled={!!prog} onClick={() => loadFromGenerated(g)}>
-                        {prog ? <><span className="val-spinner val-spinner-dark" /> {prog.done}/{prog.total}</> : '→ Load & merge'}
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
           </div>
 
           {entries.length > 0 && (
