@@ -60,6 +60,7 @@ TARGET_TABLES = [
     'SCM_CONTRACTS_ASG_MOCK14_VW_TBL',
     'SCM_ITEMS_ASG_MOCK14_VW_TBL',
     'SCM_ITEMS_MOCK14_VW_TBL',
+    'SCM_LOCATION_MOCK14_VW_CONVERTED',
     'SCM_PURCHASE_ORDERS_FINAL_MOCK14_VW_TBL',
     'SCM_PURCHASE_ORDERS_FINAL_911_MOCK14_VW_TBL',
     'SCM_PURCHASE_ORDERS_FINAL_RETIRO_MOCK14_VW_TBL',
@@ -772,12 +773,33 @@ def _empty_entry(table, prefix, bu_filter, reason):
             "bu": bu_filter or "", "rows": 0, "reason": reason}
 
 
+# Entities whose source/BU split value is a 7-digit ledger segment (e.g. 0150000)
+# whose first 3 digits are the agency/BU. Their per-BU filter must match a
+# 3-digit BU against that agency prefix, not the exact 7-digit value.
+_LEDGER_SEGMENT_ENTITIES = {'gl balances', 'gl budget balances'}
+
+
+def _bu_matches(bu_filter, source, bu, ledger_segment=False):
+    """Whether a source/BU split belongs to the requested BU. Exact match for
+    normal entities; for ledger-segment entities also match a 3-digit BU to the
+    agency prefix of a 7-digit segment value (0150000 -> 015, 0450121 -> 045)."""
+    if bu_filter in (source, bu):
+        return True
+    if ledger_segment:
+        want = bu_filter.lstrip('0') or '0'
+        for v in (source, bu):
+            if v and v.isdigit() and len(v) == 7 and (v[:3].lstrip('0') or '0') == want:
+                return True
+    return False
+
+
 def generate_entity_files(conn_str, s3, bucket, mock, entity, subentity=None,
                           dry_run=False, source_db=None, actor="", bu_filter=None):
     # bu_filter: when set, only source[/BU] splits whose source OR BU value equals
     # it are generated — so one agency's files can be produced in a small, fast
     # call (no 400-file cap / Lambda timeout) instead of the whole entity at once.
     bu_filter = (str(bu_filter).strip() if bu_filter not in (None, "") else None)
+    ledger_segment = (entity or '').strip().lower() in _LEDGER_SEGMENT_ENTITIES
     db = source_db or SOURCE_DATABASE
     plan_table = f"SETUP_CONVERSION_PLAN_{mock}"
     out_prefix = f"{GENERATED_FOLDER}{mock}/{_safe_name(entity)}/"
@@ -838,7 +860,7 @@ def generate_entity_files(conn_str, s3, bucket, mock, entity, subentity=None,
                 has_bu = bool(bu_col) and len(combo) > 1 and combo[1] is not None
                 raw_bu = combo[1] if has_bu else None
                 bu = str(raw_bu).strip() if has_bu else ''
-                if bu_filter and bu_filter not in (source, bu):
+                if bu_filter and not _bu_matches(bu_filter, source, bu, ledger_segment):
                     continue  # per-BU generation: skip splits for other agencies
                 produced += 1
                 # Match on the EXACT stored value (like the scripts) so blank or

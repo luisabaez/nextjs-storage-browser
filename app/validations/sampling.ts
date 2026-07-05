@@ -41,6 +41,12 @@ export const ENTITY_CLASSIFICATION: Record<string, keyof typeof TIERS> = {
   'AR': 'LOW',
   'PEOPLE SOFT ITEMS': 'LOW',
   'PERSON': 'LOW', // HCM Person (#9); adjustable per-BU via the confidence override
+  // Remaining entities from the agencies-by-pillar report (row 2). Tiers default
+  // by analogy to their family and are adjustable per-BU via the confidence override.
+  'GL BALANCE': 'HIGH',           // GL account balances — financially material, same family as GL Budget Balances
+  'PROJECT': 'LOW',               // project master/reference data (shared PRIFAS entity)
+  'CONTRACTS': 'MODERATE',        // contracts/agreements, same family as Blanket Purchase Agreements
+  'PROCUREMENT CONTRACTS': 'MODERATE',
 };
 
 export const ENTITY_NAMES = Object.keys(ENTITY_CLASSIFICATION);

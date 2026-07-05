@@ -178,11 +178,52 @@ function hcmPersonEntity(): EntityValidation {
 // The generated-folder names (safeName of each sub-entity's plan entity).
 const HCM_PERSON_FOLDERS = new Set(HCM_PERSON_SUB.map(s => safeName(s.plan)));
 
+// Entities present in the conversion plan but not in the validation report, wired
+// into the report-driven views (Sample by BU / Run entity across BUs). Each is a
+// standalone flat table (no child relationships). `plan` = conversion-plan entity
+// name used for generation; `target` = its MOCK14 converted view (pinned so target
+// resolution is exact); `masterLabel` tokenizes into `target` for presence + merge
+// inclusion; `ledger` marks the FIN entities whose source value is a 7-digit ledger
+// segment (0150000) whose first 3 digits are the BU.
+const EXTRA_ENTITIES: { tab: string; entity: string; plan: string; target: string; key: string; masterLabel: string; ledger?: boolean }[] = [
+  { tab: 'GL Balance', entity: 'GL Balance', plan: 'GL Balances', target: 'FIN_GL_BALANCES_MOCK14_VW_TBL', key: 'Segment2 - Agency', masterLabel: 'GL Balances', ledger: true },
+  { tab: 'GL Budget Balance', entity: 'GL Budget Balance', plan: 'GL Budget Balances', target: 'FIN_BUDGET_BALANCE_MOCK14_VW_TBL', key: 'Segment2 - Agency', masterLabel: 'Budget Balance', ledger: true },
+  { tab: 'Location', entity: 'Location', plan: 'Finance Location', target: 'SCM_LOCATION_MOCK14_VW_CONVERTED', key: 'LOCATION_CODE', masterLabel: 'Location' },
+];
+const EXTRA_ENTITY_TABS = new Set(EXTRA_ENTITIES.map(x => x.tab));
+const EXTRA_ENTITY_TARGET: Record<string, string> = Object.fromEntries(EXTRA_ENTITIES.map(x => [x.tab, x.target]));
+const LEDGER_ENTITY_TABS = new Set(EXTRA_ENTITIES.filter(x => x.ledger).map(x => x.tab));
+function extraEntity(x: { tab: string; entity: string; key: string; masterLabel: string }): EntityValidation {
+  return {
+    tab: x.tab, entity: x.entity, key: x.key, keyParts: [x.key],
+    howItLinks: 'Standalone entity — sampled flat, one row per record.',
+    agencies: [], notApplicable: [],
+    files: [{ label: x.masterLabel, role: 'master', counts: {} }],
+    integrity: [], notes: ['Added for sampling; not part of the validation report.'],
+    verdict: '', status: 'STANDALONE',
+  };
+}
+// Whether a generated file's source/BU value belongs to the requested BU. Exact
+// match for normal entities; ledger entities also match a 3-digit BU against the
+// agency prefix of a 7-digit segment value (0150000 -> 015, 0450121 -> 045).
+function buMatchesGen(bu: string, source: string | undefined, buVal: string | undefined, ledger: boolean): boolean {
+  if (source === bu || buVal === bu) return true;
+  if (ledger) {
+    const want = bu.replace(/^0+/, '') || '0';
+    for (const v of [source, buVal]) if (v && /^\d{7}$/.test(v) && ((v.slice(0, 3).replace(/^0+/, '')) || '0') === want) return true;
+  }
+  return false;
+}
+
 // Resolve a report entity (by tab) to its sampling target (root table + children).
 // Matches on the entity's master-file label first, then any file, then the target
 // display name — so "Supplier" → SCM_SUPPLIER_MOCK14_VW_TBL, "Projects" → Awards.
 function resolveEntityTarget(report: ValidationReport | null, targets: SamplingTarget[], tab: string): SamplingTarget | undefined {
   if (!targets.length) return undefined;
+  // Injected standalone entities pin their target explicitly (loose name matching
+  // is unreliable here — e.g. "Budget Balance" also matches the 911-only view).
+  const pinned = EXTRA_ENTITY_TARGET[tab];
+  if (pinned) { const t = targets.find(t => t.table === pinned); if (t) return t; }
   const e = report?.entities.find(x => x.tab === tab);
   const master = e?.files.find(f => f.role === 'master');
   // 1. master-file label -> target table (most specific: Suppliers, AP, BPA, Assets).
@@ -761,19 +802,29 @@ function ValidationsPage() {
   const assignedEntitiesFor = useCallback((bu: string): string[] => {
     // #9: HCM Person applies to every BU but isn't in the agency report, so
     // always surface it alongside whatever the report/assignments provide.
-    const withPerson = (tabs: string[]) => {
-      const has = valReport?.entities.some(e => e.tab === HCM_PERSON_TAB);
-      return has && !tabs.includes(HCM_PERSON_TAB) ? [...tabs, HCM_PERSON_TAB] : tabs;
+    // Always surface entities that aren't in the agency-report assignment: HCM
+    // Person (every BU) and the injected standalone entities (where the agency
+    // report shows them) — so they appear even for the report's 4 assigned agencies.
+    const withInjected = (tabs: string[]) => {
+      const out = [...tabs];
+      const add = (tab: string) => { if (valReport?.entities.some(e => e.tab === tab) && !out.includes(tab)) out.push(tab); };
+      add(HCM_PERSON_TAB); // #9: HCM Person applies to every BU
+      const r = report?.bus.find(b => b.unit === bu);
+      if (r) for (const x of EXTRA_ENTITIES) {
+        const col = agencyColumnForEntity(report, valReport, x.tab);
+        if (col && r.statuses[col] != null && String(r.statuses[col]).trim() !== '') add(x.tab);
+      }
+      return out;
     };
     const assigned = Object.keys(buAssignments[bu] || {});
-    if (assigned.length) return withPerson(assigned);
+    if (assigned.length) return withInjected(assigned);
     // Fallback for BUs beyond the validation report's 4 agencies (the agency
     // report lists 58): the entities attached to this BU in the agency report,
     // mapped to the validation report's entity tabs (files come from that spec).
-    if (!report || !valReport) return withPerson([]);
+    if (!report || !valReport) return withInjected([]);
     const row = report.bus.find(b => b.unit === bu);
-    if (!row) return withPerson([]);
-    return withPerson(valReport.entities
+    if (!row) return withInjected([]);
+    return withInjected(valReport.entities
       .filter(e => { const col = agencyColumnForEntity(report, valReport, e.tab); return !!col && row.statuses[col] != null && String(row.statuses[col]).trim() !== ''; })
       .map(e => e.tab));
   }, [buAssignments, report, valReport]);
@@ -784,6 +835,11 @@ function ValidationsPage() {
     if (!report.entities.some(e => e.tab === HCM_PERSON_TAB)) {
       report = { ...report, entities: [...report.entities, hcmPersonEntity()] };
     }
+    // Standalone entities in the conversion plan but not the validation report
+    // (GL Balance, GL Budget Balance, Location) — inject so they're selectable and
+    // attach per the agency report.
+    const addEntities = EXTRA_ENTITIES.filter(x => !report.entities.some(e => e.tab === x.tab)).map(extraEntity);
+    if (addEntities.length) report = { ...report, entities: [...report.entities, ...addEntities] };
     setValReport(report); valReportRef.current = report;
     setValManifests(manifests); valManifestsRef.current = manifests;
     setValEmpties(empties); valEmptiesRef.current = empties;
@@ -849,8 +905,9 @@ function ValidationsPage() {
     const map = new Map<string, string>();
     if (!valReport) return map;
     map.set(HCM_PERSON_TAB, 'Person'); // #9: pin HCM Person to its parent plan entity (many Person* groups would tie)
+    for (const x of EXTRA_ENTITIES) map.set(x.tab, x.plan); // injected entities pin their conversion-plan name
     for (const e of valReport.entities) {
-      if (e.tab === HCM_PERSON_TAB) continue;
+      if (e.tab === HCM_PERSON_TAB || EXTRA_ENTITY_TABS.has(e.tab)) continue;
       let best = '', bestScore = 0;
       for (const g of entityGroups) {
         const tables = g.files.map(f => f.CONVERSION_TABLE_BU);
@@ -1032,7 +1089,7 @@ function ValidationsPage() {
     if (!relationshipEdgesRef.current) {
       try { relationshipEdgesRef.current = await fetchSamplingRelationships(LAMBDA_URL); } catch { relationshipEdgesRef.current = []; }
     }
-    const items = genList ?? await refreshGenerated();
+    const items = await refreshGenerated(); // fresh, so files generated this run are seen
     const targets = samplingTargetsRef.current || [];
     const edges = relationshipEdgesRef.current || [];
     const overrides = buildKeyOverrides(compositeOverridesRef.current, samplingTargetsRef.current || [], valReportRef.current, linkKeysRef.current);
@@ -1067,11 +1124,14 @@ function ValidationsPage() {
       const manifest = await readEntityManifests(PLAN_MOCK, g.entity);
       // Only download this BU's files (agency-coded source/bu), not the whole
       // entity folder. Fall back to all files for a no-agency PRIFAS entity.
-      const buFiles = g.files.filter(fn => { const m = manifest.get(fn); return m && (m.source === bu || m.bu === bu); });
+      // Ledger entities carry a 7-digit segment source (0150000) whose agency
+      // prefix is the BU — match on that.
+      const ledger = LEDGER_ENTITY_TABS.has(e.tab);
+      const buFiles = g.files.filter(fn => { const m = manifest.get(fn); return m && buMatchesGen(bu, m.source, m.bu, ledger); });
       const downloadG = buFiles.length ? { ...g, files: buFiles } : (isSharedEntity(e.entity) ? g : { ...g, files: [] });
       if (!downloadG.files.length) continue;
       const tagged = await loadGeneratedTagged(downloadG, manifest);
-      let forBU = tagged.filter(t => t.source === bu || t.bu === bu);
+      let forBU = tagged.filter(t => buMatchesGen(bu, t.source, t.bu, ledger));
       if (!forBU.length && isSharedEntity(e.entity)) forBU = tagged;
       forBU = filterIncludedFiles(bu, e, forBU);
       if (!forBU.length) continue;
@@ -1117,6 +1177,9 @@ function ValidationsPage() {
       }
       const plan = reportToPlanEntity.get(e.tab);
       if (!plan) continue;
+      // Injected standalone entities have no report counts (the count short-circuit
+      // would always read "present"), so (re)generate to ensure this BU's files exist.
+      if (EXTRA_ENTITY_TABS.has(e.tab)) { out.push({ tab: e.tab, plan }); continue; }
       const included = includedFilesFor(bu, e.tab);
       const present = e.files.filter(f => included.includes(f.label)).every(f => { const c = f.counts[bu]; if (!c || c === 'N/A') return true; return buFilePresent(mans, e.entity, f.label, bu).present; });
       if (!present) out.push({ tab: e.tab, plan });
