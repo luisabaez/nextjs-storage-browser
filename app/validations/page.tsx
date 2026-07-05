@@ -1153,7 +1153,19 @@ function ValidationsPage() {
           tagged = tagged.concat(await loadGeneratedTagged({ ...g, files: buFiles }, manifest));
         }
         const forBU = filterIncludedFiles(bu, e, tagged.filter(t => t.source === bu || t.bu === bu));
-        if (forBU.length) out.push({ e, results: edges.length ? mergeHierarchy(forBU, targets, edges, overrides) : mergeByRelationships(forBU, targets, overrides) });
+        // Pool the agency's files across its HR source systems (RHUM/DOE/KRONOSPOL/
+        // FIMAS) by table, tagged with the BU as the source. The merge groups by
+        // source and labels the result with it, so this yields ONE result sampled
+        // from the agency's full population and named by the BU — instead of one
+        // mislabeled "Person BU RHUM" file per source system.
+        const byTbl = new Map<string, TaggedFile[]>();
+        for (const t of forBU) { const k = normTbl(t.table || t.name); const a = byTbl.get(k); if (a) a.push(t); else byTbl.set(k, [t]); }
+        const pooled: TaggedFile[] = [];
+        byTbl.forEach(grp => {
+          const first = grp[0];
+          pooled.push({ name: first.name, table: first.table, source: bu, bu, data: { headers: first.data.headers, rows: grp.length === 1 ? first.data.rows : grp.flatMap(x => x.data.rows), sheetName: first.data.sheetName } });
+        });
+        if (pooled.length) out.push({ e, results: edges.length ? mergeHierarchy(pooled, targets, edges, overrides) : mergeByRelationships(pooled, targets, overrides) });
         continue;
       }
       if (EXTRA_ENTITY_TABS.has(e.tab)) {
@@ -1522,8 +1534,10 @@ function ValidationsPage() {
             // PS Items) build fine with far more rows. The total-rows guard still
             // catches genuinely huge parent+child sets. Flagged; the CV_ files hold it.
             const childRows = result.childrenData.reduce((s, c) => s + c.rows.length, 0);
-            const cap = e.tab === HCM_PERSON_TAB ? 3000 : 50000;
-            if (result.recordCount > cap || result.recordCount + childRows > 100000) { tooLarge.push(`${bu} (${result.recordCount.toLocaleString()})`); continue; }
+            // Population sheets are gone (HCM Person too), so the workbook build is
+            // cheap; the total-rows guard is what protects against a huge parent+child
+            // load. One cap for everyone now.
+            if (result.recordCount > 50000 || result.recordCount + childRows > 100000) { tooLarge.push(`${bu} (${result.recordCount.toLocaleString()})`); continue; }
             const r = await sampleAndWriteResult({ entity, agency: result.bu || bu, tab: e.tab, bu, N: result.recordCount, data: resultToFileData(result), merged: result, download: false });
             if (r) reports++; else skipped.push(`${bu}/${entity}`);
           }
