@@ -90,6 +90,8 @@ const SYNONYMS: Record<string, string> = {
   GLBUDGETBALANCE: 'GL BUDGET BALANCES',
   GLBUDGETBALANCES: 'GL BUDGET BALANCES',
   PEOPLESOFTITEMS: 'PEOPLE SOFT ITEMS',
+  PSITEM: 'PEOPLE SOFT ITEMS',
+  PSITEMS: 'PEOPLE SOFT ITEMS',
 };
 
 export function matchEntity(text: string): string | null {

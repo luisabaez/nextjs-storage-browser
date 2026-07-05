@@ -139,12 +139,18 @@ function buFileEmptyReason(empties: EmptyRow[], entity: string, label: string, b
 function agencyColumnForEntity(report: AgencyReport | null, valReport: ValidationReport | null, tab: string): string | null {
   if (!report) return null;
   const e = valReport?.entities.find(x => x.tab === tab);
-  const cands = [tab, e?.entity, e?.files.find(f => f.role === 'master')?.label].filter(Boolean).map(s => normStr(s as string));
+  const raw = [tab, e?.entity, e?.files.find(f => f.role === 'master')?.label].filter(Boolean) as string[];
+  const cands = raw.map(s => normStr(s));
+  // Canonical entity names (synonym-aware) so a tab like "PS Items" still resolves
+  // to the agency-report column "Peoplesoft Item" even though the names don't overlap.
+  const canon = new Set(raw.map(s => matchEntity(s)).filter(Boolean));
   let best: string | null = null, bestScore = 0;
   for (const col of report.entities) {
     const nc = normStr(col);
     let score = 0;
     for (const c of cands) { if (!c) continue; if (nc === c) score = Math.max(score, 3); else if (nc.includes(c) || c.includes(nc)) score = Math.max(score, 2); }
+    const cc = matchEntity(col);
+    if (cc && canon.has(cc)) score = Math.max(score, 3);
     if (score > bestScore) { bestScore = score; best = col; }
   }
   return bestScore > 0 ? best : null;
