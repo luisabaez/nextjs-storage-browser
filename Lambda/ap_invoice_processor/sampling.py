@@ -800,9 +800,11 @@ def _bu_matches(bu_filter, source, bu, ledger_segment=False):
     7-digit segment value (0150000 -> 015, 0450121 -> 045)."""
     if bu_filter in (source, bu):
         return True
-    for v in (source, bu):
-        if v and _SOURCE_BU_MAP.get(str(v).strip().upper()) == bu_filter:
-            return True
+    # A named source system (SALUD -> 071) resolves to its BU, but only for a source-
+    # keyed split with no numeric BU of its own — so entities that use SALUD / SIFDE as
+    # a source system while carrying a real BU aren't mis-matched to 071 / 081.
+    if not bu and source and _SOURCE_BU_MAP.get(str(source).strip().upper()) == bu_filter:
+        return True
     if ledger_segment:
         want = bu_filter.lstrip('0') or '0'
         for v in (source, bu):
