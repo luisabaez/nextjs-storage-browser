@@ -1165,9 +1165,9 @@ function ValidationsPage() {
   const filterIncludedFiles = useCallback((bu: string, e: EntityValidation, tagged: TaggedFile[]): TaggedFile[] => {
     const included = includedFilesFor(bu, e.tab);
     const rootSet = new Set((samplingTargetsRef.current || []).map(t => normTbl(t.table)));
-    const masterIncluded = e.files.some(f => f.role === 'master' && included.includes(f.label));
+    const masterIncluded = e.files.some(f => f.role === 'master' && included.some(l => normStr(l) === normStr(f.label)));
     const childFiles = e.files.filter(f => f.role !== 'master');
-    return tagged.filter(t => {
+    const kept = tagged.filter(t => {
       if (!t.table) return true;
       const nt = normStr(t.table);
       if (rootSet.has(normTbl(t.table))) return masterIncluded;
@@ -1179,6 +1179,12 @@ function ValidationsPage() {
       const label = best || tableLabel(t.table);
       return included.some(lbl => normStr(lbl) === normStr(label));
     });
+    // A per-BU assignment can carry an imported file-label vocabulary (the cutover
+    // agencies 015/016/081/095, whose lists came from the entity validation report:
+    // "PO FINAL"/"LINES"/…) that reconciles with none of the report/table-derived
+    // labels — which would filter every file out and generate nothing. If the
+    // include-list matched nothing, keep all of the BU's files instead of zeroing out.
+    return kept.length ? kept : tagged;
   }, [includedFilesFor]);
 
   // An injected entity's sub-entities from the live plan, each with the converted
