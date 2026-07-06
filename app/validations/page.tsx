@@ -221,18 +221,18 @@ const hcmGroupOf = (src: string | undefined): string => HCM_SOURCE_TO_GROUP[(src
 // Assemble a MergeResult from the server-sampled Person sheets (master + children) so
 // the standard report builder can render it. Every returned row IS the sample; children
 // link to the master on PERSON_NUMBER.
-function personServerToMergeResult(sourceLabel: string, personKey: string, sheets: { label: string; table: string; headers: string[]; rows: unknown[][] }[]): MergeResult {
-  const master = sheets[0] || { label: 'Person', table: '', headers: [], rows: [] };
-  const keyN = normStr(personKey);
-  // Resolve each child's link column: the master's key name first, else any header
-  // that normalizes to contain PERSON_NUMBER — so a slightly differently named child
-  // key still links (rather than silently yielding an empty child sample).
+function sheetsToMergeResult(bu: string, entityToken: string, key: string, sheets: { label: string; table: string; headers: string[]; rows: unknown[][] }[]): MergeResult {
+  const master = sheets[0] || { label: entityToken, table: '', headers: [], rows: [] };
+  const keyN = normStr(key);
+  // Resolve each child's link column: the master's key name first, else any header that
+  // normalizes to contain it — so a slightly differently named child key still links
+  // (rather than silently yielding an empty child sample).
   const keyIdxOf = (headers: string[]) => {
     const i = headers.findIndex(h => normStr(h) === keyN);
-    return i >= 0 ? i : headers.findIndex(h => normStr(h).includes('PERSONNUMBER'));
+    return i >= 0 ? i : (keyN ? headers.findIndex(h => normStr(h).includes(keyN)) : -1);
   };
   return {
-    bu: sourceLabel, entityToken: 'Person', parentName: master.table, key: personKey,
+    bu, entityToken, parentName: master.table, key,
     headers: master.headers, rows: master.rows, parentHeaders: master.headers,
     children: [],
     childrenData: sheets.slice(1).map(s => ({
@@ -1618,6 +1618,24 @@ function ValidationsPage() {
         }
       } catch { /* dry-run failed: any group left unsized is skipped (shown as no-data) */ }
     }
+    // Non-Person entities: pre-size each BU's root population so a BU too large to build
+    // in-browser (e.g. Purchase Orders 081) is drawn server-side instead of skipped.
+    const SERVER_SAMPLE_THRESHOLD = 10000; // root rows above which sampling runs server-side
+    const entityRootN: Record<string, number> = {};
+    // Injected entities (GL/Location/Customer&Sponsor) use their own pooled writer
+    // (sampleAndWriteInjected), so they must NOT be routed through the generic server path.
+    if (entityTab !== HCM_PERSON_TAB && !EXTRA_ENTITY_TABS.has(entityTab)) {
+      try {
+        const plan = reportToPlanEntity.get(entityTab);
+        const rootNorm = normTbl(resolveEntityTarget(valReport, samplingTargetsRef.current || [], entityTab)?.table || '');
+        if (plan && rootNorm) {
+          const d = await (await fetch(`${LAMBDA_URL}?action=generate_entity_files&mock=${PLAN_MOCK}&entity=${encodeURIComponent(plan)}&dry_run=1`)).json();
+          const ledger = LEDGER_ENTITY_TABS.has(entityTab);
+          const rootEntries = (d.planned || []).filter((p: { table: string }) => normTbl(p.table) === rootNorm);
+          for (const b of bus) entityRootN[b] = rootEntries.filter((p: { source: string; bu: string }) => buMatchesGen(b, p.source, p.bu, ledger)).reduce((s: number, p: { rows?: number }) => s + (p.rows || 0), 0);
+        }
+      } catch { /* no sizing -> client-side path handles it */ }
+    }
     for (let i = 0; i < bus.length; i++) {
       const bu = bus[i];
       setEntityRun({ running: true, done: i, total: bus.length, current: bu, note: '' });
@@ -1632,10 +1650,30 @@ function ValidationsPage() {
           if (!grp || !n) { skipped.push(bu); continue; }
           const resp = await (await fetch(`${LAMBDA_URL}?action=sample_hcm_person&mock=${PLAN_MOCK}&sources=${encodeURIComponent(grp.sources.join(','))}&n=${n}${actor}`)).json();
           if (!resp.ok || !resp.sample_size || !(resp.sheets || []).length) { skipped.push(bu); continue; }
-          const merged = personServerToMergeResult(bu, resp.person_key || 'PERSON_NUMBER', resp.sheets);
+          const merged = sheetsToMergeResult(bu, 'Person', resp.person_key || 'PERSON_NUMBER', resp.sheets);
           const r = await sampleAndWriteResult({ entity: 'Person', agency: bu, tab: HCM_PERSON_TAB, bu, N: resp.population || N, data: { headers: merged.headers.map(String), rows: merged.rows, sheetName: 'Person' }, merged, download: false, preSampled: true });
           if (r) reports++; else skipped.push(bu);
           continue;
+        }
+        // Oversized entities: draw the sample server-side so the browser doesn't load the
+        // full population + children (e.g. Purchase Orders 081 = 24K POs, ~265K child rows).
+        if (!EXTRA_ENTITY_TABS.has(entityTab) && (entityRootN[bu] || 0) > SERVER_SAMPLE_THRESHOLD) {
+          const plan = reportToPlanEntity.get(entityTab);
+          const cls = matchEntity(resolveEntityTarget(valReport, samplingTargetsRef.current || [], entityTab)?.table || '') || matchEntity(entityTab) || '';
+          const tier = confidenceTierFor(bu, entityTab, cls);
+          const n = plan && tier ? computeSampleSize(entityRootN[bu], tier) : 0;
+          if (plan && n) {
+            try {
+              const resp = await (await fetch(`${LAMBDA_URL}?action=sample_entity_by_bu&mock=${PLAN_MOCK}&entity=${encodeURIComponent(plan)}&bu=${encodeURIComponent(bu)}&n=${n}${actor}`)).json();
+              if (resp.ok && (resp.sheets || []).length && resp.sample_size) {
+                const entName = matchEntity(entityTab) || entityTab;
+                const merged = sheetsToMergeResult(bu, entName, resp.root_key || '', resp.sheets);
+                const r = await sampleAndWriteResult({ entity: entName, agency: bu, tab: entityTab, bu, N: resp.population || entityRootN[bu], data: { headers: merged.headers.map(String), rows: merged.rows, sheetName: entName }, merged, download: false, preSampled: true });
+                if (r) { reports++; continue; }
+              }
+            } catch (e) { console.error('server-side sample failed', bu, e); }
+            // fall through to client-side if the server path didn't produce a sample
+          }
         }
         // 1) generate this BU's missing files for the entity
         const toGen = buEntitiesToGenerate(bu, entityTab);

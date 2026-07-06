@@ -1717,6 +1717,29 @@ def lambda_handler(event, context):
             return {"statusCode": 500, "headers": headers,
                     "body": json.dumps({"ok": False, "error": str(e)})}
 
+    if action == "sample_entity_by_bu":
+        # ?action=sample_entity_by_bu&mock=MOCK14&entity=Purchase Orders&bu=081&n=250
+        # Server-side per-BU sampling for oversized entities: returns the sampled root
+        # rows + their linked children so the browser needn't load the population.
+        try:
+            p = event.get("queryStringParameters") or {}
+            entity = (p.get("entity") or "").strip()
+            bu = (p.get("bu") or "").strip()
+            sample_size = p.get("n") or p.get("sample_size") or 0
+            mock = (p.get("mock") or "MOCK14").upper()
+            if not entity or not bu:
+                return {"statusCode": 400, "headers": headers,
+                        "body": json.dumps({"ok": False, "error": "entity and bu required"})}
+            conn_str = get_connection_string()
+            res = sampling.sample_entity_by_bu(conn_str, entity, bu, sample_size, mock=mock)
+            return {"statusCode": 200 if res.get("ok") else 400,
+                    "headers": headers,
+                    "body": json.dumps(res, default=str)}
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
     if action == "generate_entity_files":
         # ?action=generate_entity_files&mock=MOCK14&entity=Supplier[&subentity=..][&dry_run=1]
         # Server-side run of the ConvertedFilesBySource scripts for one entity:

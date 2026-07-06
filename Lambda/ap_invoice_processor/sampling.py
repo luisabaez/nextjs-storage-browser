@@ -959,6 +959,111 @@ def sample_hcm_person(conn_str, sources, sample_size, mock='MOCK14', source_db=N
             "person_key": pn_col, "sources": srcs, "sheets": sheets}
 
 
+def sample_entity_by_bu(conn_str, entity, bu, sample_size, mock='MOCK14', source_db=None):
+    """Server-side per-BU sampling for any entity whose population is too large to build
+    in the browser (e.g. Purchase Orders BU 081). Reads the entity's conversion plan to
+    find the root (target) table and how it keys the BU, samples `sample_size` root rows
+    for that BU, then fetches only those rows' children (linked via the relationship
+    graph). Returns the sampled sheets so the browser builds its report from a small set."""
+    db = source_db or SOURCE_DATABASE
+    try:
+        n_req = int(sample_size)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "sample_size must be a number"}
+    bu = str(bu).strip()
+    ledger = (entity or '').strip().lower() in _LEDGER_SEGMENT_ENTITIES
+    plan_table = f"SETUP_CONVERSION_PLAN_{mock}"
+    with pyodbc.connect(conn_str) as conn:
+        cur = conn.cursor()
+        where = ("ISNULL([CONVERSION_TABLE_BU],'') <> '' AND ISNULL([ENRICHMENT_SYSTEM],'') <> 'Y' "
+                 "AND ISNULL([CONVERSION_TABLE_SourceField],'') <> '' AND [Entity] = ?")
+        cur.execute(f"SELECT DISTINCT [CONVERSION_TABLE_BU],[CONVERSION_TABLE_SourceField],"
+                    f"[CONVERSION_TABLE_BU_Field] FROM [{db}].[dbo].[{plan_table}] WHERE {where}", (entity,))
+        plans = cur.fetchall()
+        # Find the root table (a sampling target) whose distinct source/BU combos match
+        # the requested BU. Build the WHERE that selects that BU's root rows.
+        root = None
+        r_src_col = r_bu_col = None
+        conds, params = [], []
+        for (table, src_field, bu_field) in plans:
+            table = (table or '').strip()
+            if table not in _TARGET_SET:
+                continue
+            _, cols = _object_meta(cur, db, table)
+            if not cols:
+                continue
+            src_field = (src_field or '').strip()
+            src_col = _resolve_col(cols, src_field)
+            if not src_col:
+                continue
+            bu_col = _resolve_col(cols, (bu_field or '').strip()) if (bu_field or '').strip() else None
+            if bu_col and bu_col.lower() == src_col.lower():
+                bu_col = None
+            fq = f"[{db}].[dbo].[{table}]"
+            if bu_col:
+                cur.execute(f"SELECT DISTINCT [{src_col}],[{bu_col}] FROM {fq} WHERE [{src_col}] <> ?", (src_field,))
+            else:
+                cur.execute(f"SELECT DISTINCT [{src_col}] FROM {fq} WHERE [{src_col}] <> ?", (src_field,))
+            for c in cur.fetchall():
+                if c[0] is None:
+                    continue
+                rs = str(c[0]).strip()
+                has_bu = bool(bu_col) and len(c) > 1 and c[1] is not None
+                rb = str(c[1]).strip() if has_bu else ''
+                if not _bu_matches(bu, rs, rb, ledger):
+                    continue
+                if has_bu:
+                    conds.append(f"([{src_col}]=? AND [{bu_col}]=?)"); params += [c[0], c[1]]
+                else:
+                    conds.append(f"[{src_col}]=?"); params += [c[0]]
+            if conds:
+                root, r_src_col, r_bu_col = table, src_col, bu_col
+                break
+        if not root or not conds:
+            return {"ok": False, "error": f"no root table matched BU {bu} for {entity}"}
+        r_schema, _ = _object_meta(cur, db, root)
+        r_fq = _qualified(db, r_schema, root)
+        wc = " OR ".join(conds)
+        cur.execute(f"SELECT COUNT(*) FROM {r_fq} WHERE {wc}", params)
+        population = cur.fetchone()[0]
+        n = max(1, min(n_req, population)) if population else 0
+        sheets = []
+        if n:
+            cur.execute(f"SELECT TOP ({n}) * FROM {r_fq} WHERE {wc} ORDER BY NEWID()", params)
+            r_headers = [d[0] for d in cur.description]
+            r_rows = [[_coerce(v) for v in row] for row in cur.fetchall()]
+            sheets.append({"label": _short_name(root), "table": root, "headers": r_headers, "rows": r_rows})
+            for child, link_field in _children_of(root):
+                c_schema, c_cols = _object_meta(cur, db, child)
+                if not c_cols:
+                    continue
+                p_link = resolve_link_column(r_headers, link_field)
+                c_link = resolve_link_column(c_cols, link_field)
+                if not (p_link and c_link):
+                    continue
+                pi = r_headers.index(p_link)
+                keys = sorted({row[pi] for row in r_rows if row[pi] is not None}, key=lambda x: str(x))
+                c_fq = _qualified(db, c_schema, child)
+                c_headers, c_rows = list(c_cols), []
+                for i in range(0, len(keys), IN_CHUNK):
+                    batch = keys[i:i + IN_CHUNK]
+                    ph = ",".join("?" * len(batch))
+                    cur.execute(f"SELECT * FROM {c_fq} WHERE [{c_link}] IN ({ph})", batch)
+                    c_headers = [d[0] for d in cur.description]
+                    c_rows.extend([[_coerce(v) for v in row] for row in cur.fetchall()])
+                sheets.append({"label": _short_name(child), "table": child, "headers": c_headers, "rows": c_rows})
+    # The root's unique-id column (what children link on) — for the report's highlight.
+    root_key = None
+    for child, link_field in _children_of(root):
+        rk = resolve_link_column(sheets[0]["headers"], link_field) if sheets else None
+        if rk:
+            root_key = rk
+            break
+    return {"ok": True, "entity": entity, "bu": bu, "root": root, "population": population,
+            "sample_size": (len(sheets[0]["rows"]) if sheets else 0),
+            "root_key": root_key, "sheets": sheets}
+
+
 def generate_entity_files(conn_str, s3, bucket, mock, entity, subentity=None,
                           dry_run=False, source_db=None, actor="", bu_filter=None):
     # bu_filter: when set, only source[/BU] splits whose source OR BU value equals
