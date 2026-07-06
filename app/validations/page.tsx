@@ -210,15 +210,20 @@ const HCM_PERSON_FOLDERS = new Set(HCM_PERSON_SUB.map(s => safeName(s.plan)));
 // segment (0150000) whose first 3 digits are the BU. `allBUs` marks an entity the
 // agency report doesn't track (Location) — it attaches to every BU and the run
 // samples whichever have data.
-const EXTRA_ENTITIES: { tab: string; entity: string; plan: string; target: string; key: string; masterLabel: string; ledger?: boolean; allBUs?: boolean }[] = [
+// `fixedAgency` marks an entity keyed only by a source SYSTEM with no numeric BU
+// (Customer and Sponsor lives entirely under PRIFAS): it attaches to that one agency
+// and its single sample file is labelled by that name.
+const EXTRA_ENTITIES: { tab: string; entity: string; plan: string; target: string; key: string; masterLabel: string; ledger?: boolean; allBUs?: boolean; fixedAgency?: string }[] = [
   { tab: 'GL Balance', entity: 'GL Balance', plan: 'GL Balances', target: 'FIN_GL_BALANCES_MOCK14_VW_TBL', key: 'Segment2 - Agency', masterLabel: 'GL Balances', ledger: true },
   { tab: 'GL Budget Balance', entity: 'GL Budget Balance', plan: 'GL Budget Balances', target: 'FIN_BUDGET_BALANCE_MOCK14_VW_TBL', key: 'Segment2 - Agency', masterLabel: 'Budget Balance', ledger: true },
   { tab: 'Location', entity: 'Location', plan: 'Finance Location', target: 'SCM_LOCATION_MOCK14_VW_CONVERTED', key: 'LOCATION_CODE', masterLabel: 'Location', allBUs: true },
+  { tab: 'Customer and Sponsor', entity: 'Customer and Sponsor', plan: 'Customer and Sponsor', target: 'FIN_PRIFAS_CUSTOMER_MOCK14_VW_TBL', key: 'Primary Sponsor Name', masterLabel: 'Customer and Sponsor', fixedAgency: 'PRIFAS' },
 ];
 const EXTRA_ENTITY_TABS = new Set(EXTRA_ENTITIES.map(x => x.tab));
 const EXTRA_ENTITY_TARGET: Record<string, string> = Object.fromEntries(EXTRA_ENTITIES.map(x => [x.tab, x.target]));
 const LEDGER_ENTITY_TABS = new Set(EXTRA_ENTITIES.filter(x => x.ledger).map(x => x.tab));
 const EXTRA_ENTITY_ALLBUS = new Set(EXTRA_ENTITIES.filter(x => x.allBUs).map(x => x.tab));
+const EXTRA_ENTITY_FIXED: Record<string, string> = Object.fromEntries(EXTRA_ENTITIES.filter(x => x.fixedAgency).map(x => [x.tab, x.fixedAgency as string]));
 function extraEntity(x: { tab: string; entity: string; key: string; masterLabel: string }): EntityValidation {
   return {
     tab: x.tab, entity: x.entity, key: x.key, keyParts: [x.key],
@@ -855,9 +860,10 @@ function ValidationsPage() {
       const add = (tab: string) => { if (valReport?.entities.some(e => e.tab === tab) && !out.includes(tab)) out.push(tab); };
       add(HCM_PERSON_TAB); // #9: HCM Person applies to every BU
       EXTRA_ENTITY_ALLBUS.forEach(tab => add(tab)); // untracked injected entities (Location) apply to every BU
+      EXTRA_ENTITIES.forEach(x => { if (x.fixedAgency && x.fixedAgency === bu) add(x.tab); }); // fixed single-agency entities (Customer and Sponsor -> PRIFAS)
       const r = report?.bus.find(b => b.unit === bu);
       if (r) for (const x of EXTRA_ENTITIES) {
-        if (EXTRA_ENTITY_ALLBUS.has(x.tab)) continue; // already added above
+        if (EXTRA_ENTITY_ALLBUS.has(x.tab) || x.fixedAgency) continue; // already handled above
         const col = agencyColumnForEntity(report, valReport, x.tab);
         if (col && r.statuses[col] != null && String(r.statuses[col]).trim() !== '') add(x.tab);
       }
@@ -1509,6 +1515,9 @@ function ValidationsPage() {
     // report — they apply to every BU, so the entity-run spans them all (the preview
     // sizes each; BUs with no data show N=0).
     if (entityTab === HCM_PERSON_TAB || EXTRA_ENTITY_ALLBUS.has(entityTab)) return report.bus.map(b => b.unit);
+    // Fixed single-agency entities (Customer and Sponsor) aren't in the agency report;
+    // they run once under their one named agency (PRIFAS).
+    if (EXTRA_ENTITY_FIXED[entityTab]) return [EXTRA_ENTITY_FIXED[entityTab]];
     const col = agencyColumnForEntity(report, valReport, entityTab);
     if (!col) return [];
     return report.bus.filter(b => { const s = b.statuses[col]; return s != null && String(s).trim() !== ''; }).map(b => b.unit);
