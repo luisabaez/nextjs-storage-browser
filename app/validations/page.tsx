@@ -1207,7 +1207,12 @@ function ValidationsPage() {
         const plan = reportToPlanEntity.get(e.tab);
         const subs = plan ? injectedSubEntities(plan) : [];
         if (!subs.length) continue; // nothing flagged On Conversion Plan = Y (e.g. Location until they flip it)
-        const g = items.find(x => matchReportEntity(valReport, x.entity)?.tab === e.tab);
+        // Find the generated folder by the plan name first (safeName), then fall back
+        // to a name-overlap match. matchReportEntity alone is unreliable when another
+        // entity's name is a substring — e.g. "Customer" pre-matches "Customer and
+        // Sponsor"'s folder, so the injected entity would never resolve its files.
+        const g = (plan && items.find(x => x.entity === safeName(plan)))
+          || items.find(x => matchReportEntity(valReport, x.entity)?.tab === e.tab);
         if (!g) continue;
         const manifest = await readEntityManifests(PLAN_MOCK, g.entity);
         const ledger = LEDGER_ENTITY_TABS.has(e.tab);
