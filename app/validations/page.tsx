@@ -294,6 +294,12 @@ function buMatchesGen(bu: string, source: string | undefined, buVal: string | un
 // Pool several generated files of one sub-entity (an agency's source-system
 // segment splits of one flat table) into a single parent-only MergeResult: union
 // the rows, aligning by column name so a variant with an extra column still fits.
+// FIN_CUSTOMER_EE (Employees) shares FIN_CUSTOMER's schema but is a DISJOINT customer
+// population (not a linked child), so it rides in the Customer workbook as its own
+// independently-sampled sheet. The label doubles as the result marker that routes the
+// entity through the multi-sheet writer.
+const CUSTOMER_EE_TABLE = 'FIN_CUSTOMER_EE_MOCK14_VW_TBL';
+const CUSTOMER_EE_LABEL = 'Customer Employees';
 function poolFlatResult(bu: string, label: string, key: string, files: TaggedFile[]): MergeResult {
   const headers: string[] = [];
   const at = new Map<string, number>();
@@ -1323,6 +1329,10 @@ function ValidationsPage() {
       // fragmentation). Skip for the shared-entity fallback, whose files span agencies.
       const merged = sharedFallback ? forBU : forBU.map(t => ({ ...t, source: bu }));
       const results = edges.length ? mergeHierarchy(merged, targets, edges, overrides) : mergeByRelationships(merged, targets, overrides);
+      // Customer Employees (FIN_CUSTOMER_EE) is a disjoint second master — pool its rows
+      // into an independent result so it becomes its own sheet in the Customer workbook.
+      const eeFiles = tagged.filter(t => normTbl(t.table || '') === normTbl(CUSTOMER_EE_TABLE));
+      if (eeFiles.length) results.push(poolFlatResult(bu, CUSTOMER_EE_LABEL, e.key, eeFiles));
       out.push({ e, results });
     }
     return out;
@@ -1699,6 +1709,17 @@ function ValidationsPage() {
             // sub-entity. Flat sheets tolerate far more rows than a wide HCM master.
             const totalRows = results.reduce((s, r) => s + r.recordCount, 0);
             if (totalRows > 50000) { tooLarge.push(`${bu} (${totalRows.toLocaleString()})`); continue; }
+            const r = await sampleAndWriteInjected(e, bu, results);
+            if (r) reports++; else skipped.push(`${bu}/${e.entity}`);
+            continue;
+          }
+          // Multi-master entity (Customer's Organizations + its disjoint Employees
+          // master): write both independent samples into ONE workbook, a sheet each —
+          // reusing the injected writer. Gated on the EE marker so a genuine multi-root
+          // entity (e.g. Purchase Orders FINAL + 911) still writes one file per root.
+          if (results.length > 1 && results.some(r => r.entityToken === CUSTOMER_EE_LABEL)) {
+            const totalRows = results.reduce((s, r) => s + r.recordCount, 0);
+            if (totalRows > 100000) { tooLarge.push(`${bu} (${totalRows.toLocaleString()})`); continue; }
             const r = await sampleAndWriteInjected(e, bu, results);
             if (r) reports++; else skipped.push(`${bu}/${e.entity}`);
             continue;
