@@ -88,6 +88,13 @@ const SOURCE_BU_MAP: Record<string, string> = {
 function rowMatchesBU(source: string | undefined, buVal: string | undefined, bu: string): boolean {
   if (source === bu || buVal === bu) return true;
   if (!buVal && source && SOURCE_BU_MAP[source.trim().toUpperCase()] === bu) return true;
+  // A 7-digit ledger-style segment carries the 3-digit BU as its prefix (0150000 ->
+  // 015). Self-identifying, so a source/BU value of that form matches its BU — needed
+  // by the by-BU child views (e.g. the PO LINES_DISTRIBUTION source 0150000) in BOTH
+  // the file load (buMatchesGen) and the presence/readiness checks (buFilePresent),
+  // which is why it lives in this shared primitive rather than only in buMatchesGen.
+  const want = bu.replace(/^0+/, '') || '0';
+  for (const v of [source, buVal]) if (v && /^\d{7}$/.test(v) && ((v.slice(0, 3).replace(/^0+/, '')) || '0') === want) return true;
   return false;
 }
 
@@ -276,18 +283,12 @@ function extraEntity(x: { tab: string; entity: string; key: string; masterLabel:
     verdict: '', status: 'STANDALONE',
   };
 }
-// Whether a generated file's source/BU value belongs to the requested BU. Exact
-// match for normal entities; a named source system maps to its BU (SALUD -> 071);
-// ledger entities also match a 3-digit BU against the agency prefix of a 7-digit
-// segment value (0150000 -> 015, 0450121 -> 045).
+// Whether a generated file's source/BU value belongs to the requested BU. All the
+// matching (exact, named-source SALUD -> 071, and the 7-digit ledger-segment prefix
+// 0150000 -> 015) lives in rowMatchesBU so the file load and the presence/readiness
+// checks stay in lock-step. `ledger` is retained for call-site compatibility.
 function buMatchesGen(bu: string, source: string | undefined, buVal: string | undefined, ledger: boolean): boolean {
-  if (rowMatchesBU(source, buVal, bu)) return true;
-  // A 7-digit ledger-style segment carries the 3-digit BU as its prefix (0150000 ->
-  // 015). Self-identifying, so match it for ANY entity — e.g. the Purchase Order
-  // DISTRIBUTION_BY_BU child (source 0160000) — not just ledger entities.
-  const want = bu.replace(/^0+/, '') || '0';
-  for (const v of [source, buVal]) if (v && /^\d{7}$/.test(v) && ((v.slice(0, 3).replace(/^0+/, '')) || '0') === want) return true;
-  return false;
+  return rowMatchesBU(source, buVal, bu);
 }
 
 // Pool several generated files of one sub-entity (an agency's source-system
@@ -1165,12 +1166,15 @@ function ValidationsPage() {
   const filterIncludedFiles = useCallback((bu: string, e: EntityValidation, tagged: TaggedFile[]): TaggedFile[] => {
     const included = includedFilesFor(bu, e.tab);
     const rootSet = new Set((samplingTargetsRef.current || []).map(t => normTbl(t.table)));
-    const masterIncluded = e.files.some(f => f.role === 'master' && included.some(l => normStr(l) === normStr(f.label)));
     const childFiles = e.files.filter(f => f.role !== 'master');
     const kept = tagged.filter(t => {
       if (!t.table) return true;
       const nt = normStr(t.table);
-      if (rootSet.has(normTbl(t.table))) return masterIncluded;
+      // Always keep the root/master table — a sample can't be built without it, and an
+      // imported assignment vocabulary may not label-match the master (e.g. the cutover
+      // agencies' "PO FINAL" vs the report's "PO FINAL (Header)"), which otherwise
+      // dropped the header and produced a child-only, master-less result.
+      if (rootSet.has(normTbl(t.table))) return true;
       let best = '', bestTok = 0;
       for (const f of childFiles) {
         const toks = labelTokens(f.label);
