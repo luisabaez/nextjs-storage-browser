@@ -282,10 +282,11 @@ function extraEntity(x: { tab: string; entity: string; key: string; masterLabel:
 // segment value (0150000 -> 015, 0450121 -> 045).
 function buMatchesGen(bu: string, source: string | undefined, buVal: string | undefined, ledger: boolean): boolean {
   if (rowMatchesBU(source, buVal, bu)) return true;
-  if (ledger) {
-    const want = bu.replace(/^0+/, '') || '0';
-    for (const v of [source, buVal]) if (v && /^\d{7}$/.test(v) && ((v.slice(0, 3).replace(/^0+/, '')) || '0') === want) return true;
-  }
+  // A 7-digit ledger-style segment carries the 3-digit BU as its prefix (0150000 ->
+  // 015). Self-identifying, so match it for ANY entity — e.g. the Purchase Order
+  // DISTRIBUTION_BY_BU child (source 0160000) — not just ledger entities.
+  const want = bu.replace(/^0+/, '') || '0';
+  for (const v of [source, buVal]) if (v && /^\d{7}$/.test(v) && ((v.slice(0, 3).replace(/^0+/, '')) || '0') === want) return true;
   return false;
 }
 

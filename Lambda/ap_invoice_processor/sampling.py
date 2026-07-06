@@ -803,9 +803,9 @@ _SOURCE_BU_MAP = {'SALUD': '071', 'SIFDE': '081'}
 
 def _bu_matches(bu_filter, source, bu, ledger_segment=False):
     """Whether a source/BU split belongs to the requested BU. Exact match for
-    normal entities; a named source system maps to its BU (SALUD -> 071); for
-    ledger-segment entities also match a 3-digit BU to the agency prefix of a
-    7-digit segment value (0150000 -> 015, 0450121 -> 045)."""
+    normal entities; a named source system maps to its BU (SALUD -> 071); a 3-digit BU
+    also matches the agency prefix of a 7-digit segment value (0150000 -> 015,
+    0450121 -> 045)."""
     if bu_filter in (source, bu):
         return True
     # A named source system (SALUD -> 071) resolves to its BU, but only for a source-
@@ -813,11 +813,15 @@ def _bu_matches(bu_filter, source, bu, ledger_segment=False):
     # a source system while carrying a real BU aren't mis-matched to 071 / 081.
     if not bu and source and _SOURCE_BU_MAP.get(str(source).strip().upper()) == bu_filter:
         return True
-    if ledger_segment:
-        want = bu_filter.lstrip('0') or '0'
-        for v in (source, bu):
-            if v and v.isdigit() and len(v) == 7 and (v[:3].lstrip('0') or '0') == want:
-                return True
+    # A 7-digit ledger-style segment carries the 3-digit BU as its prefix. The form is
+    # self-identifying, so match it for ANY entity (e.g. the Purchase Order
+    # DISTRIBUTION_BY_BU child, whose source is the 7-digit segment 0160000), not just
+    # the ledger-segment entities.
+    want = bu_filter.lstrip('0') or '0'
+    for v in (source, bu):
+        v = str(v).strip()
+        if v.isdigit() and len(v) == 7 and (v[:3].lstrip('0') or '0') == want:
+            return True
     return False
 
 
