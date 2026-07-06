@@ -1359,9 +1359,11 @@ function ValidationsPage() {
     const files = p.merged
       ? mergeResultToReportFiles(p.merged, selectedIndices, titleCaseEntity(p.entity))
       : [singleFileReport(titleCaseEntity(p.entity), p.data.sheetName || p.entity, p.data.headers, p.data.rows, selectedIndices)];
-    // HCM Person's Population sheets are enormous (165-col Person Name × 8 sub-entities),
-    // so even the internal copy omits them — the team reads the full data from the DB.
-    const withPop = p.tab !== HCM_PERSON_TAB;
+    // Population sheets are dropped from the internal (Local) copy for entities whose
+    // populations are too large to be useful there — HCM Person (165-col Person Name ×
+    // 8 sub-entities) and Purchase Orders. The team reads the full data from the DB; the
+    // client/server copies never carry Population.
+    const withPop = p.tab !== HCM_PERSON_TAB && matchEntity(p.entity) !== 'PURCHASE ORDERS';
     const full = buildPerFileReport(files, meta, { includeSizing: true, includePopulation: withPop, integrity: p.merged?.integrity });
     const client = buildPerFileReport(files, meta, { includeSizing: false, includePopulation: false }); // client + server copy: Sample sheets only
     await uploadData({ path: `${LOCAL_FOLDER}${base}.xlsx`, data: new Blob([await reportToBuffer(full)], { type: XLSX_CT }), options: { contentType: XLSX_CT } }).result;
