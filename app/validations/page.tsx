@@ -586,11 +586,14 @@ function ValidationsPage() {
       const id = `m-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 8)}`;
       setEntries(prev => [...prev, {
         id,
-        fileName: `Consolidated_${result.entityToken}_${result.bu || 'NA'}`,
+        fileName: `Consolidated_${result.entityToken}_${sampleBu ?? result.bu ?? 'NA'}`,
         entity: matchEntity(result.entityToken) || '',
-        agency: result.bu,
+        // Label by the loaded BU (sampleBu), not result.bu — the merge groups by source
+        // so result.bu is the source system (e.g. PRIFAS), which would name the sample
+        // "BU PRIFAS". Fall back to result.bu only for drag-drop (no sampleBu).
+        agency: sampleBu ?? result.bu,
         tab,
-        sampleBu: sampleBu ?? result.bu, // dashboard tracks the loading BU; for HCM that differs from agency (source)
+        sampleBu: sampleBu ?? result.bu, // the loaded BU, used for resume tracking
         N: result.recordCount,
         loading: false, error: '', data: resultToFileData(result),
         genStatus: 'idle', genError: '', generated: null, merged: result,
