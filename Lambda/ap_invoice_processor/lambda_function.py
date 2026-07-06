@@ -1698,6 +1698,25 @@ def lambda_handler(event, context):
             return {"statusCode": 500, "headers": headers,
                     "body": json.dumps({"ok": False, "error": str(e)})}
 
+    if action == "sample_hcm_person":
+        # ?action=sample_hcm_person&mock=MOCK14&sources=RHUM[,ADPPOLICIA]&n=16
+        # Server-side HCM Person sampling by source system: returns the sampled people
+        # + their linked sub-entity rows so the browser needn't load the population.
+        try:
+            p = event.get("queryStringParameters") or {}
+            sources = p.get("sources") or ""
+            sample_size = p.get("n") or p.get("sample_size") or 0
+            mock = (p.get("mock") or "MOCK14").upper()
+            conn_str = get_connection_string()
+            res = sampling.sample_hcm_person(conn_str, sources, sample_size, mock=mock)
+            return {"statusCode": 200 if res.get("ok") else 400,
+                    "headers": headers,
+                    "body": json.dumps(res, default=str)}
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
     if action == "generate_entity_files":
         # ?action=generate_entity_files&mock=MOCK14&entity=Supplier[&subentity=..][&dry_run=1]
         # Server-side run of the ConvertedFilesBySource scripts for one entity:

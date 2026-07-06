@@ -201,6 +201,48 @@ function hcmPersonEntity(): EntityValidation {
 // The generated-folder names (safeName of each sub-entity's plan entity).
 const HCM_PERSON_FOLDERS = new Set(HCM_PERSON_SUB.map(s => safeName(s.plan)));
 
+// HCM Person is published one excel per source system (ATTRIBUTE1), with KRONOSPOL and
+// ADPPOLICIA combined into one (per the client's HCM email). Sampling runs server-side
+// (sample_hcm_person) because a source pools far too many people to load in-browser.
+const HCM_PERSON_SOURCE_GROUPS: { label: string; sources: string[] }[] = [
+  { label: 'RHUM', sources: ['RHUM'] },
+  { label: 'FIMAS', sources: ['FIMAS'] },
+  { label: 'HACIENDA', sources: ['HACIENDA'] },
+  { label: 'DOE', sources: ['DOE'] },
+  { label: 'KRONOSPOL', sources: ['KRONOSPOL', 'ADPPOLICIA'] },
+  { label: '911', sources: ['911'] },
+];
+const HCM_PERSON_SOURCE_LABELS = HCM_PERSON_SOURCE_GROUPS.map(g => g.label);
+const HCM_SOURCE_TO_GROUP: Record<string, string> = Object.fromEntries(
+  HCM_PERSON_SOURCE_GROUPS.flatMap(g => g.sources.map(s => [s, g.label])),
+);
+// Map a file/plan ATTRIBUTE1 source to its published group label (ADPPOLICIA -> KRONOSPOL).
+const hcmGroupOf = (src: string | undefined): string => HCM_SOURCE_TO_GROUP[(src || '').trim().toUpperCase()] || '';
+// Assemble a MergeResult from the server-sampled Person sheets (master + children) so
+// the standard report builder can render it. Every returned row IS the sample; children
+// link to the master on PERSON_NUMBER.
+function personServerToMergeResult(sourceLabel: string, personKey: string, sheets: { label: string; table: string; headers: string[]; rows: unknown[][] }[]): MergeResult {
+  const master = sheets[0] || { label: 'Person', table: '', headers: [], rows: [] };
+  const keyN = normStr(personKey);
+  // Resolve each child's link column: the master's key name first, else any header
+  // that normalizes to contain PERSON_NUMBER — so a slightly differently named child
+  // key still links (rather than silently yielding an empty child sample).
+  const keyIdxOf = (headers: string[]) => {
+    const i = headers.findIndex(h => normStr(h) === keyN);
+    return i >= 0 ? i : headers.findIndex(h => normStr(h).includes('PERSONNUMBER'));
+  };
+  return {
+    bu: sourceLabel, entityToken: 'Person', parentName: master.table, key: personKey,
+    headers: master.headers, rows: master.rows, parentHeaders: master.headers,
+    children: [],
+    childrenData: sheets.slice(1).map(s => ({
+      label: s.label, headers: s.headers, rows: s.rows,
+      keyIdx: keyIdxOf(s.headers), strategy: 'join' as const, sourceFile: s.table,
+    })),
+    integrity: [], warnings: [], recordCount: master.rows.length,
+  };
+}
+
 // Entities present in the conversion plan but not in the validation report, wired
 // into the report-driven views (Sample by BU / Run entity across BUs). Each is a
 // standalone flat table (no child relationships). `plan` = conversion-plan entity
@@ -858,7 +900,10 @@ function ValidationsPage() {
     const withInjected = (tabs: string[]) => {
       const out = [...tabs];
       const add = (tab: string) => { if (valReport?.entities.some(e => e.tab === tab) && !out.includes(tab)) out.push(tab); };
-      add(HCM_PERSON_TAB); // #9: HCM Person applies to every BU
+      // HCM Person is now published per source system (server-side), not per numeric
+      // BU, and is tracked/sampled under its source labels — so it is deliberately NOT
+      // added to a numeric BU's expected set (the per-BU dashboard/completeness would
+      // otherwise always show it pending since it's never sampled under a numeric BU).
       EXTRA_ENTITY_ALLBUS.forEach(tab => add(tab)); // untracked injected entities (Location) apply to every BU
       EXTRA_ENTITIES.forEach(x => { if (x.fixedAgency && x.fixedAgency === bu) add(x.tab); }); // fixed single-agency entities (Customer and Sponsor -> PRIFAS)
       const r = report?.bus.find(b => b.unit === bu);
@@ -1368,13 +1413,15 @@ function ValidationsPage() {
   // Client (no Sizing). Shared by the single-entry Generate button and the
   // entity-wide batch run. `download` triggers a local copy (skipped for batches).
   const sampleAndWriteResult = useCallback(async (
-    p: { entity: string; agency: string; tab?: string; bu?: string; N: number; data: FileData; merged?: MergeResult; download: boolean }
+    p: { entity: string; agency: string; tab?: string; bu?: string; N: number; data: FileData; merged?: MergeResult; download: boolean; preSampled?: boolean }
   ): Promise<{ seed: number; n: number } | null> => {
     const tier = confidenceTierFor(p.agency, p.tab, p.entity); // #5: per-BU confidence override, else default
     if (!tier || !p.N) return null;
-    const n = computeSampleSize(p.N, tier);
+    // preSampled: the merged rows already ARE the sample (drawn server-side, e.g. HCM
+    // Person by source), so take every row rather than re-selecting from the population.
+    const n = p.preSampled ? (p.merged?.recordCount ?? 0) : computeSampleSize(p.N, tier);
     const seed = Math.floor(Math.random() * 2 ** 32) >>> 0;
-    const selectedIndices = selectSample(p.N, n, seed);
+    const selectedIndices = p.preSampled ? Array.from({ length: n }, (_, i) => i) : selectSample(p.N, n, seed);
     const now = new Date();
     const agency = p.agency || 'NA';
     const st = stamp(now);
@@ -1519,7 +1566,8 @@ function ValidationsPage() {
     // HCM Person and untracked injected entities (Location) aren't in the agency
     // report — they apply to every BU, so the entity-run spans them all (the preview
     // sizes each; BUs with no data show N=0).
-    if (entityTab === HCM_PERSON_TAB || EXTRA_ENTITY_ALLBUS.has(entityTab)) return report.bus.map(b => b.unit);
+    if (entityTab === HCM_PERSON_TAB) return HCM_PERSON_SOURCE_LABELS; // one excel per source system
+    if (EXTRA_ENTITY_ALLBUS.has(entityTab)) return report.bus.map(b => b.unit);
     // Fixed single-agency entities (Customer and Sponsor) aren't in the agency report;
     // they run once under their one named agency (PRIFAS).
     if (EXTRA_ENTITY_FIXED[entityTab]) return [EXTRA_ENTITY_FIXED[entityTab]];
@@ -1547,10 +1595,41 @@ function ValidationsPage() {
     setEntityRun({ running: true, done: 0, total: bus.length, current: '', note: '' });
     const actor = userEmail ? `&actor=${encodeURIComponent(userEmail)}` : '';
     let reports = 0; const skipped: string[] = []; const tooLarge: string[] = [];
+    // HCM Person samples server-side per source group; pre-size each group from the
+    // Person root dry-run so we can pass n to the sampler.
+    const hcmGroupN: Record<string, number> = {};
+    if (entityTab === HCM_PERSON_TAB) {
+      try {
+        const plan = reportToPlanEntity.get(entityTab) || 'Person';
+        const rootNorm = normTbl(resolveEntityTarget(valReport, samplingTargetsRef.current || [], entityTab)?.table || '');
+        const d = await (await fetch(`${LAMBDA_URL}?action=generate_entity_files&mock=${PLAN_MOCK}&entity=${encodeURIComponent(plan)}&dry_run=1`)).json();
+        for (const pr of (d.planned || [])) {
+          if (normTbl(pr.table) === rootNorm && String(pr.table).toUpperCase().includes(PLAN_MOCK)) {
+            const g = hcmGroupOf(pr.source);
+            if (g) hcmGroupN[g] = (hcmGroupN[g] || 0) + (pr.rows || 0);
+          }
+        }
+      } catch { /* dry-run failed: any group left unsized is skipped (shown as no-data) */ }
+    }
     for (let i = 0; i < bus.length; i++) {
       const bu = bus[i];
       setEntityRun({ running: true, done: i, total: bus.length, current: bu, note: '' });
       try {
+        // HCM Person: draw the sample server-side (source pools are too large to load
+        // in-browser), then build the standard report from the returned people + kids.
+        if (entityTab === HCM_PERSON_TAB) {
+          const grp = HCM_PERSON_SOURCE_GROUPS.find(g => g.label === bu);
+          const tier = confidenceTierFor(bu, HCM_PERSON_TAB, 'Person');
+          const N = hcmGroupN[bu] || 0;
+          const n = grp && tier && N ? computeSampleSize(N, tier) : 0;
+          if (!grp || !n) { skipped.push(bu); continue; }
+          const resp = await (await fetch(`${LAMBDA_URL}?action=sample_hcm_person&mock=${PLAN_MOCK}&sources=${encodeURIComponent(grp.sources.join(','))}&n=${n}${actor}`)).json();
+          if (!resp.ok || !resp.sample_size || !(resp.sheets || []).length) { skipped.push(bu); continue; }
+          const merged = personServerToMergeResult(bu, resp.person_key || 'PERSON_NUMBER', resp.sheets);
+          const r = await sampleAndWriteResult({ entity: 'Person', agency: bu, tab: HCM_PERSON_TAB, bu, N: resp.population || N, data: { headers: merged.headers.map(String), rows: merged.rows, sheetName: 'Person' }, merged, download: false, preSampled: true });
+          if (r) reports++; else skipped.push(bu);
+          continue;
+        }
         // 1) generate this BU's missing files for the entity
         const toGen = buEntitiesToGenerate(bu, entityTab);
         for (const t of toGen) {
@@ -1593,7 +1672,7 @@ function ValidationsPage() {
       } catch (e) { console.error('run entity across BU failed', bu, e); }
     }
     setEntityRun({ running: false, done: bus.length, total: bus.length, current: '', note: `Done — ${reports} sampled across ${bus.length} BU${bus.length !== 1 ? 's' : ''}${alreadyDone ? ` (+${alreadyDone} earlier)` : ''}${tooLarge.length ? ` · ${tooLarge.length} too large to build here: ${tooLarge.join(', ')}` : ''}${stillLeft ? ` · ${stillLeft} more remaining — reload + run again` : ''}${skipped.length ? ` · ${skipped.length} no-data` : ''}.` });
-  }, [valReport, report, attachedBUsForEntity, buEntitiesToGenerate, buildBUResults, sampleAndWriteResult, sampleAndWriteInjected, userEmail]);
+  }, [valReport, report, attachedBUsForEntity, buEntitiesToGenerate, buildBUResults, sampleAndWriteResult, sampleAndWriteInjected, userEmail, reportToPlanEntity, confidenceTierFor, PLAN_MOCK]);
 
   // Preview the per-BU sample sizes for an entity before running. N is estimated
   // from the entity's dry-run (root-table row count per BU); n = Cochran(N, tier).
@@ -1616,9 +1695,9 @@ function ValidationsPage() {
       const rows = bus.map(bu => {
         let N: number;
         if (isHcm) {
-          // #9: a BU can span several HCM source systems (and two mocks that
-          // normalize the same), so sum the current-mock entries for the BU.
-          N = rootEntries.filter(p => p.table.toUpperCase().includes(PLAN_MOCK) && (p.source === bu || p.bu === bu)).reduce((s, p) => s + p.rows, 0);
+          // Person is published per source system (ATTRIBUTE1); sum the current-mock
+          // root rows for the sources in this group (KRONOSPOL folds in ADPPOLICIA).
+          N = rootEntries.filter(p => p.table.toUpperCase().includes(PLAN_MOCK) && hcmGroupOf(p.source) === bu).reduce((s, p) => s + p.rows, 0);
         } else {
           const hit = rootEntries.find(p => rowMatchesBU(p.source, p.bu, bu));
           N = hit ? hit.rows : rootEntries.reduce((s, p) => s + p.rows, 0);

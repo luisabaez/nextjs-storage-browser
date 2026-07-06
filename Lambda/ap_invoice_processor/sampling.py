@@ -118,7 +118,7 @@ RELATIONSHIPS = [
     ('SCM_PURCHASE_ORDERS_LINES_RETIRO_MOCK14_BY_BU_VW', 'SCM_PURCHASE_ORDERS_FINAL_RETIRO_MOCK14_VW_TBL', 'Order'),
     ('SCM_PURCHASE_ORDERS_LINE_LOCATIONS_RETIRO_MOCK14_BY_BU_VW', 'SCM_PURCHASE_ORDERS_FINAL_RETIRO_MOCK14_VW_TBL', 'Order'),
     ('SCM_PURCHASE_ORDERS_LINES_DISTRIBUTION_RETIRO_MOCK14_BY_BU_VW', 'SCM_PURCHASE_ORDERS_FINAL_RETIRO_MOCK14_VW_TBL', 'Order'),
-    ('SCM_REQ_DISTRIBUTION_MOCK14_VW_TBL', 'SCM_REQ_HDR_MOCK14_VW_TBL', 'Order'),
+    ('SCM_REQ_DISTRIBUTION_MOCK14_VW_TBL', 'SCM_REQ_HDR_MOCK14_VW_TBL', 'Requisition Number'),
     ('SCM_REQ_LINE_MOCK14_VW_TBL', 'SCM_REQ_HDR_MOCK14_VW_TBL', 'Requisition Number'),
     ('SCM_SUPPLIER_ADDRESSES_ASG_MOCK14_VW_TBL', 'SCM_SUPPLIER_ASG_MOCK13_VW_TBL', 'Supplier Name'),
     ('SCM_SUPPLIER_ADDRESSES_MOCK14_VW_TBL', 'SCM_SUPPLIER_MOCK14_VW_TBL', 'Supplier Name'),
@@ -235,15 +235,23 @@ def resolve_link_column(columns, link_field):
 
 # ── Row / Excel helpers ────────────────────────────────────────────────────────
 
+# openpyxl raises IllegalCharacterError on XML-illegal control chars; some converted
+# item descriptions carry them (e.g. a stray \x1f after a description), so strip them
+# from every string cell before writing.
+_ILLEGAL_XLSX_RE = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f]')
+
+
 def _coerce(v):
-    """Make a DB value safe for openpyxl cells."""
-    if v is None or isinstance(v, (str, int, float, bool, datetime, date)):
+    """Make a DB value safe for openpyxl cells (strips control chars openpyxl rejects)."""
+    if isinstance(v, str):
+        return _ILLEGAL_XLSX_RE.sub('', v)
+    if v is None or isinstance(v, (int, float, bool, datetime, date)):
         return v
     if isinstance(v, Decimal):
         return float(v)
     if isinstance(v, (bytes, bytearray)):
         return v.hex()
-    return str(v)
+    return _ILLEGAL_XLSX_RE.sub('', str(v))
 
 
 def _fetch(cursor, sql, params=None):
@@ -813,6 +821,144 @@ def _bu_matches(bu_filter, source, bu, ledger_segment=False):
     return False
 
 
+def _linked_child_files(cur, db, table, prefix, bu_filter, ledger_segment, plans):
+    """Generate a LINK-ONLY child (one with no agency column of its own, e.g.
+    Requisition Line / Distribution) by joining it to its parent on the relationship
+    key and inheriting the parent's source/BU. This lets the tables stay unchanged:
+    the child follows whatever keying the parent uses (a legacy-system name today, or
+    a numeric BU once the parent's BU_Field is set), and lands in the parent's merge
+    group so the client links it by key like any other child.
+
+    Returns None if `table` is not a resolvable link-only child (caller falls back to
+    the normal 'no source field' handling); otherwise a list of
+    {"file","source","bu","headers","rows"} — one per parent source/BU combo that
+    passes bu_filter (headers/rows are ready to write)."""
+    parent = next(((p, lf) for (c, p, lf) in RELATIONSHIPS if c == table), None)
+    if not parent:
+        return None
+    p_table, link_field = parent
+    _, c_cols = _object_meta(cur, db, table)
+    c_link = resolve_link_column(c_cols, link_field) if c_cols else None
+    p_schema, p_cols = _object_meta(cur, db, p_table)
+    p_plan = next((pl for pl in plans if (pl[0] or '').strip() == p_table), None)
+    if not (c_cols and c_link and p_cols and p_plan):
+        return None
+    p_src_field = (p_plan[1] or '').strip()
+    p_src = _resolve_col(p_cols, p_src_field)
+    p_link = resolve_link_column(p_cols, link_field)
+    if not (p_src and p_link):
+        return None
+    p_bu_field = (p_plan[2] or '').strip()
+    p_bu = _resolve_col(p_cols, p_bu_field) if p_bu_field else None
+    if p_bu and p_bu.lower() == p_src.lower():
+        p_bu = None
+    p_fq = f"[{db}].[dbo].[{p_table}]"
+    c_fq = f"[{db}].[dbo].[{table}]"
+    if p_bu:
+        cur.execute(f"SELECT DISTINCT [{p_src}],[{p_bu}] FROM {p_fq} WHERE [{p_src}] <> ?", (p_src_field,))
+    else:
+        cur.execute(f"SELECT DISTINCT [{p_src}] FROM {p_fq} WHERE [{p_src}] <> ?", (p_src_field,))
+    combos = cur.fetchall()
+    out = []
+    for pc in combos:
+        raw_source = pc[0]
+        if raw_source is None:
+            continue
+        source = str(raw_source).strip()
+        has_bu = bool(p_bu) and len(pc) > 1 and pc[1] is not None
+        raw_bu = pc[1] if has_bu else None
+        bu = str(raw_bu).strip() if has_bu else ''
+        if bu_filter and not _bu_matches(bu_filter, source, bu, ledger_segment):
+            continue
+        if has_bu:
+            cur.execute(f"SELECT DISTINCT [{p_link}] FROM {p_fq} WHERE [{p_src}]=? AND [{p_bu}]=?", (raw_source, raw_bu))
+        else:
+            cur.execute(f"SELECT DISTINCT [{p_link}] FROM {p_fq} WHERE [{p_src}]=?", (raw_source,))
+        keys = [r[0] for r in cur.fetchall() if r[0] is not None]
+        fname = f"CV_{prefix}__{_safe_name(source)}" + (f"_{_safe_name(bu)}" if has_bu else "") + ".xlsx"
+        headers, rows = list(c_cols), []
+        for i in range(0, len(keys), IN_CHUNK):
+            batch = keys[i:i + IN_CHUNK]
+            ph = ",".join("?" * len(batch))
+            cur.execute(f"SELECT * FROM {c_fq} WHERE [{c_link}] IN ({ph})", batch)
+            headers = [d[0] for d in cur.description]
+            rows.extend(cur.fetchall())
+        out.append({"file": fname, "source": source, "bu": bu, "headers": headers, "rows": rows})
+    return out
+
+
+# HCM Person sub-entities (label, table stem with {m}=mock). Master first; the rest
+# link to it by PERSON_NUMBER. Mirrors HCM_PERSON_SUB on the client.
+_HCM_PERSON_SHEETS = [
+    ('Person', 'HCM_PERSON_{m}_BU_VW_CONVERTED_TBL'),
+    ('Person Address', 'HCM_PERSON_ADDRESS_{m}_BU_VW_CONVERTED_TBL'),
+    ('Person Email', 'HCM_PERSON_EMAIL_{m}_BU_VW_CONVERTED_TBL'),
+    ('Person Name', 'HCM_PERSON_NAME_{m}_BU_VW_CONVERTED_TBL'),
+    ('Person NID', 'HCM_PERSON_NID_{m}_BU_VW_CONVERTED_TBL'),
+    ('Assignment', 'HCM_PERSON_ASSIGNMENT_{m}_BU_VW_CONVERTED_TBL'),
+    ('Supervisor', 'HCM_PERSON_SUPERVISOR_{m}_BU_VW_CONVERTED_TBL'),
+    ('External Bank Account', 'HCM_EXTERNAL_BANK_ACCOUNT_{m}_BU_VW_CONVERTED_TBL'),
+]
+
+
+def sample_hcm_person(conn_str, sources, sample_size, mock='MOCK14', source_db=None):
+    """Server-side HCM Person sampling by source system (ATTRIBUTE1). Picks
+    `sample_size` random people whose ATTRIBUTE1 is in `sources`, then pulls only
+    those people's rows from each Person sub-entity (linked on PERSON_NUMBER), so the
+    browser can build its report without loading the full population. `sources` is a
+    comma list; several published together (KRONOSPOL + ADPPOLICIA) are passed at once."""
+    db = source_db or SOURCE_DATABASE
+    srcs = [s.strip() for s in (sources or '').split(',') if s.strip()]
+    if not srcs:
+        return {"ok": False, "error": "sources required"}
+    try:
+        n_req = int(sample_size)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "sample_size must be a number"}
+    master_table = _HCM_PERSON_SHEETS[0][1].format(m=mock)
+    with pyodbc.connect(conn_str) as conn:
+        cur = conn.cursor()
+        m_schema, m_cols = _object_meta(cur, db, master_table)
+        if not m_cols:
+            return {"ok": False, "error": f"{master_table} not found in {db}"}
+        src_col = _resolve_col(m_cols, 'ATTRIBUTE1')
+        pn_col = resolve_link_column(m_cols, 'PERSON_NUMBER')
+        if not (src_col and pn_col):
+            return {"ok": False, "error": "ATTRIBUTE1 or PERSON_NUMBER column not found on the Person table"}
+        m_fq = _qualified(db, m_schema, master_table)
+        ph = ",".join("?" * len(srcs))
+        cur.execute(f"SELECT COUNT(*) FROM {m_fq} WHERE [{src_col}] IN ({ph})", srcs)
+        population = cur.fetchone()[0]
+        sheets, keys = [], []
+        n = max(1, min(n_req, population)) if population else 0
+        if n:
+            cur.execute(f"SELECT TOP ({n}) * FROM {m_fq} WHERE [{src_col}] IN ({ph}) ORDER BY NEWID()", srcs)
+            headers = [d[0] for d in cur.description]
+            rows = [[_coerce(v) for v in r] for r in cur.fetchall()]
+            pn_i = headers.index(pn_col)
+            keys = sorted({r[pn_i] for r in rows if r[pn_i] is not None}, key=lambda x: str(x))
+            sheets.append({"label": _HCM_PERSON_SHEETS[0][0], "table": master_table, "headers": headers, "rows": rows})
+            for label, stem in _HCM_PERSON_SHEETS[1:]:
+                table = stem.format(m=mock)
+                c_schema, c_cols = _object_meta(cur, db, table)
+                if not c_cols:
+                    continue
+                c_pn = resolve_link_column(c_cols, 'PERSON_NUMBER')
+                if not c_pn:
+                    continue
+                c_fq = _qualified(db, c_schema, table)
+                c_headers, c_rows = list(c_cols), []
+                for i in range(0, len(keys), IN_CHUNK):
+                    batch = keys[i:i + IN_CHUNK]
+                    cph = ",".join("?" * len(batch))
+                    cur.execute(f"SELECT * FROM {c_fq} WHERE [{c_pn}] IN ({cph})", batch)
+                    c_headers = [d[0] for d in cur.description]
+                    c_rows.extend([[_coerce(v) for v in r] for r in cur.fetchall()])
+                sheets.append({"label": label, "table": table, "headers": c_headers, "rows": c_rows})
+    return {"ok": True, "population": population, "sample_size": len(keys),
+            "person_key": pn_col, "sources": srcs, "sheets": sheets}
+
+
 def generate_entity_files(conn_str, s3, bucket, mock, entity, subentity=None,
                           dry_run=False, source_db=None, actor="", bu_filter=None):
     # bu_filter: when set, only source[/BU] splits whose source OR BU value equals
@@ -860,6 +1006,26 @@ def generate_entity_files(conn_str, s3, bucket, mock, entity, subentity=None,
                 continue
             src_col = _resolve_col(cols, src_field)
             if not src_col:
+                # Link-only child (no agency column of its own): build it from its
+                # parent's rows, inheriting the parent's source/BU, so the tables stay
+                # unchanged and the client links it by key like a normal child.
+                linked = _linked_child_files(cur, db, table, prefix, bu_filter, ledger_segment, plans)
+                if linked is not None:
+                    produced = 0
+                    for e in linked:
+                        produced += 1
+                        if dry_run:
+                            planned.append({"file": e["file"], "table": table, "source": e["source"], "bu": e["bu"], "rows": len(e["rows"])})
+                            continue
+                        if len(generated) >= GEN_MAX_FILES:
+                            break
+                        s3.put_object(Bucket=bucket, Key=out_prefix + e["file"],
+                                      Body=_rows_to_xlsx_bytes(e["headers"], e["rows"]), ContentType=XLSX_CONTENT_TYPE)
+                        generated.append({"file": e["file"], "key": out_prefix + e["file"], "table": table,
+                                          "source": e["source"], "bu": e["bu"], "rows": len(e["rows"])})
+                    if produced == 0:
+                        empties.append(_empty_entry(table, prefix, bu_filter, "no_rows_for_bu" if bu_filter else "empty_table"))
+                    continue
                 missing.append(f"{table} (no source field '{src_field}')")
                 empties.append(_empty_entry(table, prefix, bu_filter, "no_source_field"))
                 continue
