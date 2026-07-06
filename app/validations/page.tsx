@@ -1547,7 +1547,12 @@ function ValidationsPage() {
             // cheap; the total-rows guard is what protects against a huge parent+child
             // load. One cap for everyone now.
             if (result.recordCount > 50000 || result.recordCount + childRows > 100000) { tooLarge.push(`${bu} (${result.recordCount.toLocaleString()})`); continue; }
-            const r = await sampleAndWriteResult({ entity, agency: result.bu || bu, tab: e.tab, bu, N: result.recordCount, data: resultToFileData(result), merged: result, download: false });
+            // Label by the requested agency, not result.bu. For source-grouped
+            // entities (Purchase Orders, BPA, AR/AP Invoices) the merge sets
+            // result.bu to the source system (e.g. PRIFAS), which would name the
+            // file "BU PRIFAS" and size it against the wrong confidence tier. This
+            // BU's files were gathered for `bu`, so `bu` is the true agency.
+            const r = await sampleAndWriteResult({ entity, agency: bu, tab: e.tab, bu, N: result.recordCount, data: resultToFileData(result), merged: result, download: false });
             if (r) reports++; else skipped.push(`${bu}/${entity}`);
           }
         }
