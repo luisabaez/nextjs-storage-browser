@@ -74,8 +74,22 @@ interface FileEntry {
 
 // Is a report file present among the generated manifests for an agency? Matches
 // by agency (source or bu) and table-name (file label tokens ⊆ table name).
+// Some entities key their generated files by a named source SYSTEM instead of a
+// numeric BU (AR Customer's files are tagged SALUD / SIFDE, not 071 / 081). Map the
+// name to its BU so a per-BU run still finds them. Add new named sources here.
+const SOURCE_BU_MAP: Record<string, string> = {
+  SALUD: '071',
+  SIFDE: '081',
+};
+// Does a manifest/plan source or BU value resolve to the requested BU — directly, or
+// through a named-source alias (SALUD -> 071)?
+function sourceOrBuIsBU(value: string | undefined, bu: string): boolean {
+  if (!value) return false;
+  return value === bu || SOURCE_BU_MAP[value.trim().toUpperCase()] === bu;
+}
+
 function presentFor(mans: ManifestFileRow[], label: string, agency: string) {
-  const hits = mans.filter(m => (m.source === agency || m.bu === agency) && fileMatchesTable(label, m.table));
+  const hits = mans.filter(m => (sourceOrBuIsBU(m.source, agency) || sourceOrBuIsBU(m.bu, agency)) && fileMatchesTable(label, m.table));
   return { present: hits.length > 0, rows: hits.reduce((s, r) => s + r.rows, 0), tables: Array.from(new Set(hits.map(h => h.table))) };
 }
 
@@ -213,10 +227,11 @@ function extraEntity(x: { tab: string; entity: string; key: string; masterLabel:
   };
 }
 // Whether a generated file's source/BU value belongs to the requested BU. Exact
-// match for normal entities; ledger entities also match a 3-digit BU against the
-// agency prefix of a 7-digit segment value (0150000 -> 015, 0450121 -> 045).
+// match for normal entities; a named source system maps to its BU (SALUD -> 071);
+// ledger entities also match a 3-digit BU against the agency prefix of a 7-digit
+// segment value (0150000 -> 015, 0450121 -> 045).
 function buMatchesGen(bu: string, source: string | undefined, buVal: string | undefined, ledger: boolean): boolean {
-  if (source === bu || buVal === bu) return true;
+  if (sourceOrBuIsBU(source, bu) || sourceOrBuIsBU(buVal, bu)) return true;
   if (ledger) {
     const want = bu.replace(/^0+/, '') || '0';
     for (const v of [source, buVal]) if (v && /^\d{7}$/.test(v) && ((v.slice(0, 3).replace(/^0+/, '')) || '0') === want) return true;
@@ -1588,7 +1603,7 @@ function ValidationsPage() {
           // normalize the same), so sum the current-mock entries for the BU.
           N = rootEntries.filter(p => p.table.toUpperCase().includes(PLAN_MOCK) && (p.source === bu || p.bu === bu)).reduce((s, p) => s + p.rows, 0);
         } else {
-          const hit = rootEntries.find(p => p.source === bu || p.bu === bu);
+          const hit = rootEntries.find(p => sourceOrBuIsBU(p.source, bu) || sourceOrBuIsBU(p.bu, bu));
           N = hit ? hit.rows : rootEntries.reduce((s, p) => s + p.rows, 0);
         }
         const tier = confidenceTierFor(bu, entityTab, cls);

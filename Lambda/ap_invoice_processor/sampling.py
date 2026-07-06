@@ -787,12 +787,22 @@ _LEDGER_SEGMENT_ENTITIES = {'gl balances', 'gl budget balances'}
 _ON_PLAN_ENTITIES = {'gl balances', 'gl budget balances'}
 
 
+# Some entities key their conversion tables by a named source SYSTEM rather than a
+# numeric BU (AR Customer is tagged SALUD / SIFDE, not 071 / 081). Map the name to
+# its BU so a per-BU generation call still matches. Add new named sources here.
+_SOURCE_BU_MAP = {'SALUD': '071', 'SIFDE': '081'}
+
+
 def _bu_matches(bu_filter, source, bu, ledger_segment=False):
     """Whether a source/BU split belongs to the requested BU. Exact match for
-    normal entities; for ledger-segment entities also match a 3-digit BU to the
-    agency prefix of a 7-digit segment value (0150000 -> 015, 0450121 -> 045)."""
+    normal entities; a named source system maps to its BU (SALUD -> 071); for
+    ledger-segment entities also match a 3-digit BU to the agency prefix of a
+    7-digit segment value (0150000 -> 015, 0450121 -> 045)."""
     if bu_filter in (source, bu):
         return True
+    for v in (source, bu):
+        if v and _SOURCE_BU_MAP.get(str(v).strip().upper()) == bu_filter:
+            return True
     if ledger_segment:
         want = bu_filter.lstrip('0') or '0'
         for v in (source, bu):
