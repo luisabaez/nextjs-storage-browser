@@ -1286,12 +1286,13 @@ function ValidationsPage() {
         if (results.length) out.push({ e, results });
         continue;
       }
-      const included = includedFilesFor(bu, e.tab);
-      const ready = e.files.filter(f => included.includes(f.label)).every(f => {
-        const c = f.counts[bu]; if (!c || c === 'N/A') return true;
-        return buFilePresent(valManifestsRef.current || [], e.entity, f.label, bu).present;
-      });
-      if (!ready) continue;
+      // No label-based readiness gate here: it matched report file labels against
+      // table names (fileMatchesTable), which fails for abbreviated labels like the PO
+      // master "PO FINAL" ("PO" isn't a substring of PURCHASE_ORDERS). That produced a
+      // false "not ready" and skipped the report agencies (015/016/081/095 — the only
+      // BUs with counts). The actual file load below (buMatchesGen against the manifest)
+      // is the accurate signal: if nothing is generated for the BU, downloadG is empty
+      // and we skip there.
       // Find the generated folder by the plan entity that produced it (the same
       // mapping used to generate), so a tab whose name doesn't overlap its folder
       // still resolves — e.g. "Contracts" → Blanket_Purchase_Agreements. Fall back
