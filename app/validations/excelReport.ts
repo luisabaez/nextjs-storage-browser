@@ -211,7 +211,9 @@ export function buildPerFileReport(
   const wb = new ExcelJS.Workbook();
   wb.creator = 'Validations';
   const used = new Set<string>();
-  const withPop = opts.includePopulation !== false;
+  // Population sheets are removed from every report by request (the team reads full
+  // data from the DB); keep only the Sample (+ Sizing/Integrity/Relationships) sheets.
+  const withPop = false;
 
   for (const f of files) writeDataSheet(wb, f, 'Sample', used);
   if (withPop) for (const f of files) writeDataSheet(wb, f, 'Population', used);

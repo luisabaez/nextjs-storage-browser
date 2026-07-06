@@ -1300,10 +1300,17 @@ function ValidationsPage() {
       if (!downloadG.files.length) continue;
       const tagged = await loadGeneratedTagged(downloadG, manifest);
       let forBU = tagged.filter(t => buMatchesGen(bu, t.source, t.bu, ledger));
-      if (!forBU.length && isSharedEntity(e.entity)) forBU = tagged;
+      const sharedFallback = !forBU.length && isSharedEntity(e.entity);
+      if (sharedFallback) forBU = tagged;
       forBU = filterIncludedFiles(bu, e, forBU);
       if (!forBU.length) continue;
-      const results = edges.length ? mergeHierarchy(forBU, targets, edges, overrides) : mergeByRelationships(forBU, targets, overrides);
+      // Pool the BU's files under one source (the BU) so the merge keeps header + children
+      // together. Some entities key the header by legacy-system name (PO/BPA header source
+      // = PRIFAS) but the children by BU; grouping by source would otherwise split them
+      // into a header-only result plus orphaned children (the "one PRIFAS + two 038"
+      // fragmentation). Skip for the shared-entity fallback, whose files span agencies.
+      const merged = sharedFallback ? forBU : forBU.map(t => ({ ...t, source: bu }));
+      const results = edges.length ? mergeHierarchy(merged, targets, edges, overrides) : mergeByRelationships(merged, targets, overrides);
       out.push({ e, results });
     }
     return out;
@@ -1438,12 +1445,9 @@ function ValidationsPage() {
     const files = p.merged
       ? mergeResultToReportFiles(p.merged, selectedIndices, titleCaseEntity(p.entity))
       : [singleFileReport(titleCaseEntity(p.entity), p.data.sheetName || p.entity, p.data.headers, p.data.rows, selectedIndices)];
-    // Population sheets are dropped from the internal (Local) copy for entities whose
-    // populations are too large to be useful there — HCM Person (165-col Person Name ×
-    // 8 sub-entities) and Purchase Orders. The team reads the full data from the DB; the
-    // client/server copies never carry Population.
-    const withPop = p.tab !== HCM_PERSON_TAB && matchEntity(p.entity) !== 'PURCHASE ORDERS';
-    const full = buildPerFileReport(files, meta, { includeSizing: true, includePopulation: withPop, integrity: p.merged?.integrity });
+    // Population sheets are removed from every report (buildPerFileReport); the team
+    // reads the full data from the DB. Local copy keeps Sizing/Integrity, client omits them.
+    const full = buildPerFileReport(files, meta, { includeSizing: true, includePopulation: false, integrity: p.merged?.integrity });
     const client = buildPerFileReport(files, meta, { includeSizing: false, includePopulation: false }); // client + server copy: Sample sheets only
     await uploadData({ path: `${LOCAL_FOLDER}${base}.xlsx`, data: new Blob([await reportToBuffer(full)], { type: XLSX_CT }), options: { contentType: XLSX_CT } }).result;
     const clientKey = `${CLIENT_FOLDER}${base}.xlsx`;
@@ -1510,7 +1514,7 @@ function ValidationsPage() {
     const agency = bu || 'NA';
     const base = `${parentEntityLabel(e.entity)} BU ${bu3(agency)}-Sample Converted Data ${st}`;
     const meta = { entity: e.entity, agency, tier, N: totalN, n: totaln, seed: firstSeed, generatedAt: now.toISOString(), generatedBy: userEmail, selectedIndices: [] as number[] };
-    const full = buildPerFileReport(files, meta, { includeSizing: true });
+    const full = buildPerFileReport(files, meta, { includeSizing: true, includePopulation: false });
     const client = buildPerFileReport(files, meta, { includeSizing: false, includePopulation: false });
     await uploadData({ path: `${LOCAL_FOLDER}${base}.xlsx`, data: new Blob([await reportToBuffer(full)], { type: XLSX_CT }), options: { contentType: XLSX_CT } }).result;
     const clientKey = `${CLIENT_FOLDER}${base}.xlsx`;
