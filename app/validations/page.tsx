@@ -1588,16 +1588,13 @@ function ValidationsPage() {
     if (!report) { setEntityRun({ running: false, done: 0, total: 0, current: '', note: 'Agency report not loaded yet — open the BU Dashboard once so it loads, then retry.' }); return; }
     const allBus = attachedBUsForEntity(entityTab);
     if (!allBus.length) { setEntityRun({ running: false, done: 0, total: 0, current: '', note: `No BUs are attached to "${entityTab}" in the agency report.` }); return; }
-    // Resume-safe: skip BUs already sampled for this entity so a re-run only does
-    // the rest. Every entity runs all its BUs in one pass now — HCM Person's copies
-    // no longer carry the huge Population sheets, so the bulk build is light. An
-    // individual oversized BU is still skipped by the size guard below.
+    // Always re-run every attached BU — never skip one because it was sampled before.
+    // Converted files change and must be regenerated on demand; prior-run tracking is
+    // kept only for the dashboard and no longer gates the run.
     const RUN_CAP = 500;
-    const alreadyDone = allBus.filter(bu => (sampledRunsRef.current[bu] || []).includes(entityTab)).length;
-    const remaining = allBus.filter(bu => !(sampledRunsRef.current[bu] || []).includes(entityTab));
-    const bus = remaining.slice(0, RUN_CAP);
-    const stillLeft = remaining.length - bus.length;
-    if (!bus.length) { setEntityRun({ running: false, done: 0, total: 0, current: '', note: `All ${allBus.length} BUs for "${entityTab}" are already sampled.` }); return; }
+    const bus = allBus.slice(0, RUN_CAP);
+    const stillLeft = allBus.length - bus.length;
+    if (!bus.length) { setEntityRun({ running: false, done: 0, total: 0, current: '', note: `No BUs are attached to "${entityTab}".` }); return; }
     setEntityPreview(p => ({ ...p, open: false })); // preview (if open) served as the confirmation
     setEntityRun({ running: true, done: 0, total: bus.length, current: '', note: '' });
     const actor = userEmail ? `&actor=${encodeURIComponent(userEmail)}` : '';
@@ -1716,7 +1713,7 @@ function ValidationsPage() {
         }
       } catch (e) { console.error('run entity across BU failed', bu, e); }
     }
-    setEntityRun({ running: false, done: bus.length, total: bus.length, current: '', note: `Done — ${reports} sampled across ${bus.length} BU${bus.length !== 1 ? 's' : ''}${alreadyDone ? ` (+${alreadyDone} earlier)` : ''}${tooLarge.length ? ` · ${tooLarge.length} too large to build here: ${tooLarge.join(', ')}` : ''}${stillLeft ? ` · ${stillLeft} more remaining — reload + run again` : ''}${skipped.length ? ` · ${skipped.length} no-data` : ''}.` });
+    setEntityRun({ running: false, done: bus.length, total: bus.length, current: '', note: `Done — ${reports} sampled across ${bus.length} BU${bus.length !== 1 ? 's' : ''}${tooLarge.length ? ` · ${tooLarge.length} too large to build here: ${tooLarge.join(', ')}` : ''}${stillLeft ? ` · ${stillLeft} more remaining — reload + run again` : ''}${skipped.length ? ` · ${skipped.length} no-data` : ''}.` });
   }, [valReport, report, attachedBUsForEntity, buEntitiesToGenerate, buildBUResults, sampleAndWriteResult, sampleAndWriteInjected, userEmail, reportToPlanEntity, confidenceTierFor, PLAN_MOCK]);
 
   // Preview the per-BU sample sizes for an entity before running. N is estimated
