@@ -75,7 +75,7 @@ TARGET_TABLES = [
 RELATIONSHIPS = [
     ('FIN_AP_INV_LINES_MOCK14_VW_TBL', 'FIN_AP_INVOICES_MOCK14_VW_TBL', 'Invoice Number'),
     ('FIN_AP_INV_LINES_SIFDE_MOCK14_VW_TBL', 'FIN_AP_INVOICES_SIFDE_MOCK14_VW_TBL', 'Invoice Number'),
-    ('FIN_AR_INVOICES_DISTRIBUTION_MOCK14_VW_tbl', 'FIN_AR_INVOICES_LINES_MOCK14_VW_TBL', 'Line Transaction Flexfield 1 - Legacy Invoice Number'),
+    ('FIN_AR_INVOICES_DISTRIBUTION_MOCK14_VW_tbl', 'FIN_AR_INVOICES_LINES_MOCK14_VW_TBL', 'Line Transactions Flexfield Segment 1 - Legacy Invoice Number'),
     ('FIN_ASSETS_DISTRIBUTION_MOCK14_VW_TBL', 'FIN_ASSETS_MOCK14_VW_TBL', 'Tag Number'),
     ('FIN_AWARD_BUDGET_MOCK14_VW_TBL', 'FIN_AWARDS_MOCK14_VW_TBL', 'Award Number'),
     ('FIN_AWARD_BUDGET_PERIOD_MOCK14_VW_TBL', 'FIN_AWARDS_MOCK14_VW_TBL', 'Award Number'),
@@ -810,9 +810,13 @@ def _bu_matches(bu_filter, source, bu, ledger_segment=False):
         return True
     # A named source system (SALUD -> 071) resolves to its BU, but only for a source-
     # keyed split with no numeric BU of its own — so entities that use SALUD / SIFDE as
-    # a source system while carrying a real BU aren't mis-matched to 071 / 081.
-    if not bu and source and _SOURCE_BU_MAP.get(str(source).strip().upper()) == bu_filter:
-        return True
+    # a source system while carrying a real BU aren't mis-matched to 071 / 081. Its
+    # sub-sources resolve via the first delimited token (SALUD-FACTURASALCOBRO -> SALUD).
+    if not bu and source:
+        su = str(source).strip().upper()
+        first = re.split(r'[^A-Z0-9]', su)[0] if su else ''
+        if _SOURCE_BU_MAP.get(su) == bu_filter or (first and _SOURCE_BU_MAP.get(first) == bu_filter):
+            return True
     # A 7-digit ledger-style segment carries the 3-digit BU as its prefix. The form is
     # self-identifying, so match it for ANY entity (e.g. the Purchase Order
     # DISTRIBUTION_BY_BU child, whose source is the 7-digit segment 0160000), not just

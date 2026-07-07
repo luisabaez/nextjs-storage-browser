@@ -87,7 +87,13 @@ const SOURCE_BU_MAP: Record<string, string> = {
 // SIFDE as a source system while carrying a real BU aren't mis-attached to 071 / 081.
 function rowMatchesBU(source: string | undefined, buVal: string | undefined, bu: string): boolean {
   if (source === bu || buVal === bu) return true;
-  if (!buVal && source && SOURCE_BU_MAP[source.trim().toUpperCase()] === bu) return true;
+  if (!buVal && source) {
+    const su = source.trim().toUpperCase();
+    // Named source system (SALUD -> 071); also its sub-sources, keyed by the first
+    // delimited token (SALUD-FACTURASALCOBRO -> SALUD -> 071).
+    const first = su.split(/[^A-Z0-9]/)[0];
+    if (SOURCE_BU_MAP[su] === bu || (first && SOURCE_BU_MAP[first] === bu)) return true;
+  }
   // A 7-digit ledger-style segment carries the 3-digit BU as its prefix (0150000 ->
   // 015). Self-identifying, so a source/BU value of that form matches its BU — needed
   // by the by-BU child views (e.g. the PO LINES_DISTRIBUTION source 0150000) in BOTH
