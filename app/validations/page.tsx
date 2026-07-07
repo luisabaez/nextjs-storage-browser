@@ -1343,15 +1343,33 @@ function ValidationsPage() {
     setBuLoading(true);
     try {
       const built = await buildBUResults(bu, onlyEntity);
-      let loadedEntities = 0, masters = 0;
-      for (const { e, results } of built) { addMergeResults(results, e.tab, bu); loadedEntities++; masters += results.length; }
+      let loadedEntities = 0, masters = 0, wrote = 0;
+      for (const { e, results } of built) {
+        if (EXTRA_ENTITY_TABS.has(e.tab)) {
+          // Injected entities (e.g. GL Budget Balance + its Revenue Budget sub-entity)
+          // must be written as ONE workbook with a sheet per sub-entity — the same as the
+          // entity-run — not loaded as separate list entries that each generate their own
+          // file. sampleAndWriteInjected pools every sub-entity result into one workbook.
+          const r = await sampleAndWriteInjected(e, bu, results);
+          if (r) wrote++;
+        } else {
+          addMergeResults(results, e.tab, bu);
+          loadedEntities++; masters += results.length;
+        }
+      }
       setActiveTab('sampling');
-      setGenNote(`BU ${bu}${onlyEntity ? ' · ' + onlyEntity : ''}: loaded ${loadedEntities} entit${loadedEntities !== 1 ? 'ies' : 'y'} → ${masters} master${masters !== 1 ? 's' : ''} into the sampling list.`);
+      const parts: string[] = [];
+      if (wrote) parts.push(`generated ${wrote} injected workbook${wrote !== 1 ? 's' : ''}`);
+      if (loadedEntities) parts.push(`loaded ${loadedEntities} entit${loadedEntities !== 1 ? 'ies' : 'y'} → ${masters} master${masters !== 1 ? 's' : ''} into the list`);
+      setGenNote(`BU ${bu}${onlyEntity ? ' · ' + onlyEntity : ''}: ${parts.join(' · ') || 'nothing to do'}.`);
     } catch (e) {
       console.error('load-bu failed', e);
     } finally {
       setBuLoading(false);
     }
+    // sampleAndWriteInjected is declared below; it's called inside the async body (after
+    // render), so referencing it here is safe without adding it to the dep list.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [valReport, buildBUResults, addMergeResults]);
 
   // Generate only the files a BU needs (per-BU, small/fast), for the assigned
