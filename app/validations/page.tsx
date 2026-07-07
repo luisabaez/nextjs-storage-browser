@@ -1351,11 +1351,13 @@ function ValidationsPage() {
       const built = await buildBUResults(bu, onlyEntity);
       let loadedEntities = 0, masters = 0, wrote = 0;
       for (const { e, results } of built) {
-        if (EXTRA_ENTITY_TABS.has(e.tab)) {
-          // Injected entities (e.g. GL Budget Balance + its Revenue Budget sub-entity)
-          // must be written as ONE workbook with a sheet per sub-entity — the same as the
-          // entity-run — not loaded as separate list entries that each generate their own
-          // file. sampleAndWriteInjected pools every sub-entity result into one workbook.
+        // Write as ONE workbook (a sheet per master) — the same as the entity-run —
+        // rather than loading separate list entries that each generate their own file.
+        // Applies to injected entities (GL Budget Balance + its Revenue Budget sub-entity)
+        // and to a multi-master regular entity (Customer's Organizations + its disjoint
+        // Customer Employees master, flagged by the CUSTOMER_EE_LABEL token).
+        const multiMaster = results.length > 1 && results.some(r => r.entityToken === CUSTOMER_EE_LABEL);
+        if (EXTRA_ENTITY_TABS.has(e.tab) || multiMaster) {
           const r = await sampleAndWriteInjected(e, bu, results);
           if (r) wrote++;
         } else {
