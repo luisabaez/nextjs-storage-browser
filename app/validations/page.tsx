@@ -330,6 +330,42 @@ function poolFlatResult(bu: string, label: string, key: string, files: TaggedFil
   };
 }
 
+// The parent column that carries the legacy source system (FIMAS / PRIFAS / 911), used to
+// split a multi-source BU into one sample per source. -1 when there is no such column.
+function legacySourceColIdx(headers: string[]): number {
+  return headers.findIndex(h => /legacy system name/i.test(String(h ?? '')));
+}
+// When a BU's data spans more than one source system, return the BU's results renamed +
+// augmented: a multi-source result keeps its pooled form AND gains one tagged sub-result
+// per source (parent rows filtered to that source; children still link by key at sample
+// time); a single-source result in a multi-source BU is tagged so its file names distinctly
+// (e.g. 045's PRIFAS header vs its 911 variant). Unchanged for a single-source BU.
+function withPerSourceSplits(results: MergeResult[]): MergeResult[] {
+  const all = new Set<string>();
+  for (const r of results) {
+    const ci = legacySourceColIdx(r.headers);
+    if (ci >= 0) for (const row of r.rows) { const v = String(row[ci] ?? '').trim(); if (v) all.add(v); }
+  }
+  if (all.size <= 1) return results;
+  const out: MergeResult[] = [];
+  for (const r of results) {
+    const ci = legacySourceColIdx(r.headers);
+    const srcs = ci >= 0 ? Array.from(new Set(r.rows.map(x => String(x[ci] ?? '').trim()).filter(Boolean))) : [];
+    if (srcs.length > 1) {
+      out.push(r); // keep the pooled/combined result
+      for (const s of srcs) {
+        const rows = r.rows.filter(x => String(x[ci] ?? '').trim() === s);
+        out.push({ ...r, rows, recordCount: rows.length, sourceTag: s });
+      }
+    } else if (srcs.length === 1) {
+      out.push({ ...r, sourceTag: srcs[0] }); // name it by its one source to disambiguate
+    } else {
+      out.push(r);
+    }
+  }
+  return out;
+}
+
 // Resolve a report entity (by tab) to its sampling target (root table + children).
 // Matches on the entity's master-file label first, then any file, then the target
 // display name — so "Supplier" → SCM_SUPPLIER_MOCK14_VW_TBL, "Projects" → Awards.
@@ -600,7 +636,7 @@ function ValidationsPage() {
       const id = `m-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 8)}`;
       setEntries(prev => [...prev, {
         id,
-        fileName: `Consolidated_${result.entityToken}_${sampleBu ?? result.bu ?? 'NA'}`,
+        fileName: `Consolidated_${result.entityToken}_${sampleBu ?? result.bu ?? 'NA'}${result.sourceTag ? '_' + result.sourceTag : ''}`,
         entity: matchEntity(result.entityToken) || '',
         // Label by the loaded BU (sampleBu), not result.bu — the merge groups by source
         // so result.bu is the source system (e.g. PRIFAS), which would name the sample
@@ -1339,7 +1375,9 @@ function ValidationsPage() {
       // into an independent result so it becomes its own sheet in the Customer workbook.
       const eeFiles = tagged.filter(t => normTbl(t.table || '') === normTbl(CUSTOMER_EE_TABLE));
       if (eeFiles.length) results.push(poolFlatResult(bu, CUSTOMER_EE_LABEL, e.key, eeFiles));
-      out.push({ e, results });
+      // If this BU's data spans multiple source systems (e.g. 050 = FIMAS + PRIFAS), keep
+      // the pooled sample and add one sample per source, named "<Entity> BU <bu> <SOURCE>".
+      out.push({ e, results: withPerSourceSplits(results) });
     }
     return out;
   }, [valReport, ensureTargets, refreshGenerated, assignedEntitiesFor, includedFilesFor, filterIncludedFiles, reportToPlanEntity, injectedSubEntities]);
@@ -1486,7 +1524,10 @@ function ValidationsPage() {
     // Client naming convention: "<Parent Entity> BU <3-digit BU>-Sample Converted Data <timestamp>.xlsx".
     // #7: the trailing timestamp makes every run its own file (no overwrite) and
     // matches it to its tracking report, which shares the same stamp via `base`.
-    const base = `${parentEntityLabel(p.entity)} BU ${bu3(agency)}-Sample Converted Data ${st}`;
+    // A per-source split appends its source system so the file names distinctly, e.g.
+    // "Purchase Order BU 050 FIMAS-Sample Converted Data …".
+    const srcTag = p.merged?.sourceTag ? ` ${p.merged.sourceTag}` : '';
+    const base = `${parentEntityLabel(p.entity)} BU ${bu3(agency)}${srcTag}-Sample Converted Data ${st}`;
     const meta = { entity: p.entity, agency, tier, N: p.N, n, seed, generatedAt: now.toISOString(), generatedBy: userEmail, selectedIndices };
     // Each source file gets its own Sample + Population sheet, linked by the shared
     // Unique ID (highlighted); a merged entry contributes its parent + every child.

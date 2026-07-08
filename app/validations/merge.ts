@@ -58,6 +58,7 @@ export interface MergeResult {
   integrity: ChildIntegrity[];
   warnings: string[];
   recordCount: number;
+  sourceTag?: string; // set on a per-source split (e.g. "FIMAS") so the file is named "BU 050 FIMAS"
 }
 
 // Curated short labels for known children; everything else is title-cased.
