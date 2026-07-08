@@ -330,6 +330,36 @@ function poolFlatResult(bu: string, label: string, key: string, files: TaggedFil
   };
 }
 
+// Union files of the SAME table into one (headers aligned by name, rows concatenated).
+// A multi-source BU gets one generated file per (source, BU) split of a table — PO 050 has
+// FINAL__FIMAS_050 AND FINAL__PRIFAS_050 — but the merge keeps a single file per table
+// (rootFile find / loaded map), so the second file's rows silently dropped: the pooled
+// sample undercounted and the per-source split never saw the second source.
+function coalesceByTable(files: TaggedFile[]): TaggedFile[] {
+  const byT = new Map<string, TaggedFile[]>();
+  for (const f of files) {
+    const k = normTbl(f.table || f.name);
+    const a = byT.get(k); if (a) a.push(f); else byT.set(k, [f]);
+  }
+  return Array.from(byT.values()).map(grp => {
+    if (grp.length === 1) return grp[0];
+    const headers: string[] = []; const at = new Map<string, number>();
+    for (const g of grp) for (const h of g.data.headers) {
+      const k = String(h ?? ''); const lk = k.toLowerCase();
+      if (!at.has(lk)) { at.set(lk, headers.length); headers.push(k); }
+    }
+    const rows: unknown[][] = [];
+    for (const g of grp) {
+      const cols = g.data.headers.map(h => at.get(String(h ?? '').toLowerCase()) ?? -1);
+      for (const r of g.data.rows) {
+        const row: unknown[] = new Array(headers.length).fill(null);
+        for (let i = 0; i < cols.length; i++) if (cols[i] >= 0) row[cols[i]] = r[i];
+        rows.push(row);
+      }
+    }
+    return { ...grp[0], data: { headers, rows, sheetName: grp[0].data.sheetName } };
+  });
+}
 // The parent column that carries the legacy source system (FIMAS / PRIFAS / 911), used to
 // split a multi-source BU into one sample per source. -1 when there is no such column.
 function legacySourceColIdx(headers: string[]): number {
@@ -1427,14 +1457,14 @@ function ValidationsPage() {
           table: parent.table || '', display: parent.table || '',
           children: kids.map(k => ({ table: k.table || '', link_field: linkOf(k.table || '') })),
         };
-        for (const r of mergeByRelationships(fam.map(t => ({ ...t, source: bu })), [synthetic], overrides)) famResults.push({ ...r, sourceTag: tok });
+        for (const r of mergeByRelationships(coalesceByTable(fam.map(t => ({ ...t, source: bu }))), [synthetic], overrides)) famResults.push({ ...r, sourceTag: tok });
       }
       // Pool the BU's files under one source (the BU) so the merge keeps header + children
       // together. Some entities key the header by legacy-system name (PO/BPA header source
       // = PRIFAS) but the children by BU; grouping by source would otherwise split them
       // into a header-only result plus orphaned children (the "one PRIFAS + two 038"
       // fragmentation). Skip for the shared-entity fallback, whose files span agencies.
-      const merged = sharedFallback ? mainFiles : mainFiles.map(t => ({ ...t, source: bu }));
+      const merged = sharedFallback ? mainFiles : coalesceByTable(mainFiles.map(t => ({ ...t, source: bu })));
       const results = merged.length ? (edges.length ? mergeHierarchy(merged, targets, edges, overrides) : mergeByRelationships(merged, targets, overrides)) : [];
       // Customer Employees (FIN_CUSTOMER_EE) is a disjoint second master — pool its rows
       // into an independent result so it becomes its own sheet in the Customer workbook.
