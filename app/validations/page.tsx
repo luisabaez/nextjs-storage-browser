@@ -340,17 +340,31 @@ function legacySourceColIdx(headers: string[]): number {
 // per source (parent rows filtered to that source; children still link by key at sample
 // time); a single-source result in a multi-source BU is tagged so its file names distinctly
 // (e.g. 045's PRIFAS header vs its 911 variant). Unchanged for a single-source BU.
+// A source VALUE counts as a named system only if it carries a letter (FIMAS, PRIFAS,
+// GPR_FIMAS) — numeric BU/segment codes aren't source systems.
+const isNamedSourceVal = (v: string) => /[A-Za-z]/.test(v);
+// Some sources carry a GPR_ prefix in the data (Location: GPR_FIMAS); the client's
+// vocabulary is the bare system name, so file tags drop the prefix.
+const sourceTagOf = (v: string) => v.trim().toUpperCase().replace(/^GPR[_-]/, '');
+// A source-system VARIANT table family, keyed in the table NAME (SCM_PURCHASE_ORDERS_
+// LINES_911, SCM_BPA_RETIRO, FIN_GL_BALANCE_911). RET911 combined tables count as 911.
+function variantTokenOf(table: string): string {
+  const t = normTbl(table);
+  if (/RETIRO/.test(t)) return 'RETIRO';
+  if (/911/.test(t)) return '911';
+  return '';
+}
 function withPerSourceSplits(results: MergeResult[]): MergeResult[] {
   const all = new Set<string>();
   for (const r of results) {
     const ci = legacySourceColIdx(r.headers);
-    if (ci >= 0) for (const row of r.rows) { const v = String(row[ci] ?? '').trim(); if (v) all.add(v); }
+    if (ci >= 0) for (const row of r.rows) { const v = String(row[ci] ?? '').trim(); if (v && isNamedSourceVal(v)) all.add(v); }
   }
   if (all.size <= 1) return results;
   const out: MergeResult[] = [];
   for (const r of results) {
     const ci = legacySourceColIdx(r.headers);
-    const srcs = ci >= 0 ? Array.from(new Set(r.rows.map(x => String(x[ci] ?? '').trim()).filter(Boolean))) : [];
+    const srcs = ci >= 0 ? Array.from(new Set(r.rows.map(x => String(x[ci] ?? '').trim()).filter(v => v && isNamedSourceVal(v)))) : [];
     if (srcs.length > 1) {
       out.push(r); // keep the pooled/combined result
       for (const s of srcs) {
@@ -1329,7 +1343,23 @@ function ValidationsPage() {
         const results: MergeResult[] = [];
         for (const sub of subs) {
           const subFiles = tagged.filter(t => sub.tables.has(normTbl(t.table || '')));
-          if (subFiles.length) results.push(poolFlatResult(bu, sub.label, e.key, subFiles));
+          if (!subFiles.length) continue;
+          // Source key per file: a variant table (FIN_GL_BALANCE_911) or a named source
+          // (Location's GPR_FIMAS / GPR_PRIFAS). Numeric segments key ''.
+          const keyOf = (t: TaggedFile) => variantTokenOf(t.table || '') || (isNamedSourceVal(String(t.source || '')) ? sourceTagOf(String(t.source)) : '');
+          const keys = Array.from(new Set(subFiles.map(keyOf)));
+          if (keys.length === 1) {
+            // Single source: one pooled sheet; a non-'' key names the file by it (a BU
+            // whose GL Balances are ONLY the 911 table should say so: "BU 045 911").
+            results.push({ ...poolFlatResult(bu, sub.label, e.key, subFiles), sourceTag: keys[0] || undefined });
+          } else {
+            // Multi-source: pooled sheet (existing behavior) + one tagged sheet per
+            // named source/variant, written as separate workbooks by the tag.
+            results.push(poolFlatResult(bu, sub.label, e.key, subFiles));
+            for (const k of keys.filter(Boolean)) {
+              results.push({ ...poolFlatResult(bu, sub.label, e.key, subFiles.filter(t => keyOf(t) === k)), sourceTag: k });
+            }
+          }
         }
         if (results.length) out.push({ e, results });
         continue;
@@ -1356,28 +1386,74 @@ function ValidationsPage() {
       // prefix is the BU — match on that.
       const ledger = LEDGER_ENTITY_TABS.has(e.tab);
       const buFiles = g.files.filter(fn => { const m = manifest.get(fn); return m && buMatchesGen(bu, m.source, m.bu, ledger); });
+      // A variant family's table can be BU-blank (LINES_911's BU column is empty for every
+      // row — the 911 system belongs to one agency), so it never matches a BU directly.
+      // When a sibling variant table DID match this BU, bring the blank-keyed family
+      // members along so the family can sample (they can't belong to any other BU).
+      const matchedTokens = new Set(buFiles.map(fn => variantTokenOf(manifest.get(fn)!.table)).filter(Boolean));
+      const isBlankFamily = (fn: string) => {
+        const m = manifest.get(fn);
+        if (!m || String(m.source || '').trim() || String(m.bu || '').trim()) return false;
+        const tok = variantTokenOf(m.table);
+        return !!tok && matchedTokens.has(tok);
+      };
+      const blankFamily = new Set(g.files.filter(fn => !buFiles.includes(fn) && isBlankFamily(fn)));
+      buFiles.push(...Array.from(blankFamily));
       const downloadG = buFiles.length ? { ...g, files: buFiles } : (isSharedEntity(e.entity) ? g : { ...g, files: [] });
       if (!downloadG.files.length) continue;
       const tagged = await loadGeneratedTagged(downloadG, manifest);
-      let forBU = tagged.filter(t => buMatchesGen(bu, t.source, t.bu, ledger));
+      let forBU = tagged.filter(t => buMatchesGen(bu, t.source, t.bu, ledger) || blankFamily.has(t.name));
       const sharedFallback = !forBU.length && isSharedEntity(e.entity);
       if (sharedFallback) forBU = tagged;
       forBU = filterIncludedFiles(bu, e, forBU);
       if (!forBU.length) continue;
+      // Pull out any source-variant family (911 / RETIRO tables) whose ROOT has no file
+      // for this BU — the merge can't attach those children (their configured parent is
+      // absent), so build them into their own header-less result: the family's line-level
+      // table (shortest name) acts as the parent and the siblings link on the family's
+      // configured key (Order). This is how 045's 911 purchase orders sample — the 911
+      // conversion delivered lines/locations/distributions but no FINAL_911 header.
+      const rootTables = new Set(targets.map(t => normTbl(t.table)));
+      const famResults: MergeResult[] = [];
+      let mainFiles = forBU;
+      for (const tok of Array.from(new Set(forBU.map(t => variantTokenOf(t.table || '')).filter(Boolean)))) {
+        const fam = forBU.filter(t => variantTokenOf(t.table || '') === tok);
+        if (fam.some(t => rootTables.has(normTbl(t.table || '')))) continue; // root present: normal merge handles the family
+        mainFiles = mainFiles.filter(t => !fam.includes(t));
+        const parent = fam.slice().sort((a, b) => normTbl(a.table || '').length - normTbl(b.table || '').length)[0];
+        const kids = fam.filter(t => t !== parent);
+        const linkOf = (tbl: string) => edges.find(x => normTbl(x.child) === normTbl(tbl))?.link_field || e.key;
+        const synthetic: SamplingTarget = {
+          table: parent.table || '', display: parent.table || '',
+          children: kids.map(k => ({ table: k.table || '', link_field: linkOf(k.table || '') })),
+        };
+        for (const r of mergeByRelationships(fam.map(t => ({ ...t, source: bu })), [synthetic], overrides)) famResults.push({ ...r, sourceTag: tok });
+      }
       // Pool the BU's files under one source (the BU) so the merge keeps header + children
       // together. Some entities key the header by legacy-system name (PO/BPA header source
       // = PRIFAS) but the children by BU; grouping by source would otherwise split them
       // into a header-only result plus orphaned children (the "one PRIFAS + two 038"
       // fragmentation). Skip for the shared-entity fallback, whose files span agencies.
-      const merged = sharedFallback ? forBU : forBU.map(t => ({ ...t, source: bu }));
-      const results = edges.length ? mergeHierarchy(merged, targets, edges, overrides) : mergeByRelationships(merged, targets, overrides);
+      const merged = sharedFallback ? mainFiles : mainFiles.map(t => ({ ...t, source: bu }));
+      const results = merged.length ? (edges.length ? mergeHierarchy(merged, targets, edges, overrides) : mergeByRelationships(merged, targets, overrides)) : [];
       // Customer Employees (FIN_CUSTOMER_EE) is a disjoint second master — pool its rows
       // into an independent result so it becomes its own sheet in the Customer workbook.
       const eeFiles = tagged.filter(t => normTbl(t.table || '') === normTbl(CUSTOMER_EE_TABLE));
       if (eeFiles.length) results.push(poolFlatResult(bu, CUSTOMER_EE_LABEL, e.key, eeFiles));
       // If this BU's data spans multiple source systems (e.g. 050 = FIMAS + PRIFAS), keep
       // the pooled sample and add one sample per source, named "<Entity> BU <bu> <SOURCE>".
-      out.push({ e, results: withPerSourceSplits(results) });
+      let mainResults = withPerSourceSplits(results);
+      // When a variant family produced its own file, name the single-source main results
+      // by their one source too (045: "BU 045 PRIFAS" alongside "BU 045 911").
+      if (famResults.length) {
+        const named = new Set<string>();
+        for (const r of mainResults) {
+          const ci = legacySourceColIdx(r.headers);
+          if (ci >= 0) for (const row of r.rows) { const v = String(row[ci] ?? '').trim(); if (v && isNamedSourceVal(v)) named.add(sourceTagOf(v)); }
+        }
+        if (named.size === 1) { const s = Array.from(named)[0]; mainResults = mainResults.map(r => (r.sourceTag ? r : { ...r, sourceTag: s })); }
+      }
+      if (mainResults.length || famResults.length) out.push({ e, results: [...mainResults, ...famResults] });
     }
     return out;
   }, [valReport, ensureTargets, refreshGenerated, assignedEntitiesFor, includedFilesFor, filterIncludedFiles, reportToPlanEntity, injectedSubEntities]);
@@ -1587,46 +1663,55 @@ function ValidationsPage() {
   const sampleAndWriteInjected = useCallback(async (e: EntityValidation, bu: string, results: MergeResult[]): Promise<{ seed: number; n: number } | null> => {
     const tier = confidenceTierFor(bu, e.tab, e.entity);
     if (!tier) return null;
-    const files: ReportFile[] = [];
-    let totalN = 0, totaln = 0, firstSeed = 0;
-    for (const r of results) {
-      if (!r.recordCount) continue;
-      const n = computeSampleSize(r.recordCount, tier);
-      const seed = Math.floor(Math.random() * 2 ** 32) >>> 0;
-      if (!firstSeed) firstSeed = seed;
-      files.push(...mergeResultToReportFiles(r, selectSample(r.recordCount, n, seed), r.entityToken));
-      totalN += r.recordCount; totaln += n;
+    // One workbook per source tag: untagged results form the main "<Entity> BU <bu>"
+    // file; tagged results (a 911 variant family, Location's GPR_FIMAS/GPR_PRIFAS split)
+    // each write their own "<Entity> BU <bu> <TAG>" file.
+    const groups = new Map<string, MergeResult[]>();
+    for (const r of results) { const k = r.sourceTag || ''; const g = groups.get(k); if (g) g.push(r); else groups.set(k, [r]); }
+    let out: { seed: number; n: number } | null = null;
+    for (const [tag, group] of Array.from(groups.entries())) {
+      const files: ReportFile[] = [];
+      let totalN = 0, totaln = 0, firstSeed = 0;
+      for (const r of group) {
+        if (!r.recordCount) continue;
+        const n = computeSampleSize(r.recordCount, tier);
+        const seed = Math.floor(Math.random() * 2 ** 32) >>> 0;
+        if (!firstSeed) firstSeed = seed;
+        files.push(...mergeResultToReportFiles(r, selectSample(r.recordCount, n, seed), r.entityToken));
+        totalN += r.recordCount; totaln += n;
+      }
+      if (!files.length) continue;
+      const now = new Date();
+      const st = stamp(now);
+      const agency = bu || 'NA';
+      const base = `${parentEntityLabel(e.entity)} BU ${bu3(agency)}${tag ? ' ' + tag : ''}-Sample Converted Data ${st}`;
+      const meta = { entity: e.entity, agency, tier, N: totalN, n: totaln, seed: firstSeed, generatedAt: now.toISOString(), generatedBy: userEmail, selectedIndices: [] as number[] };
+      const full = buildPerFileReport(files, meta, { includeSizing: true, includePopulation: false });
+      const client = buildPerFileReport(files, meta, { includeSizing: false, includePopulation: false });
+      await uploadData({ path: `${LOCAL_FOLDER}${base}.xlsx`, data: new Blob([await reportToBuffer(full)], { type: XLSX_CT }), options: { contentType: XLSX_CT } }).result;
+      const clientKey = `${CLIENT_FOLDER}${base}.xlsx`;
+      await uploadData({ path: clientKey, data: new Blob([await reportToBuffer(client)], { type: XLSX_CT }), options: { contentType: XLSX_CT } }).result;
+      let serverPath = '', serverStatus = '';
+      try {
+        const pub = await (await fetch(`${LAMBDA_URL}?action=publish_to_server&key=${encodeURIComponent(clientKey)}`)).json();
+        serverStatus = pub.status || (pub.ok ? 'Success' : 'Failed'); serverPath = pub.dest || '';
+      } catch { serverStatus = 'Error'; }
+      try {
+        await ensureSamplingConfig();
+        const reportName = `${base} - Tracking Report.xlsx`;
+        const trk = buildTrackingReport({
+          entity: e.entity, agency, mock: PLAN_MOCK,
+          tierName: tier.name, confidence: tier.confidence, Z: tier.Z, e: tier.e, p: tier.p,
+          N: totalN, n: totaln, seed: firstSeed, generatedAt: now.toISOString(), generatedBy: userEmail,
+          sampleFile: `${base}.xlsx`, localPath: `${LOCAL_FOLDER}${base}.xlsx`, clientPath: clientKey,
+          serverPath, serverStatus, reportPath: `${REPORTS_FOLDER}${reportName}`,
+        }, configForEntity(e.entity), undefined);
+        await uploadData({ path: `${REPORTS_FOLDER}${reportName}`, data: new Blob([await reportToBuffer(trk)], { type: XLSX_CT }), options: { contentType: XLSX_CT } }).result;
+      } catch (err) { console.error('tracking report failed', err); }
+      if (!out) out = { seed: firstSeed, n: totaln };
     }
-    if (!files.length) return null;
-    const now = new Date();
-    const st = stamp(now);
-    const agency = bu || 'NA';
-    const base = `${parentEntityLabel(e.entity)} BU ${bu3(agency)}-Sample Converted Data ${st}`;
-    const meta = { entity: e.entity, agency, tier, N: totalN, n: totaln, seed: firstSeed, generatedAt: now.toISOString(), generatedBy: userEmail, selectedIndices: [] as number[] };
-    const full = buildPerFileReport(files, meta, { includeSizing: true, includePopulation: false });
-    const client = buildPerFileReport(files, meta, { includeSizing: false, includePopulation: false });
-    await uploadData({ path: `${LOCAL_FOLDER}${base}.xlsx`, data: new Blob([await reportToBuffer(full)], { type: XLSX_CT }), options: { contentType: XLSX_CT } }).result;
-    const clientKey = `${CLIENT_FOLDER}${base}.xlsx`;
-    await uploadData({ path: clientKey, data: new Blob([await reportToBuffer(client)], { type: XLSX_CT }), options: { contentType: XLSX_CT } }).result;
-    let serverPath = '', serverStatus = '';
-    try {
-      const pub = await (await fetch(`${LAMBDA_URL}?action=publish_to_server&key=${encodeURIComponent(clientKey)}`)).json();
-      serverStatus = pub.status || (pub.ok ? 'Success' : 'Failed'); serverPath = pub.dest || '';
-    } catch { serverStatus = 'Error'; }
-    try {
-      await ensureSamplingConfig();
-      const reportName = `${base} - Tracking Report.xlsx`;
-      const trk = buildTrackingReport({
-        entity: e.entity, agency, mock: PLAN_MOCK,
-        tierName: tier.name, confidence: tier.confidence, Z: tier.Z, e: tier.e, p: tier.p,
-        N: totalN, n: totaln, seed: firstSeed, generatedAt: now.toISOString(), generatedBy: userEmail,
-        sampleFile: `${base}.xlsx`, localPath: `${LOCAL_FOLDER}${base}.xlsx`, clientPath: clientKey,
-        serverPath, serverStatus, reportPath: `${REPORTS_FOLDER}${reportName}`,
-      }, configForEntity(e.entity), undefined);
-      await uploadData({ path: `${REPORTS_FOLDER}${reportName}`, data: new Blob([await reportToBuffer(trk)], { type: XLSX_CT }), options: { contentType: XLSX_CT } }).result;
-    } catch (err) { console.error('tracking report failed', err); }
-    await recordSampled(bu, e.tab);
-    return { seed: firstSeed, n: totaln };
+    if (out) await recordSampled(bu, e.tab);
+    return out;
   }, [userEmail, ensureSamplingConfig, configForEntity, PLAN_MOCK, confidenceTierFor, recordSampled]);
 
   // ── Sampling: generate → upload to Local (full) + Client (no Sizing) + local download ──
