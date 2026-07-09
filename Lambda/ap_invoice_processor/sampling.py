@@ -800,6 +800,17 @@ _ON_PLAN_ENTITIES = {'gl balances', 'gl budget balances'}
 # its BU so a per-BU generation call still matches. Add new named sources here.
 _SOURCE_BU_MAP = {'SALUD': '071', 'SIFDE': '081'}
 
+# Confirmed-orphan source families. A legacy source system (e.g. 911) whose master
+# rows were converted under a placeholder BU (000) but that the client has confirmed
+# belongs to a real agency. We emit that source's master rows + its children (joined
+# on the relationship key, since the children carry only the placeholder BU) re-tagged
+# to the real agency, so a per-BU run for that agency surfaces them and the client's
+# per-source split names the workbook "<Entity> BU <real_bu> <source>" (e.g.
+# "Supplier BU 045 911"). Keyed on the master's SOURCE value, not its stored BU.
+_ORPHAN_SOURCE_FAMILIES = [
+    {'entity': 'Supplier', 'source': '911', 'real_bu': '045'},
+]
+
 
 def _bu_matches(bu_filter, source, bu, ledger_segment=False):
     """Whether a source/BU split belongs to the requested BU. Exact match for
@@ -892,6 +903,68 @@ def _linked_child_files(cur, db, table, prefix, bu_filter, ledger_segment, plans
             headers = [d[0] for d in cur.description]
             rows.extend(cur.fetchall())
         out.append({"file": fname, "source": source, "bu": bu, "headers": headers, "rows": rows})
+    return out
+
+
+def _base_table(t):
+    """Strip the mock/view suffix so a plan table (…_MOCK14_CONVERTED_VW) and its
+    RELATIONSHIPS name (…_MOCK14_VW_TBL) compare equal on their base identity."""
+    return re.sub(r'_MOCK\d+.*$', '', (t or '').strip(), flags=re.I).upper()
+
+
+def _orphan_source_family_files(cur, db, plans, family):
+    """Emit a confirmed-orphan source family (see _ORPHAN_SOURCE_FAMILIES): the master
+    rows for one legacy source value plus every direct child (joined on the relationship
+    key), all re-tagged to the agency the client assigned the source to. Returns a list
+    of {file, table, source, bu, headers, rows}, or [] when not applicable to `plans`."""
+    src_val, real_bu = family['source'], family['real_bu']
+    # Master = the plan table keyed by a SOURCE field distinct from its BU field
+    # (children key both on 'BU'); it is the RELATIONSHIPS parent of the children.
+    master = next(((t, sf) for (t, sf, bf) in plans
+                   if t and sf and (bf or '').strip().lower() != (sf or '').strip().lower()), None)
+    if not master:
+        return []
+    m_table, m_src_field = (master[0] or '').strip(), (master[1] or '').strip()
+    _, m_cols = _object_meta(cur, db, m_table)
+    m_src = _resolve_col(m_cols, m_src_field) if m_cols else None
+    if not m_src:
+        return []
+    m_fq = f"[{db}].[dbo].[{m_table}]"
+    cur.execute(f"SELECT * FROM {m_fq} WHERE [{m_src}] = ?", (src_val,))
+    m_headers = [d[0] for d in cur.description]
+    m_rows = cur.fetchall()
+    if not m_rows:
+        return []
+    out = [{"file": f"CV_{_table_prefix(m_table)}__{_safe_name(src_val)}_{_safe_name(real_bu)}.xlsx",
+            "table": m_table, "source": src_val, "bu": real_bu, "headers": m_headers, "rows": list(m_rows)}]
+    # Children link to the master on the relationship key; collect those keys from the
+    # master rows so each child is filtered to exactly this source's suppliers.
+    mbase = _base_table(m_table)
+    for (t, _sf, _bf) in plans:
+        t = (t or '').strip()
+        if not t or _base_table(t) == mbase:
+            continue
+        link = next((lf for (c, p, lf) in RELATIONSHIPS
+                     if _base_table(c) == _base_table(t) and _base_table(p) == mbase), None)
+        if not link:
+            continue  # not a direct child of this master (e.g. an ASG-parented table)
+        _, c_cols = _object_meta(cur, db, t)
+        c_link = resolve_link_column(c_cols, link) if c_cols else None
+        m_link = resolve_link_column(m_headers, link)
+        if not (c_link and m_link):
+            continue
+        li = m_headers.index(m_link)
+        keys = sorted({r[li] for r in m_rows if r[li] is not None}, key=str)
+        c_fq = f"[{db}].[dbo].[{t}]"
+        c_headers, c_rows = list(c_cols), []
+        for i in range(0, len(keys), IN_CHUNK):
+            batch = keys[i:i + IN_CHUNK]
+            ph = ",".join("?" * len(batch))
+            cur.execute(f"SELECT * FROM {c_fq} WHERE [{c_link}] IN ({ph})", batch)
+            c_headers = [d[0] for d in cur.description]
+            c_rows.extend(cur.fetchall())
+        out.append({"file": f"CV_{_table_prefix(t)}__{_safe_name(src_val)}_{_safe_name(real_bu)}.xlsx",
+                    "table": t, "source": src_val, "bu": real_bu, "headers": c_headers, "rows": c_rows})
     return out
 
 
@@ -1211,6 +1284,26 @@ def generate_entity_files(conn_str, s3, bucket, mock, entity, subentity=None,
                 empties.append(_empty_entry(
                     table, prefix, bu_filter,
                     "no_rows_for_bu" if bu_filter else "empty_table"))
+
+        # Confirmed-orphan source families (e.g. Supplier '911' → BU 045): emit the
+        # source's master + children re-tagged to the real agency so a per-BU run
+        # surfaces them and the client's per-source split names the file accordingly.
+        for fam in _ORPHAN_SOURCE_FAMILIES:
+            if fam['entity'].strip().lower() != (entity or '').strip().lower():
+                continue
+            if bu_filter and bu_filter != fam['real_bu']:
+                continue  # only on the assigned agency's run (or a full generate)
+            for e in _orphan_source_family_files(cur, db, plans, fam):
+                if dry_run:
+                    planned.append({"file": e["file"], "table": e["table"],
+                                    "source": e["source"], "bu": e["bu"], "rows": len(e["rows"])})
+                    continue
+                if len(generated) >= GEN_MAX_FILES:
+                    break
+                s3.put_object(Bucket=bucket, Key=out_prefix + e["file"],
+                              Body=_rows_to_xlsx_bytes(e["headers"], e["rows"]), ContentType=XLSX_CONTENT_TYPE)
+                generated.append({"file": e["file"], "key": out_prefix + e["file"], "table": e["table"],
+                                  "source": e["source"], "bu": e["bu"], "rows": len(e["rows"])})
 
     if dry_run:
         return {"ok": True, "entity": entity, "mock": mock, "dry_run": True,
