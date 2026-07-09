@@ -371,8 +371,10 @@ function legacySourceColIdx(headers: string[]): number {
 // time); a single-source result in a multi-source BU is tagged so its file names distinctly
 // (e.g. 045's PRIFAS header vs its 911 variant). Unchanged for a single-source BU.
 // A source VALUE counts as a named system only if it carries a letter (FIMAS, PRIFAS,
-// GPR_FIMAS) — numeric BU/segment codes aren't source systems.
-const isNamedSourceVal = (v: string) => /[A-Za-z]/.test(v);
+// GPR_FIMAS) — numeric BU/segment codes aren't source systems, EXCEPT the few legacy
+// systems whose name is itself numeric (911), which must still split like any source.
+const NUMERIC_SOURCE_VALS = new Set(['911']);
+const isNamedSourceVal = (v: string) => /[A-Za-z]/.test(v) || NUMERIC_SOURCE_VALS.has(v.trim());
 // Some sources carry a GPR_ prefix in the data (Location: GPR_FIMAS); the client's
 // vocabulary is the bare system name, so file tags drop the prefix.
 const sourceTagOf = (v: string) => v.trim().toUpperCase().replace(/^GPR[_-]/, '');
