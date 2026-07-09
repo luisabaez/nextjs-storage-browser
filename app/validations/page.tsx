@@ -412,6 +412,39 @@ function withPerSourceSplits(results: MergeResult[]): MergeResult[] {
   return out;
 }
 
+// Some entities carry NO source-system column, so their per-source split is DERIVED from
+// a key column's value by a client-confirmed rule. Scoped per BU so other agencies' rows
+// aren't classified. Unlike withPerSourceSplits (which reads a real Legacy System Name
+// column), this adds NO column — it filters the parent rows into per-source sub-results
+// so the output keeps the exact source columns. Awards 050 has no source field; the
+// client classifies FIMAS vs PRIFAS by the Award Number prefix.
+const DERIVED_SPLITS: { entity: RegExp; bu: string; key: string; classes: { tag: string; prefixes: string[] }[]; def: string }[] = [
+  { entity: /award|project/i, bu: '050', key: 'Award Number',
+    classes: [{ tag: 'FIMAS', prefixes: ['0500014', '0140000', '05000133'] }], def: 'PRIFAS' },
+];
+function withDerivedSplits(results: MergeResult[], entityTab: string, entityName: string, bu: string): MergeResult[] {
+  const spec = DERIVED_SPLITS.find(s => s.bu === bu && (s.entity.test(entityTab) || s.entity.test(entityName)));
+  if (!spec) return results;
+  const classify = (v: unknown): string => {
+    const s = String(v ?? '').trim();
+    for (const c of spec.classes) if (c.prefixes.some(p => s.startsWith(p))) return c.tag;
+    return spec.def;
+  };
+  const out: MergeResult[] = [];
+  for (const r of results) {
+    const ki = r.headers.findIndex(h => String(h ?? '').trim().toLowerCase() === spec.key.toLowerCase());
+    if (ki < 0 || r.sourceTag) { out.push(r); continue; } // no key column, or already source-tagged
+    const tags = Array.from(new Set(r.rows.map(x => classify(x[ki]))));
+    if (tags.length <= 1) { out.push(tags.length === 1 ? { ...r, sourceTag: tags[0] } : r); continue; }
+    out.push(r); // keep the pooled result
+    for (const t of tags) {
+      const rows = r.rows.filter(x => classify(x[ki]) === t);
+      out.push({ ...r, rows, recordCount: rows.length, sourceTag: t });
+    }
+  }
+  return out;
+}
+
 // Resolve a report entity (by tab) to its sampling target (root table + children).
 // Matches on the entity's master-file label first, then any file, then the target
 // display name — so "Supplier" → SCM_SUPPLIER_MOCK14_VW_TBL, "Projects" → Awards.
@@ -1475,6 +1508,9 @@ function ValidationsPage() {
       // If this BU's data spans multiple source systems (e.g. 050 = FIMAS + PRIFAS), keep
       // the pooled sample and add one sample per source, named "<Entity> BU <bu> <SOURCE>".
       let mainResults = withPerSourceSplits(results);
+      // Entities with no source column split by a derived rule (Awards 050: FIMAS vs
+      // PRIFAS by Award Number prefix) — filters parent rows, adds no column.
+      mainResults = withDerivedSplits(mainResults, e.tab, e.entity, bu);
       // When a variant family produced its own file, name the single-source main results
       // by their one source too (045: "BU 045 PRIFAS" alongside "BU 045 911").
       if (famResults.length) {
