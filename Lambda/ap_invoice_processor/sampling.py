@@ -623,11 +623,12 @@ ENTITY_PLAN_COLUMNS = [
     'Pillar', 'Module', 'Entity', 'SubEntity', 'SOURCE', 'BU',
     'CONVERSION_TABLE_BU', 'CONVERSION_TABLE_SourceField', 'CONVERSION_TABLE_BU_Field',
     'Conversion_Table_Sourcefield_ForSampling', 'FileImportStatus', 'SourceFileName',
-    'On Conversion Plan',
+    'On Conversion Plan', 'ExcludedFromMock', 'RequiredFSCM',
 ]
 
 
-def list_entity_plan(conn_str, mock='MOCK14', source_db=None, with_counts=False):
+def list_entity_plan(conn_str, mock='MOCK14', source_db=None, with_counts=False,
+                     entity=None, raw=False):
     db = source_db or SOURCE_DATABASE
     plan_table = f"SETUP_CONVERSION_PLAN_{mock}"
     with pyodbc.connect(conn_str) as conn:
@@ -647,11 +648,22 @@ def list_entity_plan(conn_str, mock='MOCK14', source_db=None, with_counts=False)
         have = {r[0].lower() for r in cur.fetchall()}
         cols = [c for c in ENTITY_PLAN_COLUMNS if c.lower() in have]
         sel = ", ".join(f"[{c}]" for c in cols)
-        enrich = "AND ISNULL([ENRICHMENT_SYSTEM],'') <> 'Y'" if 'enrichment_system' in have else ""
+        # `raw` bypasses the has-a-converted-table filter so the FULL plan is visible
+        # (diagnostic). Otherwise keep the generation-relevant filter. `entity` scopes
+        # to one Entity. Qualifier columns (ExcludedFromMock/RequiredFSCM) are returned
+        # when present so the caller can apply the client's in-scope rule.
+        clauses, params = [], []
+        if not raw:
+            clauses.append("ISNULL([CONVERSION_TABLE_BU],'') <> ''")
+            if 'enrichment_system' in have:
+                clauses.append("ISNULL([ENRICHMENT_SYSTEM],'') <> 'Y'")
+        if entity:
+            clauses.append("[Entity] = ?")
+            params.append(entity)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         cur.execute(
-            f"SELECT {sel} FROM [{db}].[dbo].[{plan_table}] "
-            f"WHERE ISNULL([CONVERSION_TABLE_BU],'') <> '' {enrich} "
-            f"ORDER BY [Pillar],[Module],[Entity],[SubEntity]"
+            f"SELECT {sel} FROM [{db}].[dbo].[{plan_table}] {where} "
+            f"ORDER BY [Pillar],[Module],[Entity],[SubEntity]", params
         )
         rows = cur.fetchall()
         out = []
@@ -677,7 +689,8 @@ def list_entity_plan(conn_str, mock='MOCK14', source_db=None, with_counts=False)
             for rec in out:
                 rec['tableRows'] = counts.get(rec.get('CONVERSION_TABLE_BU', ''))
 
-    return {"ok": True, "mock": mock, "count": len(out), "rows": out}
+    return {"ok": True, "mock": mock, "count": len(out), "rows": out,
+            "planColumns": sorted(have)}
 
 
 # ── Entity-file generation (server-side equivalent of the ConvertedFilesBySource
@@ -836,6 +849,15 @@ def _bu_matches(bu_filter, source, bu, ledger_segment=False):
     for v in (source, bu):
         v = str(v).strip()
         if v.isdigit() and len(v) == 7 and (v[:3].lstrip('0') or '0') == want:
+            return True
+    # Inventory keys the BU inside an Organization code (INV_016651 / INV_010RCV -> 016 /
+    # 010) or as the leading token of an OHQ "016 AGENCY NAME" BU field — extract the
+    # embedded 3-digit BU. INV_ is unique to Inventory; the "NNN <text>" form (digits +
+    # whitespace) doesn't collide with clean BUs, named sources, or 7-digit segments.
+    for v in (source, bu):
+        s = str(v).strip()
+        m = re.match(r'INV_?(\d{3})', s, re.I) or re.match(r'(\d{3})\s', s)
+        if m and (m.group(1).lstrip('0') or '0') == want:
             return True
     return False
 

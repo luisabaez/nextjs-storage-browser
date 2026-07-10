@@ -101,6 +101,15 @@ function rowMatchesBU(source: string | undefined, buVal: string | undefined, bu:
   // which is why it lives in this shared primitive rather than only in buMatchesGen.
   const want = bu.replace(/^0+/, '') || '0';
   for (const v of [source, buVal]) if (v && /^\d{7}$/.test(v) && ((v.slice(0, 3).replace(/^0+/, '')) || '0') === want) return true;
+  // Inventory keys the BU inside an Organization code (INV_016651 / INV_010RCV -> 016 /
+  // 010) or as the leading token of an OHQ "016 AGENCY NAME" BU field — extract the
+  // embedded 3-digit BU. INV_ is unique to Inventory; the "NNN <text>" form (digits +
+  // whitespace) doesn't collide with clean BUs, named sources, or 7-digit segments.
+  for (const v of [source, buVal]) {
+    if (!v) continue;
+    const m = /^INV_?(\d{3})/i.exec(v.trim()) || /^(\d{3})\s/.exec(v.trim());
+    if (m && ((m[1].replace(/^0+/, '')) || '0') === want) return true;
+  }
   return false;
 }
 

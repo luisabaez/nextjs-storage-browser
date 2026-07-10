@@ -1688,8 +1688,11 @@ def lambda_handler(event, context):
             p = event.get("queryStringParameters") or {}
             mock = (p.get("mock") or "MOCK14").upper()
             with_counts = str(p.get("counts") or "").lower() in ("1", "true", "yes")
+            raw = str(p.get("raw") or "").lower() in ("1", "true", "yes")
+            entity = (p.get("entity") or "").strip() or None
             conn_str = get_connection_string()
-            res = sampling.list_entity_plan(conn_str, mock, with_counts=with_counts)
+            res = sampling.list_entity_plan(conn_str, mock, with_counts=with_counts,
+                                            entity=entity, raw=raw)
             return {"statusCode": 200 if res.get("ok") else 400,
                     "headers": headers,
                     "body": json.dumps(res, default=str)}
