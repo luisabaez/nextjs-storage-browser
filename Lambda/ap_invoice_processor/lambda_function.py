@@ -1743,6 +1743,28 @@ def lambda_handler(event, context):
             return {"statusCode": 500, "headers": headers,
                     "body": json.dumps({"ok": False, "error": str(e)})}
 
+    if action == "sample_inventory_by_bu":
+        # ?action=sample_inventory_by_bu&mock=MOCK14&bu=016&n=250
+        # Server-side Inventory sampling: Items master (keyed by Organization INV_<bu>) +
+        # Item Category + Item OHQ children (linked on Item), sampled small for the browser.
+        try:
+            p = event.get("queryStringParameters") or {}
+            bu = (p.get("bu") or "").strip()
+            sample_size = p.get("n") or p.get("sample_size") or 0
+            mock = (p.get("mock") or "MOCK14").upper()
+            if not bu:
+                return {"statusCode": 400, "headers": headers,
+                        "body": json.dumps({"ok": False, "error": "bu required"})}
+            conn_str = get_connection_string()
+            res = sampling.sample_inventory_by_bu(conn_str, bu, sample_size, mock=mock)
+            return {"statusCode": 200 if res.get("ok") else 400,
+                    "headers": headers,
+                    "body": json.dumps(res, default=str)}
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
     if action == "generate_entity_files":
         # ?action=generate_entity_files&mock=MOCK14&entity=Supplier[&subentity=..][&dry_run=1]
         # Server-side run of the ConvertedFilesBySource scripts for one entity:

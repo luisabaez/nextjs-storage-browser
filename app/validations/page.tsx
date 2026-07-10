@@ -1915,8 +1915,12 @@ function ValidationsPage() {
     // (sampleAndWriteInjected), so they must NOT be routed through the generic server path.
     if (entityTab !== HCM_PERSON_TAB && !EXTRA_ENTITY_TABS.has(entityTab)) {
       try {
-        const plan = reportToPlanEntity.get(entityTab);
-        const rootNorm = normTbl(resolveEntityTarget(valReport, samplingTargetsRef.current || [], entityTab)?.table || '');
+        // Inventory's root is the Items master (SCM_ITEMS), a different plan entity than
+        // the report tab — size it from the Items dry-run, not the report->plan resolver.
+        const inv = entityTab.trim().toLowerCase() === INVENTORY_TAB.toLowerCase();
+        const plan = inv ? 'Items' : reportToPlanEntity.get(entityTab);
+        const rootNorm = inv ? normTbl(`SCM_ITEMS_${PLAN_MOCK}_VW_CONVERTED`)
+          : normTbl(resolveEntityTarget(valReport, samplingTargetsRef.current || [], entityTab)?.table || '');
         if (plan && rootNorm) {
           const d = await (await fetch(`${LAMBDA_URL}?action=generate_entity_files&mock=${PLAN_MOCK}&entity=${encodeURIComponent(plan)}&dry_run=1`)).json();
           const ledger = LEDGER_ENTITY_TABS.has(entityTab);
@@ -1943,6 +1947,25 @@ function ValidationsPage() {
           const r = await sampleAndWriteResult({ entity: 'Person', agency: bu, tab: HCM_PERSON_TAB, bu, N: resp.population || N, data: { headers: merged.headers.map(String), rows: merged.rows, sheetName: 'Person' }, merged, download: false, preSampled: true });
           if (r) reports++; else skipped.push(bu);
           continue;
+        }
+        // Inventory: always draw server-side (fast). Sample n Items for the BU + their
+        // Item Category / Item OHQ, then build the report from the small returned set,
+        // instead of downloading each org's full item populations to the browser.
+        if (entityTab.trim().toLowerCase() === INVENTORY_TAB.toLowerCase()) {
+          const tier = confidenceTierFor(bu, entityTab, 'INVENTORY');
+          const N = entityRootN[bu] || 0;
+          const n = tier && N ? computeSampleSize(N, tier) : 0;
+          if (!n) { skipped.push(bu); continue; } // BU has no converted items (e.g. 018/043)
+          try {
+            const resp = await (await fetch(`${LAMBDA_URL}?action=sample_inventory_by_bu&mock=${PLAN_MOCK}&bu=${encodeURIComponent(bu)}&n=${n}${actor}`)).json();
+            if (resp.ok && !resp.sample_size) { skipped.push(bu); continue; } // no items for this BU
+            if (resp.ok && (resp.sheets || []).length && resp.sample_size) {
+              const merged = sheetsToMergeResult(bu, 'Inventory', resp.root_key || 'Item', resp.sheets);
+              const r = await sampleAndWriteResult({ entity: 'Inventory', agency: bu, tab: entityTab, bu, N: resp.population || N, data: { headers: merged.headers.map(String), rows: merged.rows, sheetName: 'Inventory' }, merged, download: false, preSampled: true });
+              if (r) { reports++; continue; }
+            }
+          } catch (e) { console.error('inventory server sample failed', bu, e); }
+          // fall through to the client-side branch if the server path errored
         }
         // Oversized entities: draw the sample server-side so the browser doesn't load the
         // full population + children (e.g. Purchase Orders 081 = 24K POs, ~265K child rows).

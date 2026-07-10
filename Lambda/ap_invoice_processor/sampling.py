@@ -1174,6 +1174,82 @@ def sample_entity_by_bu(conn_str, entity, bu, sample_size, mock='MOCK14', source
             "root_key": root_key, "sheets": sheets}
 
 
+# Inventory sample scope (Entity_Hierarchy.docx): Items master + Item Category + Item OHQ,
+# all linked on 'Item'. The master keys the BU inside its Organization code (INV_016651),
+# resolved by _bu_matches. Kept explicit (like _HCM_PERSON_SHEETS) so the sample is exactly
+# these three tables — not every SCM_ITEMS graph child.
+_INVENTORY_ROOT = 'SCM_ITEMS_{m}_VW_CONVERTED'
+_INVENTORY_CHILDREN = [
+    ('Item Category', 'SCM_ITEMS_CATEGORY_{m}_VW_CONVERTED'),
+    ('Item OHQ', 'SCM_ITEMS_OHQ_{m}_VW_CONVERTED'),
+]
+_INVENTORY_ORG_FIELD = 'Organization'
+_INVENTORY_LINK = 'Item'
+
+
+def sample_inventory_by_bu(conn_str, bu, sample_size, mock='MOCK14', source_db=None):
+    """Server-side Inventory sampling: sample `sample_size` Items (master, keyed by an
+    Organization code INV_<bu>) for the BU, then fetch only those items' Item Category +
+    Item OHQ rows (linked on Item). Returns the sampled sheets so the browser builds the
+    report from a small set instead of loading the BU's full item populations."""
+    db = source_db or SOURCE_DATABASE
+    try:
+        n_req = int(sample_size)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "sample_size must be a number"}
+    bu = str(bu).strip()
+    root = _INVENTORY_ROOT.format(m=mock)
+    with pyodbc.connect(conn_str) as conn:
+        cur = conn.cursor()
+        r_schema, r_cols = _object_meta(cur, db, root)
+        if not r_cols:
+            return {"ok": False, "error": f"{root} not found in {db}"}
+        org_col = _resolve_col(r_cols, _INVENTORY_ORG_FIELD)
+        item_col = resolve_link_column(r_cols, _INVENTORY_LINK)
+        if not (org_col and item_col):
+            return {"ok": False, "error": "Organization or Item column not found on Items"}
+        r_fq = _qualified(db, r_schema, root)
+        # This BU's inventory orgs (INV_016651 -> 016 via _bu_matches).
+        cur.execute(f"SELECT DISTINCT [{org_col}] FROM {r_fq}")
+        orgs = [r[0] for r in cur.fetchall()
+                if r[0] is not None and _bu_matches(bu, str(r[0]).strip(), '')]
+        if not orgs:
+            return {"ok": True, "bu": bu, "root": root, "population": 0, "sample_size": 0,
+                    "root_key": item_col, "sheets": []}
+        ph = ",".join("?" * len(orgs))
+        cur.execute(f"SELECT COUNT(*) FROM {r_fq} WHERE [{org_col}] IN ({ph})", orgs)
+        population = cur.fetchone()[0]
+        n = max(1, min(n_req, population)) if population else 0
+        sheets = []
+        if n:
+            cur.execute(f"SELECT TOP ({n}) * FROM {r_fq} WHERE [{org_col}] IN ({ph}) ORDER BY NEWID()", orgs)
+            r_headers = [d[0] for d in cur.description]
+            r_rows = [[_coerce(v) for v in row] for row in cur.fetchall()]
+            sheets.append({"label": _short_name(root), "table": root, "headers": r_headers, "rows": r_rows})
+            ii = r_headers.index(item_col)
+            keys = sorted({row[ii] for row in r_rows if row[ii] is not None}, key=lambda x: str(x))
+            for label, stem in _INVENTORY_CHILDREN:
+                child = stem.format(m=mock)
+                c_schema, c_cols = _object_meta(cur, db, child)
+                if not c_cols:
+                    continue
+                c_link = resolve_link_column(c_cols, _INVENTORY_LINK)
+                if not c_link:
+                    continue
+                c_fq = _qualified(db, c_schema, child)
+                c_headers, c_rows = list(c_cols), []
+                for i in range(0, len(keys), IN_CHUNK):
+                    batch = keys[i:i + IN_CHUNK]
+                    cph = ",".join("?" * len(batch))
+                    cur.execute(f"SELECT * FROM {c_fq} WHERE [{c_link}] IN ({cph})", batch)
+                    c_headers = [d[0] for d in cur.description]
+                    c_rows.extend([[_coerce(v) for v in row] for row in cur.fetchall()])
+                sheets.append({"label": label, "table": child, "headers": c_headers, "rows": c_rows})
+    return {"ok": True, "bu": bu, "root": root, "population": population,
+            "sample_size": (len(sheets[0]["rows"]) if sheets else 0),
+            "root_key": item_col, "sheets": sheets}
+
+
 def generate_entity_files(conn_str, s3, bucket, mock, entity, subentity=None,
                           dry_run=False, source_db=None, actor="", bu_filter=None):
     # bu_filter: when set, only source[/BU] splits whose source OR BU value equals
