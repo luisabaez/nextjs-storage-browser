@@ -874,15 +874,22 @@ def _linked_child_files(cur, db, table, prefix, bu_filter, ledger_segment, plans
     the normal 'no source field' handling); otherwise a list of
     {"file","source","bu","headers","rows"} — one per parent source/BU combo that
     passes bu_filter (headers/rows are ready to write)."""
-    parent = next(((p, lf) for (c, p, lf) in RELATIONSHIPS if c == table), None)
+    # Match the relationship by BASE table identity: RELATIONSHIPS names tables as
+    # _VW_TBL while the plan (and the populated data) use the entity's conversion table
+    # (_VW_CONVERTED), so an exact-name match misses link-only children like Item
+    # Category. Resolve the parent's REAL table from the plan so the join hits real rows.
+    parent = next(((p, lf) for (c, p, lf) in RELATIONSHIPS if _base_table(c) == _base_table(table)), None)
     if not parent:
         return None
-    p_table, link_field = parent
+    rel_parent, link_field = parent
+    p_plan = next((pl for pl in plans if _base_table((pl[0] or '').strip()) == _base_table(rel_parent)), None)
+    if not p_plan:
+        return None
+    p_table = (p_plan[0] or '').strip()
     _, c_cols = _object_meta(cur, db, table)
     c_link = resolve_link_column(c_cols, link_field) if c_cols else None
     p_schema, p_cols = _object_meta(cur, db, p_table)
-    p_plan = next((pl for pl in plans if (pl[0] or '').strip() == p_table), None)
-    if not (c_cols and c_link and p_cols and p_plan):
+    if not (c_cols and c_link and p_cols):
         return None
     p_src_field = (p_plan[1] or '').strip()
     p_src = _resolve_col(p_cols, p_src_field)
@@ -1199,6 +1206,13 @@ def generate_entity_files(conn_str, s3, bucket, mock, entity, subentity=None,
             f"SELECT DISTINCT [CONVERSION_TABLE_BU],[CONVERSION_TABLE_SourceField],[CONVERSION_TABLE_BU_Field] "
             f"FROM [{db}].[dbo].[{plan_table}] WHERE {where} ORDER BY 1", params)
         plans = cur.fetchall()
+        # All conversion tables across every entity — a link-only child's parent can live
+        # in a DIFFERENT entity (Item Category -> Items), so the per-entity `plans` alone
+        # can't resolve it. Used only for parent lookup in _linked_child_files.
+        cur.execute(
+            f"SELECT DISTINCT [CONVERSION_TABLE_BU],[CONVERSION_TABLE_SourceField],[CONVERSION_TABLE_BU_Field] "
+            f"FROM [{db}].[dbo].[{plan_table}] WHERE ISNULL([CONVERSION_TABLE_BU],'') <> ''")
+        all_plans = cur.fetchall()
 
         for (table, src_field, bu_field) in plans:
             table = (table or '').strip()
@@ -1217,7 +1231,7 @@ def generate_entity_files(conn_str, s3, bucket, mock, entity, subentity=None,
                 # Link-only child (no agency column of its own): build it from its
                 # parent's rows, inheriting the parent's source/BU, so the tables stay
                 # unchanged and the client links it by key like a normal child.
-                linked = _linked_child_files(cur, db, table, prefix, bu_filter, ledger_segment, plans)
+                linked = _linked_child_files(cur, db, table, prefix, bu_filter, ledger_segment, all_plans)
                 if linked is not None:
                     produced = 0
                     for e in linked:

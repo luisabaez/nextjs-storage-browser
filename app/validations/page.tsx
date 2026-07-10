@@ -223,6 +223,13 @@ function hcmPersonEntity(): EntityValidation {
 // The generated-folder names (safeName of each sub-entity's plan entity).
 const HCM_PERSON_FOLDERS = new Set(HCM_PERSON_SUB.map(s => safeName(s.plan)));
 
+// Inventory spans 3 conversion-plan entities/folders — Items (master) + Item Category +
+// Item OHQ (children linked on 'Item'). Assembled across folders like HCM Person, rooted
+// at the SCM_ITEMS sampling target. (Per Entity_Hierarchy.docx: common denominator = Item.)
+const INVENTORY_TAB = 'Inventory';
+const INVENTORY_PLANS = ['Items', 'Item Category', 'Item On Hand Quantity (OHQ)'];
+const INVENTORY_FOLDERS = new Set(INVENTORY_PLANS.map(safeName));
+
 // HCM Person is published one excel per source system (ATTRIBUTE1), with KRONOSPOL and
 // ADPPOLICIA combined into one (per the client's HCM email). Sampling runs server-side
 // (sample_hcm_person) because a source pools far too many people to load in-browser.
@@ -1395,6 +1402,29 @@ function ValidationsPage() {
         if (pooled.length) out.push({ e, results: edges.length ? mergeHierarchy(pooled, targets, edges, overrides) : mergeByRelationships(pooled, targets, overrides) });
         continue;
       }
+      if (e.tab.trim().toLowerCase() === INVENTORY_TAB.toLowerCase()) {
+        // Inventory = Items (master) + Item Category + Item OHQ (children linked on 'Item'),
+        // each in its own conversion-plan folder. Gather this BU's files across those folders
+        // (keys embed the BU — master/category Organization INV_016651, OHQ '016 AGENCY',
+        // resolved by buMatchesGen), pool by table, and merge via the SCM_ITEMS relationship
+        // tree. Bypasses the report->folder resolver, which otherwise shadows Inventory with
+        // PS Items (the ITEMS labels also match SCM_PS_ITEMS).
+        let tagged: TaggedFile[] = [];
+        for (const g of items.filter(x => INVENTORY_FOLDERS.has(x.entity))) {
+          const manifest = await readEntityManifests(PLAN_MOCK, g.entity);
+          const buFiles = g.files.filter(fn => { const m = manifest.get(fn); return m && buMatchesGen(bu, m.source, m.bu, false); });
+          if (!buFiles.length) continue;
+          tagged = tagged.concat(await loadGeneratedTagged({ ...g, files: buFiles }, manifest));
+        }
+        const forBU = tagged.filter(t => buMatchesGen(bu, t.source, t.bu, false));
+        if (!forBU.length) continue;
+        // Pool each table's per-org files under the BU, then merge on the SCM_ITEMS tree.
+        const merged = coalesceByTable(forBU.map(t => ({ ...t, source: bu })));
+        const results = (edges.length ? mergeHierarchy(merged, targets, edges, overrides) : mergeByRelationships(merged, targets, overrides))
+          .map(r => ({ ...r, entityToken: 'Inventory' })); // label the workbook "Inventory", not the SCM_ITEMS token
+        if (results.length) out.push({ e, results });
+        continue;
+      }
       if (EXTRA_ENTITY_TABS.has(e.tab)) {
         // Injected flat entities: pool each Y sub-entity's source-system segments for
         // this agency into one population, so the agency yields one sampled sheet per
@@ -1587,6 +1617,13 @@ function ValidationsPage() {
         for (const s of HCM_PERSON_SUB) {
           if (included.includes(s.label) && !buFilePresent(mans, e.entity, s.label, bu).present) out.push({ tab: e.tab, plan: s.plan });
         }
+        continue;
+      }
+      if (e.tab.trim().toLowerCase() === INVENTORY_TAB.toLowerCase()) {
+        // Inventory spans 3 plan entities in separate folders (Items + Item Category +
+        // Item OHQ). Generate each so the merge has the master + both children — the
+        // report->plan resolver would otherwise pick a single (wrong) folder.
+        for (const plan of INVENTORY_PLANS) out.push({ tab: e.tab, plan });
         continue;
       }
       const plan = reportToPlanEntity.get(e.tab);
