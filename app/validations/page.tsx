@@ -1621,9 +1621,13 @@ function ValidationsPage() {
       }
       if (e.tab.trim().toLowerCase() === INVENTORY_TAB.toLowerCase()) {
         // Inventory spans 3 plan entities in separate folders (Items + Item Category +
-        // Item OHQ). Generate each so the merge has the master + both children — the
-        // report->plan resolver would otherwise pick a single (wrong) folder.
-        for (const plan of INVENTORY_PLANS) out.push({ tab: e.tab, plan });
+        // Item OHQ). Generate a plan only when this BU's files aren't already present —
+        // the keys embed the BU (Organization INV_016651 / OHQ "016 AGENCY"), matched by
+        // buMatchesGen — so a re-run skips the slow regeneration (esp. Category's join).
+        for (const plan of INVENTORY_PLANS) {
+          const folder = safeName(plan);
+          if (!mans.some(m => m.entity === folder && buMatchesGen(bu, m.source, m.bu, false))) out.push({ tab: e.tab, plan });
+        }
         continue;
       }
       const plan = reportToPlanEntity.get(e.tab);
