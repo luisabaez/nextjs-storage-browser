@@ -1914,9 +1914,10 @@ function ValidationsPage() {
     // Injected entities (GL/Location/Customer&Sponsor) use their own pooled writer
     // (sampleAndWriteInjected), so they must NOT be routed through the generic server path.
     const isAssets = entityTab.trim().toLowerCase() === 'assets';
-    // Assets is enumerated + sized from its own BU-field values below (units include BU
-    // 122's per-office books), so skip the generic report-driven pre-sizing for it.
-    const assetsPop: Record<string, number> = {};
+    // Assets is enumerated + sized from its own OFFICE units below (one per ASSET_BOOK/BU
+    // pair), so skip the generic report-driven pre-sizing for it.
+    const assetsPop: Record<string, number> = {};                          // label -> population
+    const assetsOffice: Record<string, { book: string; bu: string }> = {}; // label -> the office it samples
     if (entityTab !== HCM_PERSON_TAB && !EXTRA_ENTITY_TABS.has(entityTab) && !isAssets) {
       try {
         // Inventory's root is the Items master (SCM_ITEMS), a different plan entity than
@@ -1940,9 +1941,11 @@ function ValidationsPage() {
     if (isAssets) {
       try {
         const d = await (await fetch(`${LAMBDA_URL}?action=assets_bu_units&mock=${PLAN_MOCK}`)).json();
-        if (d.ok && d.units) {
-          Object.assign(assetsPop, d.units);
-          bus = Object.keys(assetsPop).sort().slice(0, RUN_CAP);
+        if (d.ok && Array.isArray(d.units)) {
+          for (const u of d.units as { book: string; bu: string; label: string; population: number }[]) {
+            assetsPop[u.label] = u.population; assetsOffice[u.label] = { book: u.book, bu: u.bu };
+          }
+          bus = Object.keys(assetsOffice).sort().slice(0, RUN_CAP);
           setEntityRun({ running: true, done: 0, total: bus.length, current: '', note: '' });
         }
       } catch { /* fall back to the attached BUs if the units call fails */ }
@@ -1985,15 +1988,16 @@ function ValidationsPage() {
           } catch (e) { console.error('inventory server sample failed', bu, e); }
           // fall through to the client-side branch if the server path errored
         }
-        // Assets: always server-side (lots of files, large books). `bu` here is a BU-field
-        // value — a clean 3-digit code or a per-office book like 122_SJU — sampled exactly.
+        // Assets: always server-side (lots of files, large books). `bu` here is an OFFICE
+        // label; the office = one (ASSET_BOOK, BU) pair, so every book samples separately.
         if (entityTab.trim().toLowerCase() === 'assets') {
+          const office = assetsOffice[bu];
           const tier = confidenceTierFor(bu, entityTab, 'ASSETS');
           const N = assetsPop[bu] || 0;
-          const n = tier && N ? computeSampleSize(N, tier) : 0;
-          if (!n) { skipped.push(bu); continue; }
+          const n = office && tier && N ? computeSampleSize(N, tier) : 0;
+          if (!office || !n) { skipped.push(bu); continue; }
           try {
-            const resp = await (await fetch(`${LAMBDA_URL}?action=sample_assets_by_bu&mock=${PLAN_MOCK}&bu=${encodeURIComponent(bu)}&n=${n}${actor}`)).json();
+            const resp = await (await fetch(`${LAMBDA_URL}?action=sample_assets_by_bu&mock=${PLAN_MOCK}&book=${encodeURIComponent(office.book)}&bu=${encodeURIComponent(office.bu)}&n=${n}${actor}`)).json();
             if (resp.ok && !resp.sample_size) { skipped.push(bu); continue; }
             if (resp.ok && (resp.sheets || []).length && resp.sample_size) {
               const merged = sheetsToMergeResult(bu, 'Assets', resp.root_key || 'Tag Number', resp.sheets);

@@ -1781,18 +1781,19 @@ def lambda_handler(event, context):
                     "body": json.dumps({"ok": False, "error": str(e)})}
 
     if action == "sample_assets_by_bu":
-        # ?action=sample_assets_by_bu&mock=MOCK14&bu=015&n=250  (bu may be a per-office
-        # book like 122_AGU) — Assets master + Asset Distribution, sampled small server-side.
+        # ?action=sample_assets_by_bu&mock=MOCK14&book=MAB_071652&bu=071&n=250
+        # One Assets office = one (ASSET_BOOK, BU) pair: master + Asset Distribution.
         try:
             p = event.get("queryStringParameters") or {}
             bu = (p.get("bu") or "").strip()
+            book = (p.get("book") or "").strip()
             sample_size = p.get("n") or p.get("sample_size") or 0
             mock = (p.get("mock") or "MOCK14").upper()
-            if not bu:
+            if not bu or not book:
                 return {"statusCode": 400, "headers": headers,
-                        "body": json.dumps({"ok": False, "error": "bu required"})}
+                        "body": json.dumps({"ok": False, "error": "book and bu required"})}
             conn_str = get_connection_string()
-            res = sampling.sample_assets_by_bu(conn_str, bu, sample_size, mock=mock)
+            res = sampling.sample_assets_by_bu(conn_str, book, bu, sample_size, mock=mock)
             return {"statusCode": 200 if res.get("ok") else 400,
                     "headers": headers, "body": json.dumps(res, default=str)}
         except Exception as e:

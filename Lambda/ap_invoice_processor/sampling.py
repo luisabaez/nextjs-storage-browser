@@ -1257,19 +1257,23 @@ def sample_inventory_by_bu(conn_str, bu, sample_size, mock='MOCK14', source_db=N
 _ASSETS_ROOT = 'FIN_ASSETS_{m}_VW_CONVERTED_TBL'
 _ASSETS_CHILDREN = [('Asset Distribution', 'FIN_ASSETS_DISTRIBUTION_{m}_VW_CONVERTED_TBL')]
 _ASSETS_BU_FIELD = 'BU'
+_ASSETS_BOOK_FIELD = 'ASSET_BOOK'
 _ASSETS_LINK = 'Tag Number'
 
 
-def sample_assets_by_bu(conn_str, bu, sample_size, mock='MOCK14', source_db=None):
-    """Server-side Assets sampling: sample `sample_size` Assets (master) for the exact BU
-    value (a clean '015' or a per-office book '122_AGU'), then fetch only those assets'
-    Asset Distribution rows (linked on Tag Number). Returns the sampled sheets."""
+def sample_assets_by_bu(conn_str, book, bu, sample_size, mock='MOCK14', source_db=None):
+    """Server-side Assets sampling for ONE office = one (ASSET_BOOK, BU) pair. Every asset
+    book is a separate office (client rule): BU 122's offices sit in the BU field
+    (122_AGU...) while other BUs' offices sit in ASSET_BOOK (MAB_071651/652/...), so
+    matching both columns exactly isolates a single office. Samples n assets + their Asset
+    Distribution rows (linked on Tag Number)."""
     db = source_db or SOURCE_DATABASE
     try:
         n_req = int(sample_size)
     except (TypeError, ValueError):
         return {"ok": False, "error": "sample_size must be a number"}
     bu = str(bu).strip()
+    book = str(book).strip()
     root = _ASSETS_ROOT.format(m=mock)
     with pyodbc.connect(conn_str) as conn:
         cur = conn.cursor()
@@ -1277,16 +1281,18 @@ def sample_assets_by_bu(conn_str, bu, sample_size, mock='MOCK14', source_db=None
         if not r_cols:
             return {"ok": False, "error": f"{root} not found in {db}"}
         bu_col = _resolve_col(r_cols, _ASSETS_BU_FIELD)
+        book_col = _resolve_col(r_cols, _ASSETS_BOOK_FIELD)
         tag_col = resolve_link_column(r_cols, _ASSETS_LINK)
-        if not (bu_col and tag_col):
-            return {"ok": False, "error": "BU or Tag Number column not found on Assets"}
+        if not (bu_col and book_col and tag_col):
+            return {"ok": False, "error": "BU, ASSET_BOOK or Tag Number column not found on Assets"}
         r_fq = _qualified(db, r_schema, root)
-        cur.execute(f"SELECT COUNT(*) FROM {r_fq} WHERE [{bu_col}] = ?", (bu,))
+        cond, args = f"WHERE [{book_col}] = ? AND [{bu_col}] = ?", (book, bu)
+        cur.execute(f"SELECT COUNT(*) FROM {r_fq} {cond}", args)
         population = cur.fetchone()[0]
         n = max(1, min(n_req, population)) if population else 0
         sheets = []
         if n:
-            cur.execute(f"SELECT TOP ({n}) * FROM {r_fq} WHERE [{bu_col}] = ? ORDER BY NEWID()", (bu,))
+            cur.execute(f"SELECT TOP ({n}) * FROM {r_fq} {cond} ORDER BY NEWID()", args)
             r_headers = [d[0] for d in cur.description]
             r_rows = [[_coerce(v) for v in row] for row in cur.fetchall()]
             sheets.append({"label": _short_name(root), "table": root, "headers": r_headers, "rows": r_rows})
@@ -1309,14 +1315,15 @@ def sample_assets_by_bu(conn_str, bu, sample_size, mock='MOCK14', source_db=None
                     c_headers = [d[0] for d in cur.description]
                     c_rows.extend([[_coerce(v) for v in row] for row in cur.fetchall()])
                 sheets.append({"label": label, "table": child, "headers": c_headers, "rows": c_rows})
-    return {"ok": True, "bu": bu, "root": root, "population": population,
+    return {"ok": True, "book": book, "bu": bu, "root": root, "population": population,
             "sample_size": (len(sheets[0]["rows"]) if sheets else 0),
             "root_key": tag_col, "sheets": sheets}
 
 
 def assets_bu_units(conn_str, mock='MOCK14', source_db=None):
-    """The distinct Assets BU-field values (sample units): clean 3-digit codes plus BU
-    122's per-office books. Returns {bu: population} so the client can size + iterate."""
+    """Assets sample units — one per OFFICE = one distinct (ASSET_BOOK, BU) pair, each with
+    its population and a display label. A BU with a single book keeps its plain label (015,
+    122_AGU); a BU with multiple books labels each office by its ASSET_BOOK (MAB_071652)."""
     db = source_db or SOURCE_DATABASE
     root = _ASSETS_ROOT.format(m=mock)
     with pyodbc.connect(conn_str) as conn:
@@ -1325,12 +1332,20 @@ def assets_bu_units(conn_str, mock='MOCK14', source_db=None):
         if not r_cols:
             return {"ok": False, "error": f"{root} not found in {db}"}
         bu_col = _resolve_col(r_cols, _ASSETS_BU_FIELD)
-        if not bu_col:
-            return {"ok": False, "error": "BU column not found on Assets"}
+        book_col = _resolve_col(r_cols, _ASSETS_BOOK_FIELD)
+        if not (bu_col and book_col):
+            return {"ok": False, "error": "BU or ASSET_BOOK column not found on Assets"}
         r_fq = _qualified(db, r_schema, root)
-        cur.execute(f"SELECT [{bu_col}], COUNT(*) FROM {r_fq} WHERE [{bu_col}] IS NOT NULL "
-                    f"GROUP BY [{bu_col}]")
-        units = {str(r[0]).strip(): int(r[1]) for r in cur.fetchall() if str(r[0]).strip()}
+        cur.execute(f"SELECT [{book_col}],[{bu_col}],COUNT(*) FROM {r_fq} "
+                    f"WHERE [{bu_col}] IS NOT NULL GROUP BY [{book_col}],[{bu_col}]")
+        rows = [(str(r[0]).strip(), str(r[1]).strip(), int(r[2])) for r in cur.fetchall() if str(r[1]).strip()]
+    books_per_bu = {}
+    for book, bu, _n in rows:
+        books_per_bu.setdefault(bu, set()).add(book)
+    units = []
+    for book, bu, n in rows:
+        label = bu if len(books_per_bu.get(bu, ())) <= 1 else book
+        units.append({"book": book, "bu": bu, "label": label, "population": n})
     return {"ok": True, "root": root, "units": units}
 
 
