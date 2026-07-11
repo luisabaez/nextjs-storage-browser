@@ -250,7 +250,7 @@ const hcmGroupOf = (src: string | undefined): string => HCM_SOURCE_TO_GROUP[(src
 // Assemble a MergeResult from the server-sampled Person sheets (master + children) so
 // the standard report builder can render it. Every returned row IS the sample; children
 // link to the master on PERSON_NUMBER.
-function sheetsToMergeResult(bu: string, entityToken: string, key: string, sheets: { label: string; table: string; headers: string[]; rows: unknown[][] }[]): MergeResult {
+function sheetsToMergeResult(bu: string, entityToken: string, key: string, sheets: { label: string; table: string; headers: string[]; rows: unknown[][]; population?: number }[]): MergeResult {
   const master = sheets[0] || { label: entityToken, table: '', headers: [], rows: [] };
   const keyN = normStr(key);
   // Resolve each child's link column: the master's key name first, else any header that
@@ -267,8 +267,10 @@ function sheetsToMergeResult(bu: string, entityToken: string, key: string, sheet
     childrenData: sheets.slice(1).map(s => ({
       label: s.label, headers: s.headers, rows: s.rows,
       keyIdx: keyIdxOf(s.headers), strategy: 'join' as const, sourceFile: s.table,
+      populationCount: s.population, // true child population (server drew only the sample)
     })),
     integrity: [], warnings: [], recordCount: master.rows.length,
+    parentPopulation: master.population, // true parent population for the Relationships/Sizing sheets
   };
 }
 

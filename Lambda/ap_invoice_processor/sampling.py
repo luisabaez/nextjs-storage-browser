@@ -1225,7 +1225,8 @@ def sample_inventory_by_bu(conn_str, bu, sample_size, mock='MOCK14', source_db=N
             cur.execute(f"SELECT TOP ({n}) * FROM {r_fq} WHERE [{org_col}] IN ({ph}) ORDER BY NEWID()", orgs)
             r_headers = [d[0] for d in cur.description]
             r_rows = [[_coerce(v) for v in row] for row in cur.fetchall()]
-            sheets.append({"label": _short_name(root), "table": root, "headers": r_headers, "rows": r_rows})
+            sheets.append({"label": _short_name(root), "table": root, "headers": r_headers,
+                           "rows": r_rows, "population": population})
             ii = r_headers.index(item_col)
             keys = sorted({row[ii] for row in r_rows if row[ii] is not None}, key=lambda x: str(x))
             for label, stem in _INVENTORY_CHILDREN:
@@ -1237,6 +1238,11 @@ def sample_inventory_by_bu(conn_str, bu, sample_size, mock='MOCK14', source_db=N
                 if not c_link:
                     continue
                 c_fq = _qualified(db, c_schema, child)
+                # True population = all this BU's child rows (every item, not just sampled),
+                # for the Relationships/Sizing "Population rows" column.
+                cur.execute(f"SELECT COUNT(*) FROM {c_fq} WHERE [{c_link}] IN "
+                            f"(SELECT [{item_col}] FROM {r_fq} WHERE [{org_col}] IN ({ph}))", orgs)
+                c_pop = cur.fetchone()[0]
                 c_headers, c_rows = list(c_cols), []
                 for i in range(0, len(keys), IN_CHUNK):
                     batch = keys[i:i + IN_CHUNK]
@@ -1244,7 +1250,8 @@ def sample_inventory_by_bu(conn_str, bu, sample_size, mock='MOCK14', source_db=N
                     cur.execute(f"SELECT * FROM {c_fq} WHERE [{c_link}] IN ({cph})", batch)
                     c_headers = [d[0] for d in cur.description]
                     c_rows.extend([[_coerce(v) for v in row] for row in cur.fetchall()])
-                sheets.append({"label": label, "table": child, "headers": c_headers, "rows": c_rows})
+                sheets.append({"label": label, "table": child, "headers": c_headers,
+                               "rows": c_rows, "population": c_pop})
     return {"ok": True, "bu": bu, "root": root, "population": population,
             "sample_size": (len(sheets[0]["rows"]) if sheets else 0),
             "root_key": item_col, "sheets": sheets}
@@ -1295,7 +1302,8 @@ def sample_assets_by_bu(conn_str, book, bu, sample_size, mock='MOCK14', source_d
             cur.execute(f"SELECT TOP ({n}) * FROM {r_fq} {cond} ORDER BY NEWID()", args)
             r_headers = [d[0] for d in cur.description]
             r_rows = [[_coerce(v) for v in row] for row in cur.fetchall()]
-            sheets.append({"label": _short_name(root), "table": root, "headers": r_headers, "rows": r_rows})
+            sheets.append({"label": _short_name(root), "table": root, "headers": r_headers,
+                           "rows": r_rows, "population": population})
             ti = r_headers.index(tag_col)
             keys = sorted({row[ti] for row in r_rows if row[ti] is not None}, key=lambda x: str(x))
             for label, stem in _ASSETS_CHILDREN:
@@ -1307,6 +1315,11 @@ def sample_assets_by_bu(conn_str, book, bu, sample_size, mock='MOCK14', source_d
                 if not c_link:
                     continue
                 c_fq = _qualified(db, c_schema, child)
+                # True population = all this office's child rows (every asset, not just
+                # sampled), for the Relationships/Sizing "Population rows" column.
+                cur.execute(f"SELECT COUNT(*) FROM {c_fq} WHERE [{c_link}] IN "
+                            f"(SELECT [{tag_col}] FROM {r_fq} {cond})", args)
+                c_pop = cur.fetchone()[0]
                 c_headers, c_rows = list(c_cols), []
                 for i in range(0, len(keys), IN_CHUNK):
                     batch = keys[i:i + IN_CHUNK]
@@ -1314,7 +1327,8 @@ def sample_assets_by_bu(conn_str, book, bu, sample_size, mock='MOCK14', source_d
                     cur.execute(f"SELECT * FROM {c_fq} WHERE [{c_link}] IN ({cph})", batch)
                     c_headers = [d[0] for d in cur.description]
                     c_rows.extend([[_coerce(v) for v in row] for row in cur.fetchall()])
-                sheets.append({"label": label, "table": child, "headers": c_headers, "rows": c_rows})
+                sheets.append({"label": label, "table": child, "headers": c_headers,
+                               "rows": c_rows, "population": c_pop})
     return {"ok": True, "book": book, "bu": bu, "root": root, "population": population,
             "sample_size": (len(sheets[0]["rows"]) if sheets else 0),
             "root_key": tag_col, "sheets": sheets}

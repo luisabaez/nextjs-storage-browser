@@ -31,6 +31,7 @@ export interface ChildDetail {
   keyIdx: number;              // index of the link column in headers
   strategy: 'join' | 'aggregate';
   sourceFile?: string;         // the CV_ conversion file this child came from (if known)
+  populationCount?: number;    // true population when only the sample was loaded (server-sampled); else rows.length
 }
 
 // Parent/child integrity + coverage for one child (automates the manual
@@ -59,6 +60,7 @@ export interface MergeResult {
   warnings: string[];
   recordCount: number;
   sourceTag?: string; // set on a per-source split (e.g. "FIMAS") so the file is named "BU 050 FIMAS"
+  parentPopulation?: number; // true parent population when only the sample was loaded (server-sampled)
 }
 
 // Curated short labels for known children; everything else is title-cased.
