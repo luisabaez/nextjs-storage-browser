@@ -1884,7 +1884,7 @@ function ValidationsPage() {
     // Converted files change and must be regenerated on demand; prior-run tracking is
     // kept only for the dashboard and no longer gates the run.
     const RUN_CAP = 500;
-    const bus = allBus.slice(0, RUN_CAP);
+    let bus = allBus.slice(0, RUN_CAP);
     const stillLeft = allBus.length - bus.length;
     if (!bus.length) { setEntityRun({ running: false, done: 0, total: 0, current: '', note: `No BUs are attached to "${entityTab}".` }); return; }
     setEntityPreview(p => ({ ...p, open: false })); // preview (if open) served as the confirmation
@@ -1913,7 +1913,11 @@ function ValidationsPage() {
     const entityRootN: Record<string, number> = {};
     // Injected entities (GL/Location/Customer&Sponsor) use their own pooled writer
     // (sampleAndWriteInjected), so they must NOT be routed through the generic server path.
-    if (entityTab !== HCM_PERSON_TAB && !EXTRA_ENTITY_TABS.has(entityTab)) {
+    const isAssets = entityTab.trim().toLowerCase() === 'assets';
+    // Assets is enumerated + sized from its own BU-field values below (units include BU
+    // 122's per-office books), so skip the generic report-driven pre-sizing for it.
+    const assetsPop: Record<string, number> = {};
+    if (entityTab !== HCM_PERSON_TAB && !EXTRA_ENTITY_TABS.has(entityTab) && !isAssets) {
       try {
         // Inventory's root is the Items master (SCM_ITEMS), a different plan entity than
         // the report tab — size it from the Items dry-run, not the report->plan resolver.
@@ -1928,6 +1932,20 @@ function ValidationsPage() {
           for (const b of bus) entityRootN[b] = rootEntries.filter((p: { source: string; bu: string }) => buMatchesGen(b, p.source, p.bu, ledger)).reduce((s: number, p: { rows?: number }) => s + (p.rows || 0), 0);
         }
       } catch { /* no sizing -> client-side path handles it */ }
+    }
+    // Assets: units are the distinct BU-field values (clean 3-digit codes + BU 122's
+    // per-office books 122_AGU/ARE/...), each sampled server-side and kept separate per
+    // the client. Fetch them (with populations) from the live master, not the agency
+    // report — which only knows "122" — and use them as the run's unit list.
+    if (isAssets) {
+      try {
+        const d = await (await fetch(`${LAMBDA_URL}?action=assets_bu_units&mock=${PLAN_MOCK}`)).json();
+        if (d.ok && d.units) {
+          Object.assign(assetsPop, d.units);
+          bus = Object.keys(assetsPop).sort().slice(0, RUN_CAP);
+          setEntityRun({ running: true, done: 0, total: bus.length, current: '', note: '' });
+        }
+      } catch { /* fall back to the attached BUs if the units call fails */ }
     }
     for (let i = 0; i < bus.length; i++) {
       const bu = bus[i];
@@ -1966,6 +1984,24 @@ function ValidationsPage() {
             }
           } catch (e) { console.error('inventory server sample failed', bu, e); }
           // fall through to the client-side branch if the server path errored
+        }
+        // Assets: always server-side (lots of files, large books). `bu` here is a BU-field
+        // value — a clean 3-digit code or a per-office book like 122_SJU — sampled exactly.
+        if (entityTab.trim().toLowerCase() === 'assets') {
+          const tier = confidenceTierFor(bu, entityTab, 'ASSETS');
+          const N = assetsPop[bu] || 0;
+          const n = tier && N ? computeSampleSize(N, tier) : 0;
+          if (!n) { skipped.push(bu); continue; }
+          try {
+            const resp = await (await fetch(`${LAMBDA_URL}?action=sample_assets_by_bu&mock=${PLAN_MOCK}&bu=${encodeURIComponent(bu)}&n=${n}${actor}`)).json();
+            if (resp.ok && !resp.sample_size) { skipped.push(bu); continue; }
+            if (resp.ok && (resp.sheets || []).length && resp.sample_size) {
+              const merged = sheetsToMergeResult(bu, 'Assets', resp.root_key || 'Tag Number', resp.sheets);
+              const r = await sampleAndWriteResult({ entity: 'Assets', agency: bu, tab: entityTab, bu, N: resp.population || N, data: { headers: merged.headers.map(String), rows: merged.rows, sheetName: 'Assets' }, merged, download: false, preSampled: true });
+              if (r) { reports++; continue; }
+            }
+          } catch (e) { console.error('assets server sample failed', bu, e); }
+          skipped.push(bu); continue; // Assets is server-only; no client-side fallback path
         }
         // Oversized entities: draw the sample server-side so the browser doesn't load the
         // full population + children (e.g. Purchase Orders 081 = 24K POs, ~265K child rows).

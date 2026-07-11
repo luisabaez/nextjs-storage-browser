@@ -1250,6 +1250,90 @@ def sample_inventory_by_bu(conn_str, bu, sample_size, mock='MOCK14', source_db=N
             "root_key": item_col, "sheets": sheets}
 
 
+# Assets sample scope (Entity_Hierarchy.docx): Assets master + Asset Distribution child,
+# linked on 'Tag Number'. Keyed by a clean 'BU' column — matched EXACTLY, so BU 122's
+# per-office books ('122_AGU','122_ARE',...) each sample as their own unit (client's rule;
+# Assets is the only entity kept per-office).
+_ASSETS_ROOT = 'FIN_ASSETS_{m}_VW_CONVERTED_TBL'
+_ASSETS_CHILDREN = [('Asset Distribution', 'FIN_ASSETS_DISTRIBUTION_{m}_VW_CONVERTED_TBL')]
+_ASSETS_BU_FIELD = 'BU'
+_ASSETS_LINK = 'Tag Number'
+
+
+def sample_assets_by_bu(conn_str, bu, sample_size, mock='MOCK14', source_db=None):
+    """Server-side Assets sampling: sample `sample_size` Assets (master) for the exact BU
+    value (a clean '015' or a per-office book '122_AGU'), then fetch only those assets'
+    Asset Distribution rows (linked on Tag Number). Returns the sampled sheets."""
+    db = source_db or SOURCE_DATABASE
+    try:
+        n_req = int(sample_size)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "sample_size must be a number"}
+    bu = str(bu).strip()
+    root = _ASSETS_ROOT.format(m=mock)
+    with pyodbc.connect(conn_str) as conn:
+        cur = conn.cursor()
+        r_schema, r_cols = _object_meta(cur, db, root)
+        if not r_cols:
+            return {"ok": False, "error": f"{root} not found in {db}"}
+        bu_col = _resolve_col(r_cols, _ASSETS_BU_FIELD)
+        tag_col = resolve_link_column(r_cols, _ASSETS_LINK)
+        if not (bu_col and tag_col):
+            return {"ok": False, "error": "BU or Tag Number column not found on Assets"}
+        r_fq = _qualified(db, r_schema, root)
+        cur.execute(f"SELECT COUNT(*) FROM {r_fq} WHERE [{bu_col}] = ?", (bu,))
+        population = cur.fetchone()[0]
+        n = max(1, min(n_req, population)) if population else 0
+        sheets = []
+        if n:
+            cur.execute(f"SELECT TOP ({n}) * FROM {r_fq} WHERE [{bu_col}] = ? ORDER BY NEWID()", (bu,))
+            r_headers = [d[0] for d in cur.description]
+            r_rows = [[_coerce(v) for v in row] for row in cur.fetchall()]
+            sheets.append({"label": _short_name(root), "table": root, "headers": r_headers, "rows": r_rows})
+            ti = r_headers.index(tag_col)
+            keys = sorted({row[ti] for row in r_rows if row[ti] is not None}, key=lambda x: str(x))
+            for label, stem in _ASSETS_CHILDREN:
+                child = stem.format(m=mock)
+                c_schema, c_cols = _object_meta(cur, db, child)
+                if not c_cols:
+                    continue
+                c_link = resolve_link_column(c_cols, _ASSETS_LINK)
+                if not c_link:
+                    continue
+                c_fq = _qualified(db, c_schema, child)
+                c_headers, c_rows = list(c_cols), []
+                for i in range(0, len(keys), IN_CHUNK):
+                    batch = keys[i:i + IN_CHUNK]
+                    cph = ",".join("?" * len(batch))
+                    cur.execute(f"SELECT * FROM {c_fq} WHERE [{c_link}] IN ({cph})", batch)
+                    c_headers = [d[0] for d in cur.description]
+                    c_rows.extend([[_coerce(v) for v in row] for row in cur.fetchall()])
+                sheets.append({"label": label, "table": child, "headers": c_headers, "rows": c_rows})
+    return {"ok": True, "bu": bu, "root": root, "population": population,
+            "sample_size": (len(sheets[0]["rows"]) if sheets else 0),
+            "root_key": tag_col, "sheets": sheets}
+
+
+def assets_bu_units(conn_str, mock='MOCK14', source_db=None):
+    """The distinct Assets BU-field values (sample units): clean 3-digit codes plus BU
+    122's per-office books. Returns {bu: population} so the client can size + iterate."""
+    db = source_db or SOURCE_DATABASE
+    root = _ASSETS_ROOT.format(m=mock)
+    with pyodbc.connect(conn_str) as conn:
+        cur = conn.cursor()
+        r_schema, r_cols = _object_meta(cur, db, root)
+        if not r_cols:
+            return {"ok": False, "error": f"{root} not found in {db}"}
+        bu_col = _resolve_col(r_cols, _ASSETS_BU_FIELD)
+        if not bu_col:
+            return {"ok": False, "error": "BU column not found on Assets"}
+        r_fq = _qualified(db, r_schema, root)
+        cur.execute(f"SELECT [{bu_col}], COUNT(*) FROM {r_fq} WHERE [{bu_col}] IS NOT NULL "
+                    f"GROUP BY [{bu_col}]")
+        units = {str(r[0]).strip(): int(r[1]) for r in cur.fetchall() if str(r[0]).strip()}
+    return {"ok": True, "root": root, "units": units}
+
+
 def generate_entity_files(conn_str, s3, bucket, mock, entity, subentity=None,
                           dry_run=False, source_db=None, actor="", bu_filter=None):
     # bu_filter: when set, only source[/BU] splits whose source OR BU value equals
