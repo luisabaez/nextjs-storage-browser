@@ -1418,8 +1418,14 @@ function ValidationsPage() {
           if (!buFiles.length) continue;
           tagged = tagged.concat(await loadGeneratedTagged({ ...g, files: buFiles }, manifest));
         }
-        const forBU = tagged.filter(t => buMatchesGen(bu, t.source, t.bu, false));
+        let forBU = tagged.filter(t => buMatchesGen(bu, t.source, t.bu, false));
         if (!forBU.length) continue;
+        // The Items master is emitted twice (the plan carries an Organization-keyed AND a
+        // BU-keyed row for it), so drop duplicate (table, source) files before pooling —
+        // else coalesceByTable concatenates the identical rows and doubles the master.
+        // Different Organizations (a BU's multiple item orgs) keep distinct sources here.
+        const seenTS = new Set<string>();
+        forBU = forBU.filter(t => { const k = normTbl(t.table || t.name) + '|' + (t.source || ''); if (seenTS.has(k)) return false; seenTS.add(k); return true; });
         // Pool each table's per-org files under the BU, then merge on the SCM_ITEMS tree.
         const merged = coalesceByTable(forBU.map(t => ({ ...t, source: bu })));
         const results = (edges.length ? mergeHierarchy(merged, targets, edges, overrides) : mergeByRelationships(merged, targets, overrides))
