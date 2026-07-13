@@ -1577,9 +1577,33 @@ function ValidationsPage() {
     if (!valReport) return;
     setBuLoading(true);
     try {
-      const built = await buildBUResults(bu, onlyEntity);
       let loadedEntities = 0, masters = 0, wrote = 0;
+      // Inventory: sample SERVER-SIDE and write the workbook directly (like the entity
+      // run), instead of the client-side CV merge. The CV path breaks when a BU's item /
+      // category data is re-converted (e.g. Item Category loses its rows for that BU),
+      // whereas the server sampler joins the children by Item and stays correct.
+      const invName = INVENTORY_TAB.toLowerCase();
+      if (assignedEntitiesFor(bu).some(t => (!onlyEntity || t === onlyEntity) && t.trim().toLowerCase() === invName)) {
+        const e = valReport.entities.find(x => x.tab.trim().toLowerCase() === invName);
+        const tier = e ? confidenceTierFor(bu, e.tab, 'INVENTORY') : undefined;
+        if (e && tier) {
+          try {
+            const first = await (await fetch(`${LAMBDA_URL}?action=sample_inventory_by_bu&mock=${PLAN_MOCK}&bu=${encodeURIComponent(bu)}&n=1`)).json();
+            const N = first.population || 0;
+            const n = N ? computeSampleSize(N, tier) : 0;
+            const resp = n <= 1 ? first : await (await fetch(`${LAMBDA_URL}?action=sample_inventory_by_bu&mock=${PLAN_MOCK}&bu=${encodeURIComponent(bu)}&n=${n}`)).json();
+            if (resp.ok && resp.sample_size) {
+              const merged = sheetsToMergeResult(bu, 'Inventory', resp.root_key || 'Item', resp.sheets);
+              const r = await sampleAndWriteResult({ entity: 'Inventory', agency: bu, tab: e.tab, bu, N: resp.population || N, data: { headers: merged.headers.map(String), rows: merged.rows, sheetName: 'Inventory' }, merged, download: false, preSampled: true });
+              if (r) wrote++;
+            }
+          } catch (err) { console.error('inventory sample-by-bu (server) failed', bu, err); }
+        }
+      }
+      // Everything else via the client-side merge (Inventory handled above).
+      const built = (onlyEntity && onlyEntity.trim().toLowerCase() === invName) ? [] : await buildBUResults(bu, onlyEntity);
       for (const { e, results } of built) {
+        if (e.tab.trim().toLowerCase() === invName) continue; // drawn server-side above
         // Write as ONE workbook (a sheet per master) — the same as the entity-run —
         // rather than loading separate list entries that each generate their own file.
         // Applies to injected entities (GL Budget Balance + its Revenue Budget sub-entity)
@@ -1604,10 +1628,10 @@ function ValidationsPage() {
     } finally {
       setBuLoading(false);
     }
-    // sampleAndWriteInjected is declared below; it's called inside the async body (after
-    // render), so referencing it here is safe without adding it to the dep list.
+    // sampleAndWriteInjected / sampleAndWriteResult are declared below; they're called
+    // inside the async body (after render), so referencing them here is safe.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [valReport, buildBUResults, addMergeResults]);
+  }, [valReport, buildBUResults, addMergeResults, assignedEntitiesFor, confidenceTierFor]);
 
   // Generate only the files a BU needs (per-BU, small/fast), for the assigned
   // entities (all, or just onlyEntity) whose included files aren't present yet.
