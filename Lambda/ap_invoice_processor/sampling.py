@@ -17,6 +17,7 @@ Interim limitations (pending methodology confirmation with Ethree / Wanda):
 
 import io
 import json
+import math
 import re
 import unicodedata
 import uuid
@@ -1187,16 +1188,39 @@ _INVENTORY_ORG_FIELD = 'Organization'
 _INVENTORY_LINK = 'Item'
 
 
-def sample_inventory_by_bu(conn_str, bu, sample_size, mock='MOCK14', source_db=None):
-    """Server-side Inventory sampling: sample `sample_size` Items (master, keyed by an
-    Organization code INV_<bu>) for the BU, then fetch only those items' Item Category +
-    Item OHQ rows (linked on Item). Returns the sampled sheets so the browser builds the
-    report from a small set instead of loading the BU's full item populations."""
+def _cochran_n(N, z, e, p):
+    """Cochran attribute sample size with finite-population correction (Framework V2),
+    mirroring the client's computeSampleSize: n = N*Z^2*p*(1-p) / [e^2*(N-1) + Z^2*p*(1-p)],
+    rounded up, floored at 1, capped at N. Used to size EACH inventory organization on its
+    own population so every org gets at least one sampled item."""
+    try:
+        N = int(N); z = float(z); e = float(e); p = float(p)
+    except (TypeError, ValueError):
+        return 0
+    if N <= 0:
+        return 0
+    zpq = z * z * p * (1 - p)
+    n = (N * zpq) / (e * e * (N - 1) + zpq)
+    return min(N, max(1, math.ceil(n)))
+
+
+def sample_inventory_by_bu(conn_str, bu, sample_size, mock='MOCK14', source_db=None,
+                           z=None, e=None, p=None):
+    """Server-side Inventory sampling for one BU, kept in a SINGLE per-BU workbook.
+
+    A BU can hold several inventory organizations (e.g. 024 = INV_024071/131/501/581/651).
+    The client requires a sample drawn from EACH organization, so when tier params (z,e,p)
+    are supplied every org is sized on its OWN population via Cochran (>=1 each) and the
+    draws are unioned — no organization is left unrepresented. Without tier params it falls
+    back to a single TOP(n) across all of the BU's orgs. Item Category + Item OHQ children
+    are then pulled for the sampled items (linked on Item); the master population reported
+    stays the BU-wide total either way."""
     db = source_db or SOURCE_DATABASE
     try:
         n_req = int(sample_size)
     except (TypeError, ValueError):
         return {"ok": False, "error": "sample_size must be a number"}
+    stratify = z is not None and e is not None and p is not None
     bu = str(bu).strip()
     root = _INVENTORY_ROOT.format(m=mock)
     with pyodbc.connect(conn_str) as conn:
@@ -1215,16 +1239,30 @@ def sample_inventory_by_bu(conn_str, bu, sample_size, mock='MOCK14', source_db=N
                 if r[0] is not None and _bu_matches(bu, str(r[0]).strip(), '')]
         if not orgs:
             return {"ok": True, "bu": bu, "root": root, "population": 0, "sample_size": 0,
-                    "root_key": item_col, "sheets": []}
+                    "root_key": item_col, "per_org": [], "sheets": []}
         ph = ",".join("?" * len(orgs))
         cur.execute(f"SELECT COUNT(*) FROM {r_fq} WHERE [{org_col}] IN ({ph})", orgs)
         population = cur.fetchone()[0]
-        n = max(1, min(n_req, population)) if population else 0
         sheets = []
-        if n:
+        r_headers, r_rows, per_org = None, [], []
+        if population and stratify:
+            # Stratified: size + draw each organization independently, then union.
+            for org in orgs:
+                cur.execute(f"SELECT COUNT(*) FROM {r_fq} WHERE [{org_col}] = ?", (org,))
+                org_pop = cur.fetchone()[0]
+                if not org_pop:
+                    continue
+                n_org = _cochran_n(org_pop, z, e, p)
+                cur.execute(f"SELECT TOP ({n_org}) * FROM {r_fq} WHERE [{org_col}] = ? ORDER BY NEWID()", (org,))
+                r_headers = [d[0] for d in cur.description]
+                r_rows.extend([_coerce(v) for v in row] for row in cur.fetchall())
+                per_org.append({"org": str(org).strip(), "population": org_pop, "sampled": n_org})
+        elif population:
+            n = max(1, min(n_req, population))
             cur.execute(f"SELECT TOP ({n}) * FROM {r_fq} WHERE [{org_col}] IN ({ph}) ORDER BY NEWID()", orgs)
             r_headers = [d[0] for d in cur.description]
             r_rows = [[_coerce(v) for v in row] for row in cur.fetchall()]
+        if r_rows:
             sheets.append({"label": _short_name(root), "table": root, "headers": r_headers,
                            "rows": r_rows, "population": population})
             ii = r_headers.index(item_col)
@@ -1254,7 +1292,7 @@ def sample_inventory_by_bu(conn_str, bu, sample_size, mock='MOCK14', source_db=N
                                "rows": c_rows, "population": c_pop})
     return {"ok": True, "bu": bu, "root": root, "population": population,
             "sample_size": (len(sheets[0]["rows"]) if sheets else 0),
-            "root_key": item_col, "sheets": sheets}
+            "root_key": item_col, "per_org": per_org, "sheets": sheets}
 
 
 # Assets sample scope (Entity_Hierarchy.docx): Assets master + Asset Distribution child,

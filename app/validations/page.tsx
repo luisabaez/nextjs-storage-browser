@@ -1588,13 +1588,13 @@ function ValidationsPage() {
         const tier = e ? confidenceTierFor(bu, e.tab, 'INVENTORY') : undefined;
         if (e && tier) {
           try {
-            const first = await (await fetch(`${LAMBDA_URL}?action=sample_inventory_by_bu&mock=${PLAN_MOCK}&bu=${encodeURIComponent(bu)}&n=1`)).json();
-            const N = first.population || 0;
-            const n = N ? computeSampleSize(N, tier) : 0;
-            const resp = n <= 1 ? first : await (await fetch(`${LAMBDA_URL}?action=sample_inventory_by_bu&mock=${PLAN_MOCK}&bu=${encodeURIComponent(bu)}&n=${n}`)).json();
+            // Pass the tier (z,e,p) so the server draws a sample from EACH inventory
+            // organization of this BU (multi-org agencies must have every org represented).
+            const tq = `&z=${tier.Z}&e=${tier.e}&p=${tier.p}`;
+            const resp = await (await fetch(`${LAMBDA_URL}?action=sample_inventory_by_bu&mock=${PLAN_MOCK}&bu=${encodeURIComponent(bu)}${tq}`)).json();
             if (resp.ok && resp.sample_size) {
               const merged = sheetsToMergeResult(bu, 'Inventory', resp.root_key || 'Item', resp.sheets);
-              const r = await sampleAndWriteResult({ entity: 'Inventory', agency: bu, tab: e.tab, bu, N: resp.population || N, data: { headers: merged.headers.map(String), rows: merged.rows, sheetName: 'Inventory' }, merged, download: false, preSampled: true });
+              const r = await sampleAndWriteResult({ entity: 'Inventory', agency: bu, tab: e.tab, bu, N: resp.population || 0, data: { headers: merged.headers.map(String), rows: merged.rows, sheetName: 'Inventory' }, merged, download: false, preSampled: true });
               if (r) wrote++;
             }
           } catch (err) { console.error('inventory sample-by-bu (server) failed', bu, err); }
@@ -2007,10 +2007,12 @@ function ValidationsPage() {
         if (entityTab.trim().toLowerCase() === INVENTORY_TAB.toLowerCase()) {
           const tier = confidenceTierFor(bu, entityTab, 'INVENTORY');
           const N = entityRootN[bu] || 0;
-          const n = tier && N ? computeSampleSize(N, tier) : 0;
-          if (!n) { skipped.push(bu); continue; } // BU has no converted items (e.g. 018/043)
+          if (!tier || !N) { skipped.push(bu); continue; } // BU has no converted items (e.g. 043)
           try {
-            const resp = await (await fetch(`${LAMBDA_URL}?action=sample_inventory_by_bu&mock=${PLAN_MOCK}&bu=${encodeURIComponent(bu)}&n=${n}${actor}`)).json();
+            // Pass the tier (z,e,p) so the server samples EACH inventory organization of
+            // this BU (multi-org agencies must have every org represented in the one file).
+            const tq = `&z=${tier.Z}&e=${tier.e}&p=${tier.p}`;
+            const resp = await (await fetch(`${LAMBDA_URL}?action=sample_inventory_by_bu&mock=${PLAN_MOCK}&bu=${encodeURIComponent(bu)}${tq}${actor}`)).json();
             if (resp.ok && !resp.sample_size) { skipped.push(bu); continue; } // no items for this BU
             if (resp.ok && (resp.sheets || []).length && resp.sample_size) {
               const merged = sheetsToMergeResult(bu, 'Inventory', resp.root_key || 'Item', resp.sheets);
