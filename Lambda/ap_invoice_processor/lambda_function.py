@@ -1752,14 +1752,16 @@ def lambda_handler(event, context):
             bu = (p.get("bu") or "").strip()
             sample_size = p.get("n") or p.get("sample_size") or 0
             mock = (p.get("mock") or "MOCK14").upper()
-            # tier params (z,e,p) trigger per-organization stratified sampling
+            # tier params (z,e,p) trigger per-organization stratified sampling;
+            # orgs (CSV) restricts to specific organizations (BU split into files)
             z = p.get("z"); e = p.get("e"); pr = p.get("p")
+            orgs = p.get("orgs")
             if not bu:
                 return {"statusCode": 400, "headers": headers,
                         "body": json.dumps({"ok": False, "error": "bu required"})}
             conn_str = get_connection_string()
             res = sampling.sample_inventory_by_bu(conn_str, bu, sample_size, mock=mock,
-                                                  z=z, e=e, p=pr)
+                                                  z=z, e=e, p=pr, orgs=orgs)
             return {"statusCode": 200 if res.get("ok") else 400,
                     "headers": headers,
                     "body": json.dumps(res, default=str)}

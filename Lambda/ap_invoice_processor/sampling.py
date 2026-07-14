@@ -1205,7 +1205,7 @@ def _cochran_n(N, z, e, p):
 
 
 def sample_inventory_by_bu(conn_str, bu, sample_size, mock='MOCK14', source_db=None,
-                           z=None, e=None, p=None):
+                           z=None, e=None, p=None, orgs=None):
     """Server-side Inventory sampling for one BU, kept in a SINGLE per-BU workbook.
 
     A BU can hold several inventory organizations (e.g. 024 = INV_024071/131/501/581/651).
@@ -1214,7 +1214,11 @@ def sample_inventory_by_bu(conn_str, bu, sample_size, mock='MOCK14', source_db=N
     draws are unioned — no organization is left unrepresented. Without tier params it falls
     back to a single TOP(n) across all of the BU's orgs. Item Category + Item OHQ children
     are then pulled for the sampled items (linked on Item); the master population reported
-    stays the BU-wide total either way."""
+    stays the total of the orgs sampled.
+
+    `orgs` optionally restricts sampling to specific Organization codes (a list or a
+    comma-separated string) — used to split a BU into separate workbooks by organization
+    (e.g. 045 = INV_045321/652/655 in one file and INV_045656 (911) in its own)."""
     db = source_db or SOURCE_DATABASE
     try:
         n_req = int(sample_size)
@@ -1222,6 +1226,10 @@ def sample_inventory_by_bu(conn_str, bu, sample_size, mock='MOCK14', source_db=N
         return {"ok": False, "error": "sample_size must be a number"}
     stratify = z is not None and e is not None and p is not None
     bu = str(bu).strip()
+    want_orgs = None
+    if orgs:
+        seq = orgs.split(',') if isinstance(orgs, str) else orgs
+        want_orgs = {str(o).strip() for o in seq if o and str(o).strip()}
     root = _INVENTORY_ROOT.format(m=mock)
     with pyodbc.connect(conn_str) as conn:
         cur = conn.cursor()
@@ -1233,10 +1241,12 @@ def sample_inventory_by_bu(conn_str, bu, sample_size, mock='MOCK14', source_db=N
         if not (org_col and item_col):
             return {"ok": False, "error": "Organization or Item column not found on Items"}
         r_fq = _qualified(db, r_schema, root)
-        # This BU's inventory orgs (INV_016651 -> 016 via _bu_matches).
+        # This BU's inventory orgs (INV_016651 -> 016 via _bu_matches), optionally
+        # narrowed to a requested subset so one BU can split into separate files.
         cur.execute(f"SELECT DISTINCT [{org_col}] FROM {r_fq}")
         orgs = [r[0] for r in cur.fetchall()
-                if r[0] is not None and _bu_matches(bu, str(r[0]).strip(), '')]
+                if r[0] is not None and _bu_matches(bu, str(r[0]).strip(), '')
+                and (want_orgs is None or str(r[0]).strip() in want_orgs)]
         if not orgs:
             return {"ok": True, "bu": bu, "root": root, "population": 0, "sample_size": 0,
                     "root_key": item_col, "per_org": [], "sheets": []}

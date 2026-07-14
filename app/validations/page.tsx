@@ -230,6 +230,17 @@ const INVENTORY_TAB = 'Inventory';
 const INVENTORY_PLANS = ['Items', 'Item Category', 'Item On Hand Quantity (OHQ)'];
 const INVENTORY_FOLDERS = new Set(INVENTORY_PLANS.map(safeName));
 
+// A few agencies must have their inventory organizations split across separate workbooks
+// (client rule). BU 045's "911" organization (INV_045656) is its own agency and gets its
+// own file "Inventory BU 045 911"; the other three orgs stay in "Inventory BU 045". Each
+// group samples its own organizations (server `orgs=` filter); tag '' keeps the plain name.
+const INVENTORY_ORG_SPLITS: Record<string, { tag: string; orgs: string[] }[]> = {
+  '045': [
+    { tag: '', orgs: ['INV_045321', 'INV_045652', 'INV_045655'] },
+    { tag: '911', orgs: ['INV_045656'] },
+  ],
+};
+
 // HCM Person is published one excel per source system (ATTRIBUTE1), with KRONOSPOL and
 // ADPPOLICIA combined into one (per the client's HCM email). Sampling runs server-side
 // (sample_hcm_person) because a source pools far too many people to load in-browser.
@@ -1587,17 +1598,23 @@ function ValidationsPage() {
         const e = valReport.entities.find(x => x.tab.trim().toLowerCase() === invName);
         const tier = e ? confidenceTierFor(bu, e.tab, 'INVENTORY') : undefined;
         if (e && tier) {
-          try {
-            // Pass the tier (z,e,p) so the server draws a sample from EACH inventory
-            // organization of this BU (multi-org agencies must have every org represented).
-            const tq = `&z=${tier.Z}&e=${tier.e}&p=${tier.p}`;
-            const resp = await (await fetch(`${LAMBDA_URL}?action=sample_inventory_by_bu&mock=${PLAN_MOCK}&bu=${encodeURIComponent(bu)}${tq}`)).json();
-            if (resp.ok && resp.sample_size) {
-              const merged = sheetsToMergeResult(bu, 'Inventory', resp.root_key || 'Item', resp.sheets);
-              const r = await sampleAndWriteResult({ entity: 'Inventory', agency: bu, tab: e.tab, bu, N: resp.population || 0, data: { headers: merged.headers.map(String), rows: merged.rows, sheetName: 'Inventory' }, merged, download: false, preSampled: true });
-              if (r) wrote++;
-            }
-          } catch (err) { console.error('inventory sample-by-bu (server) failed', bu, err); }
+          // Pass the tier (z,e,p) so the server draws a sample from EACH inventory
+          // organization of this BU (multi-org agencies must have every org represented).
+          const tq = `&z=${tier.Z}&e=${tier.e}&p=${tier.p}`;
+          // A few BUs split their orgs across separate workbooks (045 -> 045 + 045 911).
+          const groups = INVENTORY_ORG_SPLITS[bu] || [{ tag: '', orgs: [] as string[] }];
+          for (const grp of groups) {
+            try {
+              const oq = grp.orgs.length ? `&orgs=${encodeURIComponent(grp.orgs.join(','))}` : '';
+              const resp = await (await fetch(`${LAMBDA_URL}?action=sample_inventory_by_bu&mock=${PLAN_MOCK}&bu=${encodeURIComponent(bu)}${tq}${oq}`)).json();
+              if (resp.ok && resp.sample_size) {
+                const merged = sheetsToMergeResult(bu, 'Inventory', resp.root_key || 'Item', resp.sheets);
+                if (grp.tag) merged.sourceTag = grp.tag;
+                const r = await sampleAndWriteResult({ entity: 'Inventory', agency: bu, tab: e.tab, bu, N: resp.population || 0, data: { headers: merged.headers.map(String), rows: merged.rows, sheetName: 'Inventory' }, merged, download: false, preSampled: true });
+                if (r) wrote++;
+              }
+            } catch (err) { console.error('inventory sample-by-bu (server) failed', bu, grp.tag, err); }
+          }
         }
       }
       // Everything else via the client-side merge (Inventory handled above).
@@ -2008,10 +2025,30 @@ function ValidationsPage() {
           const tier = confidenceTierFor(bu, entityTab, 'INVENTORY');
           const N = entityRootN[bu] || 0;
           if (!tier || !N) { skipped.push(bu); continue; } // BU has no converted items (e.g. 043)
+          // Pass the tier (z,e,p) so the server samples EACH inventory organization of
+          // this BU (multi-org agencies must have every org represented in the one file).
+          const tq = `&z=${tier.Z}&e=${tier.e}&p=${tier.p}`;
+          // A few BUs split their organizations across separate workbooks (045 -> 045 +
+          // 045 911). Sample each group's orgs and tag the file; these are server-only.
+          const splits = INVENTORY_ORG_SPLITS[bu];
+          if (splits) {
+            let wrote = 0;
+            for (const grp of splits) {
+              try {
+                const oq = `&orgs=${encodeURIComponent(grp.orgs.join(','))}`;
+                const resp = await (await fetch(`${LAMBDA_URL}?action=sample_inventory_by_bu&mock=${PLAN_MOCK}&bu=${encodeURIComponent(bu)}${tq}${oq}${actor}`)).json();
+                if (resp.ok && resp.sample_size && (resp.sheets || []).length) {
+                  const merged = sheetsToMergeResult(bu, 'Inventory', resp.root_key || 'Item', resp.sheets);
+                  if (grp.tag) merged.sourceTag = grp.tag;
+                  const r = await sampleAndWriteResult({ entity: 'Inventory', agency: bu, tab: entityTab, bu, N: resp.population || N, data: { headers: merged.headers.map(String), rows: merged.rows, sheetName: 'Inventory' }, merged, download: false, preSampled: true });
+                  if (r) wrote++;
+                }
+              } catch (e) { console.error('inventory split sample failed', bu, grp.tag, e); }
+            }
+            if (wrote) reports += wrote; else skipped.push(bu);
+            continue;
+          }
           try {
-            // Pass the tier (z,e,p) so the server samples EACH inventory organization of
-            // this BU (multi-org agencies must have every org represented in the one file).
-            const tq = `&z=${tier.Z}&e=${tier.e}&p=${tier.p}`;
             const resp = await (await fetch(`${LAMBDA_URL}?action=sample_inventory_by_bu&mock=${PLAN_MOCK}&bu=${encodeURIComponent(bu)}${tq}${actor}`)).json();
             if (resp.ok && !resp.sample_size) { skipped.push(bu); continue; } // no items for this BU
             if (resp.ok && (resp.sheets || []).length && resp.sample_size) {
