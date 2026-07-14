@@ -241,6 +241,15 @@ const INVENTORY_ORG_SPLITS: Record<string, { tag: string; orgs: string[] }[]> = 
   ],
 };
 
+// Purchase Orders draw server-side for EVERY BU (the client-side path loads each BU's full
+// PO population + line/location/distribution children, which dominates the run time).
+// These two BUs stay on the client because they need a split the generic sampler doesn't
+// model: 050 is the only multi-source header (FIMAS + PRIFAS -> withPerSourceSplits), and
+// 045 carries the rootless 911 variant family (LINES_911 & co., no FINAL_911 header).
+const PO_CLIENT_SIDE_BUS = new Set(['045', '050']);
+const poServerSide = (tab: string, bu: string): boolean =>
+  (matchEntity(tab) || '') === 'PURCHASE ORDERS' && !PO_CLIENT_SIDE_BUS.has(bu3(bu));
+
 // HCM Person is published one excel per source system (ATTRIBUTE1), with KRONOSPOL and
 // ADPPOLICIA combined into one (per the client's HCM email). Sampling runs server-side
 // (sample_hcm_person) because a source pools far too many people to load in-browser.
@@ -2080,7 +2089,12 @@ function ValidationsPage() {
         }
         // Oversized entities: draw the sample server-side so the browser doesn't load the
         // full population + children (e.g. Purchase Orders 081 = 24K POs, ~265K child rows).
-        if (!EXTRA_ENTITY_TABS.has(entityTab) && (entityRootN[bu] || 0) > SERVER_SAMPLE_THRESHOLD) {
+        // Purchase Orders draw server-side for EVERY BU (not just oversized ones) — the
+        // client-side path loads each BU's full PO population + its line/location/
+        // distribution children, which dominates the run time. PO_CLIENT_SIDE_BUS stay on
+        // the client because they need split handling the generic sampler doesn't model.
+        if (!EXTRA_ENTITY_TABS.has(entityTab)
+            && ((entityRootN[bu] || 0) > SERVER_SAMPLE_THRESHOLD || poServerSide(entityTab, bu))) {
           const plan = reportToPlanEntity.get(entityTab);
           const cls = matchEntity(resolveEntityTarget(valReport, samplingTargetsRef.current || [], entityTab)?.table || '') || matchEntity(entityTab) || '';
           const tier = confidenceTierFor(bu, entityTab, cls);

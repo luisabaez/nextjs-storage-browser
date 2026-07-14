@@ -1143,7 +1143,8 @@ def sample_entity_by_bu(conn_str, entity, bu, sample_size, mock='MOCK14', source
             cur.execute(f"SELECT TOP ({n}) * FROM {r_fq} WHERE {wc} ORDER BY NEWID()", params)
             r_headers = [d[0] for d in cur.description]
             r_rows = [[_coerce(v) for v in row] for row in cur.fetchall()]
-            sheets.append({"label": _short_name(root), "table": root, "headers": r_headers, "rows": r_rows})
+            sheets.append({"label": _short_name(root), "table": root, "headers": r_headers,
+                           "rows": r_rows, "population": population})
             for child, link_field in _children_of(root):
                 c_schema, c_cols = _object_meta(cur, db, child)
                 if not c_cols:
@@ -1155,6 +1156,11 @@ def sample_entity_by_bu(conn_str, entity, bu, sample_size, mock='MOCK14', source
                 pi = r_headers.index(p_link)
                 keys = sorted({row[pi] for row in r_rows if row[pi] is not None}, key=lambda x: str(x))
                 c_fq = _qualified(db, c_schema, child)
+                # True population = every child row for ALL of this BU's root rows (not just
+                # the sampled ones), for the Relationships/Sizing "Population rows" column.
+                cur.execute(f"SELECT COUNT(*) FROM {c_fq} WHERE [{c_link}] IN "
+                            f"(SELECT [{p_link}] FROM {r_fq} WHERE {wc})", params)
+                c_pop = cur.fetchone()[0]
                 c_headers, c_rows = list(c_cols), []
                 for i in range(0, len(keys), IN_CHUNK):
                     batch = keys[i:i + IN_CHUNK]
@@ -1162,7 +1168,8 @@ def sample_entity_by_bu(conn_str, entity, bu, sample_size, mock='MOCK14', source
                     cur.execute(f"SELECT * FROM {c_fq} WHERE [{c_link}] IN ({ph})", batch)
                     c_headers = [d[0] for d in cur.description]
                     c_rows.extend([[_coerce(v) for v in row] for row in cur.fetchall()])
-                sheets.append({"label": _short_name(child), "table": child, "headers": c_headers, "rows": c_rows})
+                sheets.append({"label": _short_name(child), "table": child, "headers": c_headers,
+                               "rows": c_rows, "population": c_pop})
     # The root's unique-id column (what children link on) — for the report's highlight.
     root_key = None
     for child, link_field in _children_of(root):
