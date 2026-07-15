@@ -1730,11 +1730,14 @@ def lambda_handler(event, context):
             bu = (p.get("bu") or "").strip()
             sample_size = p.get("n") or p.get("sample_size") or 0
             mock = (p.get("mock") or "MOCK14").upper()
+            # tier params (z,e,p): size the sample here from the live population
+            z = p.get("z"); e_ = p.get("e"); pr = p.get("p")
             if not entity or not bu:
                 return {"statusCode": 400, "headers": headers,
                         "body": json.dumps({"ok": False, "error": "entity and bu required"})}
             conn_str = get_connection_string()
-            res = sampling.sample_entity_by_bu(conn_str, entity, bu, sample_size, mock=mock)
+            res = sampling.sample_entity_by_bu(conn_str, entity, bu, sample_size, mock=mock,
+                                               z=z, e=e_, p=pr)
             return {"statusCode": 200 if res.get("ok") else 400,
                     "headers": headers,
                     "body": json.dumps(res, default=str)}

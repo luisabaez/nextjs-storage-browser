@@ -1070,12 +1070,16 @@ def sample_hcm_person(conn_str, sources, sample_size, mock='MOCK14', source_db=N
             "person_key": pn_col, "sources": srcs, "sheets": sheets}
 
 
-def sample_entity_by_bu(conn_str, entity, bu, sample_size, mock='MOCK14', source_db=None):
+def sample_entity_by_bu(conn_str, entity, bu, sample_size, mock='MOCK14', source_db=None,
+                        z=None, e=None, p=None):
     """Server-side per-BU sampling for any entity whose population is too large to build
     in the browser (e.g. Purchase Orders BU 081). Reads the entity's conversion plan to
     find the root (target) table and how it keys the BU, samples `sample_size` root rows
     for that BU, then fetches only those rows' children (linked via the relationship
-    graph). Returns the sampled sheets so the browser builds its report from a small set."""
+    graph). Returns the sampled sheets so the browser builds its report from a small set.
+
+    If tier params (z,e,p) are supplied the sample is sized here via Cochran against the
+    LIVE population, so the caller needn't know the population up front (one round trip)."""
     db = source_db or SOURCE_DATABASE
     try:
         n_req = int(sample_size)
@@ -1137,7 +1141,10 @@ def sample_entity_by_bu(conn_str, entity, bu, sample_size, mock='MOCK14', source
         wc = " OR ".join(conds)
         cur.execute(f"SELECT COUNT(*) FROM {r_fq} WHERE {wc}", params)
         population = cur.fetchone()[0]
-        n = max(1, min(n_req, population)) if population else 0
+        if z is not None and e is not None and p is not None:
+            n = _cochran_n(population, z, e, p)
+        else:
+            n = max(1, min(n_req, population)) if population else 0
         sheets = []
         if n:
             cur.execute(f"SELECT TOP ({n}) * FROM {r_fq} WHERE {wc} ORDER BY NEWID()", params)

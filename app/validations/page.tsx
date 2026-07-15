@@ -1626,9 +1626,37 @@ function ValidationsPage() {
           }
         }
       }
-      // Everything else via the client-side merge (Inventory handled above).
-      const built = (onlyEntity && onlyEntity.trim().toLowerCase() === invName) ? [] : await buildBUResults(bu, onlyEntity);
+      // Purchase Orders: draw SERVER-SIDE too (same as the entity run) so a per-BU re-run
+      // doesn't pull the BU's whole PO population + line/location/distribution children
+      // into the browser. 045/050 are excluded by poServerSide and keep the client path.
+      const poEntity = valReport.entities.find(x =>
+        poServerSide(x.tab, bu)
+        && (!onlyEntity || x.tab === onlyEntity)
+        && assignedEntitiesFor(bu).includes(x.tab));
+      let poWrote = false;
+      if (poEntity) {
+        const plan = reportToPlanEntity.get(poEntity.tab);
+        const tier = confidenceTierFor(bu, poEntity.tab, 'PURCHASE ORDERS');
+        if (plan && tier) {
+          try {
+            // The server sizes the sample from the live population (z,e,p) — one round trip.
+            const tq = `&z=${tier.Z}&e=${tier.e}&p=${tier.p}`;
+            const resp = await (await fetch(`${LAMBDA_URL}?action=sample_entity_by_bu&mock=${PLAN_MOCK}&entity=${encodeURIComponent(plan)}&bu=${encodeURIComponent(bu)}${tq}`)).json();
+            if (resp.ok && resp.sample_size && (resp.sheets || []).length) {
+              const entName = matchEntity(poEntity.tab) || poEntity.tab;
+              const merged = sheetsToMergeResult(bu, entName, resp.root_key || '', resp.sheets);
+              const r = await sampleAndWriteResult({ entity: entName, agency: bu, tab: poEntity.tab, bu, N: resp.population || 0, data: { headers: merged.headers.map(String), rows: merged.rows, sheetName: entName }, merged, download: false, preSampled: true });
+              if (r) { wrote++; poWrote = true; }
+            }
+          } catch (err) { console.error('purchase orders sample-by-bu (server) failed', bu, err); }
+        }
+      }
+      // Everything else via the client-side merge (Inventory / PO handled above).
+      const onlyDoneServerSide = !!onlyEntity
+        && (onlyEntity.trim().toLowerCase() === invName || (poWrote && onlyEntity === poEntity?.tab));
+      const built = onlyDoneServerSide ? [] : await buildBUResults(bu, onlyEntity);
       for (const { e, results } of built) {
+        if (poWrote && e.tab === poEntity?.tab) continue; // drawn server-side above
         if (e.tab.trim().toLowerCase() === invName) continue; // drawn server-side above
         // Write as ONE workbook (a sheet per master) — the same as the entity-run —
         // rather than loading separate list entries that each generate their own file.
@@ -1657,7 +1685,7 @@ function ValidationsPage() {
     // sampleAndWriteInjected / sampleAndWriteResult are declared below; they're called
     // inside the async body (after render), so referencing them here is safe.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [valReport, buildBUResults, addMergeResults, assignedEntitiesFor, confidenceTierFor]);
+  }, [valReport, buildBUResults, addMergeResults, assignedEntitiesFor, confidenceTierFor, reportToPlanEntity]);
 
   // Generate only the files a BU needs (per-BU, small/fast), for the assigned
   // entities (all, or just onlyEntity) whose included files aren't present yet.
