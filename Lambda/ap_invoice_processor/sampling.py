@@ -1070,6 +1070,83 @@ def sample_hcm_person(conn_str, sources, sample_size, mock='MOCK14', source_db=N
             "person_key": pn_col, "sources": srcs, "sheets": sheets}
 
 
+def _derive_bu(source, bu):
+    """The 3-digit BU a plan row belongs to, derived from its source/BU values — the
+    inverse of _bu_matches (which tests a known BU). Handles a clean numeric BU, a 7-digit
+    ledger segment (0500000 -> 050), an INV_<bu> org code, a "NNN name" OHQ value, and a
+    named source system via _SOURCE_BU_MAP (SALUD -> 071). Returns None when unmappable
+    (e.g. PRIFAS, which spans many agencies)."""
+    vals = [v for v in (bu, source) if v is not None and str(v).strip() != '']
+    for v in vals:
+        s = str(v).strip()
+        if s.isdigit() and 1 <= len(s) <= 3:
+            return s.zfill(3)
+    for v in (source, bu):
+        s = str(v).strip() if v is not None else ''
+        if s.isdigit() and len(s) == 7:
+            return s[:3]
+    for v in (source, bu):
+        s = str(v).strip() if v is not None else ''
+        m = re.match(r'INV_?(\d{3})', s, re.I) or re.match(r'(\d{3})\s', s)
+        if m:
+            return m.group(1)
+    for v in (source, bu):
+        s = str(v).strip().upper() if v is not None else ''
+        if not s:
+            continue
+        first = re.split(r'[^A-Z0-9]', s)[0]
+        if _SOURCE_BU_MAP.get(s):
+            return _SOURCE_BU_MAP[s]
+        if first and _SOURCE_BU_MAP.get(first):
+            return _SOURCE_BU_MAP[first]
+    return None
+
+
+def entity_bu_coverage(conn_str, mock='MOCK14', source_db=None):
+    """Which BUs actually have converted data for each master entity — the LIVE readiness
+    source, so the app needn't rely on the prior-run agency spreadsheet. For every plan
+    master (Included + RequiredFSCM=Y whose conversion table base-matches a sampling
+    TARGET), read its converted table's distinct source/BU values and derive the 3-digit
+    BUs present. Returned keyed by the table's base identity (SCM_ITEMS, ...), which the
+    client resolves each entity tab to."""
+    db = source_db or SOURCE_DATABASE
+    plan_table = f"SETUP_CONVERSION_PLAN_{mock}"
+    targets_base = {_base_table(t) for t in TARGET_TABLES}
+    coverage = {}
+    with pyodbc.connect(conn_str) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"SELECT DISTINCT [CONVERSION_TABLE_BU],[CONVERSION_TABLE_SourceField],"
+            f"[CONVERSION_TABLE_BU_Field] FROM [{db}].[dbo].[{plan_table}] "
+            f"WHERE ISNULL([ExcludedFromMock],'')='Included' AND ISNULL([RequiredFSCM],'')='Y' "
+            f"AND ISNULL([CONVERSION_TABLE_BU],'')<>''")
+        seen = set()
+        for (table, srcf, buf) in cur.fetchall():
+            table = (table or '').strip()
+            base = _base_table(table)
+            if base not in targets_base or table in seen:
+                continue
+            seen.add(table)
+            schema, cols = _object_meta(cur, db, table)
+            if not cols:
+                continue
+            src_col = _resolve_col(cols, (srcf or '').strip()) if (srcf or '').strip() else None
+            bu_col = _resolve_col(cols, (buf or '').strip()) if (buf or '').strip() else None
+            sel = [c for c in (src_col, bu_col) if c]
+            if not sel:
+                continue
+            fq = _qualified(db, schema, table)
+            si = sel.index(src_col) if src_col in sel else -1
+            bi = sel.index(bu_col) if bu_col in sel else -1
+            cur.execute(f"SELECT DISTINCT {','.join('['+c+']' for c in sel)} FROM {fq}")
+            bset = coverage.setdefault(base, set())
+            for row in cur.fetchall():
+                b = _derive_bu(row[si] if si >= 0 else None, row[bi] if bi >= 0 else None)
+                if b:
+                    bset.add(b)
+    return {"ok": True, "coverage": {k: sorted(v) for k, v in coverage.items()}}
+
+
 def sample_entity_by_bu(conn_str, entity, bu, sample_size, mock='MOCK14', source_db=None,
                         z=None, e=None, p=None):
     """Server-side per-BU sampling for any entity whose population is too large to build

@@ -1773,6 +1773,21 @@ def lambda_handler(event, context):
             return {"statusCode": 500, "headers": headers,
                     "body": json.dumps({"ok": False, "error": str(e)})}
 
+    if action == "entity_bu_coverage":
+        # ?action=entity_bu_coverage&mock=MOCK14 — live readiness: which BUs have converted
+        # data per master entity (base table -> [bus]), from the plan + converted tables.
+        try:
+            p = event.get("queryStringParameters") or {}
+            mock = (p.get("mock") or "MOCK14").upper()
+            conn_str = get_connection_string()
+            res = sampling.entity_bu_coverage(conn_str, mock=mock)
+            return {"statusCode": 200 if res.get("ok") else 400,
+                    "headers": headers, "body": json.dumps(res, default=str)}
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
     if action == "assets_bu_units":
         # ?action=assets_bu_units&mock=MOCK14 — distinct Assets BU-field values + populations
         # (clean 3-digit codes + BU 122's per-office books), the per-office sample units.

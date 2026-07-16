@@ -920,6 +920,21 @@ function ValidationsPage() {
   const [buAssignSaving, setBuAssignSaving] = useState(false);
   const [buAssignSavedAt, setBuAssignSavedAt] = useState('');
 
+  // LIVE readiness: which BUs actually have converted data per master entity (base table
+  // -> [3-digit BUs]), from SETUP_CONVERSION_PLAN_MOCK14 + the converted tables. This is
+  // the current source of truth — the uploaded agency spreadsheet is a prior-run snapshot.
+  // Availability = report/JSON config UNION this coverage, so any BU with data is runnable.
+  const [planCoverage, setPlanCoverage] = useState<Record<string, string[]>>({});
+  const planCoverageRef = useRef<Record<string, string[]>>({});
+  const [coverageLoaded, setCoverageLoaded] = useState(false);
+  const loadCoverage = useCallback(async () => {
+    try {
+      const r = await (await fetch(`${LAMBDA_URL}?action=entity_bu_coverage&mock=${PLAN_MOCK}`)).json();
+      if (r.ok && r.coverage) { setPlanCoverage(r.coverage); planCoverageRef.current = r.coverage; }
+    } catch (e) { console.error('load entity coverage failed', e); }
+    finally { setCoverageLoaded(true); }
+  }, []);
+
   // Goal 4: per-entity parent→child linking column (the shared Unique ID). Keyed
   // by report tab; overrides the config link field when the merge runs.
   const [linkKeys, setLinkKeys] = useState<Record<string, string>>({});
@@ -1061,6 +1076,33 @@ function ValidationsPage() {
   }, [valReport]);
   const includedFilesFor = useCallback((bu: string, tab: string): string[] =>
     buAssignments[bu]?.[tab] ?? reportFilesFor(tab), [buAssignments, reportFilesFor]);
+
+  // ── Live plan coverage (readiness from the DB, not the prior-run spreadsheet) ──
+  // The entity's converted master table, reduced to its base identity so it matches the
+  // coverage map's keys (SCM_ITEMS, SCM_PURCHASE_ORDERS_FINAL, ...).
+  const baseTableForTab = useCallback((tab: string): string => {
+    const norm = (s: string) => s.replace(/_MOCK\d+.*$/i, '').toUpperCase();
+    if (tab.trim().toLowerCase() === INVENTORY_TAB.toLowerCase()) return norm(`SCM_ITEMS_${PLAN_MOCK}_VW_CONVERTED`);
+    const tgt = resolveEntityTarget(valReport, samplingTargetsRef.current || [], tab)?.table || '';
+    return tgt ? norm(tgt) : '';
+  }, [valReport]);
+  // BUs that have live converted data for this entity tab (empty until coverage loads).
+  const coverageBUsForTab = useCallback((tab: string): string[] => {
+    const base = baseTableForTab(tab);
+    return base ? (planCoverageRef.current[base] || []) : [];
+  }, [baseTableForTab]);
+  // Entity tabs a BU has live data for. Injected/source-based entities (HCM Person, the
+  // ledger GL entities, Location, Customer&Sponsor) are keyed differently and keep their
+  // own agency-report attachment — coverage only drives the standard per-BU entities.
+  const coverageTabsForBU = useCallback((bu: string): string[] => {
+    if (!valReport) return [];
+    const want = bu3(bu);
+    return valReport.entities
+      .filter(e => e.tab !== HCM_PERSON_TAB && !EXTRA_ENTITY_TABS.has(e.tab)
+        && coverageBUsForTab(e.tab).includes(want))
+      .map(e => e.tab);
+  }, [valReport, coverageBUsForTab]);
+
   const assignedEntitiesFor = useCallback((bu: string): string[] => {
     // #9: HCM Person applies to every BU but isn't in the agency report, so
     // always surface it alongside whatever the report/assignments provide.
@@ -1084,18 +1126,22 @@ function ValidationsPage() {
       }
       return out;
     };
+    // Live plan coverage is the current readiness source; union it in so any entity the
+    // BU has converted data for is offered even if the prior-run configs don't list it.
+    const planTabs = coverageTabsForBU(bu);
+    const uniq = (tabs: string[]) => Array.from(new Set(tabs));
     const assigned = Object.keys(buAssignments[bu] || {});
-    if (assigned.length) return withInjected(assigned);
+    if (assigned.length) return withInjected(uniq([...assigned, ...planTabs]));
     // Fallback for BUs beyond the validation report's 4 agencies (the agency
     // report lists 58): the entities attached to this BU in the agency report,
     // mapped to the validation report's entity tabs (files come from that spec).
-    if (!report || !valReport) return withInjected([]);
+    if (!report || !valReport) return withInjected(planTabs);
     const row = report.bus.find(b => b.unit === bu);
-    if (!row) return withInjected([]);
-    return withInjected(valReport.entities
+    const fromReport = row ? valReport.entities
       .filter(e => { const col = agencyColumnForEntity(report, valReport, e.tab); return !!col && row.statuses[col] != null && String(row.statuses[col]).trim() !== ''; })
-      .map(e => e.tab));
-  }, [buAssignments, report, valReport]);
+      .map(e => e.tab) : [];
+    return withInjected(uniq([...fromReport, ...planTabs]));
+  }, [buAssignments, report, valReport, coverageTabsForBU]);
 
   const applyReport = useCallback((report: ValidationReport, manifests: ManifestFileRow[], empties: EmptyRow[]) => {
     // #9: HCM Person isn't in the validation report — inject it so it appears in
@@ -1165,6 +1211,10 @@ function ValidationsPage() {
   useEffect(() => {
     if ((activeTab === 'sampling' || activeTab === 'bufiles' || activeTab === 'bybu') && !planLoaded && !planLoading) loadPlan();
   }, [activeTab, planLoaded, planLoading, loadPlan]);
+  // Live per-entity BU coverage (readiness from the DB) for the report-driven views.
+  useEffect(() => {
+    if ((activeTab === 'sampling' || activeTab === 'dashboard' || activeTab === 'completeness' || activeTab === 'bybu') && !coverageLoaded) loadCoverage();
+  }, [activeTab, coverageLoaded, loadCoverage]);
 
   // Map each report entity → the conversion-plan entity name that generates it
   // (by best overlap of the report's file labels with the plan's conversion tables;
@@ -1957,9 +2007,13 @@ function ValidationsPage() {
     // they run once under their one named agency (PRIFAS).
     if (EXTRA_ENTITY_FIXED[entityTab]) return [EXTRA_ENTITY_FIXED[entityTab]];
     const col = agencyColumnForEntity(report, valReport, entityTab);
-    if (!col) return [];
-    return report.bus.filter(b => { const s = b.statuses[col]; return s != null && String(s).trim() !== ''; }).map(b => b.unit);
-  }, [report, valReport]);
+    const fromReport = col ? report.bus.filter(b => { const s = b.statuses[col]; return s != null && String(s).trim() !== ''; }).map(b => b.unit) : [];
+    // Live plan coverage (BUs with converted data) is the current source of truth for the
+    // standard per-BU entities; union it in so any BU with data runs and none is dropped.
+    // The injected/ledger entities keep their own report-based attachment.
+    if (EXTRA_ENTITY_TABS.has(entityTab)) return fromReport;
+    return Array.from(new Set([...fromReport, ...coverageBUsForTab(entityTab)]));
+  }, [report, valReport, coverageBUsForTab]);
 
   const runEntityAcrossBUs = useCallback(async (entityTab: string) => {
     if (!valReport) return;
