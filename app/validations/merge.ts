@@ -68,6 +68,8 @@ const LABEL_MAP: Record<string, string> = {
   ADDRESSES: 'Address', ADDRESS: 'Address',
   BANK_ACCOUNTS: 'Bank', BANK: 'Bank',
   CONTACTS: 'Contact', CONTACT: 'Contact',
+  // Purchase Order children (the *_FINAL suffix is a conversion artifact — drop it).
+  LINES_FINAL: 'Lines', LINE_LOCATIONS: 'Line Locations', LINES_DISTRIBUTION: 'Distribution',
 };
 const CONTEXT_COLS = ['bu', 'sourcebu'];
 
@@ -343,7 +345,7 @@ function shortTable(t: string): string {
 // Readable child label: the child table's tokens after the prefix it shares with
 // the root (SCM_SUPPLIER_ADDRESSES vs SCM_SUPPLIER → "Address"; AR LINES vs
 // DISTRIBUTION → "Distribution"), reusing the curated label map.
-function childLabel(rootTable: string, childTable: string): string {
+export function childLabel(rootTable: string, childTable: string): string {
   const rtok = shortTable(rootTable).toUpperCase().split('_').filter(Boolean);
   const ctok = shortTable(childTable).toUpperCase().split('_').filter(Boolean);
   let i = 0;

@@ -29,7 +29,7 @@ import {
   parseWorkbookBuffer,
 } from './sampling';
 import { parseAgencyReport, AgencyReport, buildGroups } from './dashboard';
-import { RawFile, MergeResult, SamplingTarget, RelEdge, TaggedFile, groupRawFiles, mergeGroup, mergeByRelationships, mergeHierarchy, resultToFileData, downloadMaster } from './merge';
+import { RawFile, MergeResult, SamplingTarget, RelEdge, TaggedFile, groupRawFiles, mergeGroup, mergeByRelationships, mergeHierarchy, resultToFileData, downloadMaster, childLabel } from './merge';
 import { buildPerFileReport, mergeResultToReportFiles, singleFileReport, reportToBuffer, downloadReport, buildTrackingReport, ReportFile } from './excelReport';
 import { PlanRow, EntityGroup, groupEntityPlan, READINESS_LABEL } from './entityFiles';
 import { GeneratedEntity, ManifestFileRow, EmptyRow, listGeneratedEntities, loadGeneratedTagged, readEntityManifests, readAllManifests, fetchSamplingTargets, fetchSamplingRelationships, safeName } from './generated';
@@ -285,7 +285,11 @@ function sheetsToMergeResult(bu: string, entityToken: string, key: string, sheet
     headers: master.headers, rows: master.rows, parentHeaders: master.headers,
     children: [],
     childrenData: sheets.slice(1).map(s => ({
-      label: s.label, headers: s.headers, rows: s.rows,
+      // The generic server sampler labels children by their raw table name (…_MOCK14_…);
+      // derive a readable label from the table like the client-side merge does. Children
+      // already given a friendly label (Inventory/Person/Assets) are left as-is.
+      label: (master.table && /_MOCK\d/i.test(s.label)) ? childLabel(master.table, s.table) : s.label,
+      headers: s.headers, rows: s.rows,
       keyIdx: keyIdxOf(s.headers), strategy: 'join' as const, sourceFile: s.table,
       populationCount: s.population, // true child population (server drew only the sample)
     })),
