@@ -150,6 +150,7 @@ const ENTITY_REGISTRY: Record<string, EntityInfo> = {
   FIN_AR_INVOICE_DISTRIBUTION: { module: 'FIN', displayName: 'AR Invoice Distribution', legacy: false },
   FIN_AR_INVOICE_LINES: { module: 'FIN', displayName: 'AR Invoice Lines', legacy: false },
   FIN_AR_INVOICE: { module: 'FIN', displayName: 'AR Invoice', legacy: false },
+  FIN_ASSETS: { module: 'FIN', displayName: 'Assets', legacy: false },
   FIN_AWARDS_CFDACMIA: { module: 'FIN', displayName: 'Awards CFDA/CMIA', legacy: false },
   FIN_BUDGETARY_BALANCES: { module: 'FIN', displayName: 'Budgetary Balances', legacy: false },
   FIN_CUSTOMER_CONTACT: { module: 'FIN', displayName: 'Customer Contact', legacy: false },
@@ -206,6 +207,7 @@ const ENTITY_REGISTRY: Record<string, EntityInfo> = {
   SCM_CONTRACTS_LINES: { module: 'SCM', displayName: 'Contracts Lines', legacy: false },
   SCM_CONTRACTS: { module: 'SCM', displayName: 'Contracts', legacy: false },
   SCM_CONTRACT_LINES: { module: 'SCM', displayName: 'Contract Lines', legacy: false },
+  SCM_INV: { module: 'SCM', displayName: 'Inventory', legacy: false },
   SCM_ITEMS: { module: 'SCM', displayName: 'Items', legacy: false },
   SCM_LOCATIONS: { module: 'SCM', displayName: 'Locations', legacy: false },
   SCM_PURCHASE_ORDER_COMMENTS: { module: 'SCM', displayName: 'Purchase Order Comments', legacy: false },
@@ -224,7 +226,8 @@ const ENTITY_REGISTRY: Record<string, EntityInfo> = {
 // Sorted longest-first for unambiguous matching (same as Python)
 const SORTED_PREFIXES = Object.keys(ENTITY_REGISTRY).sort((a, b) => b.length - a.length);
 
-const EXCLUDED_PREFIXES = ['FIN_ASSETS', 'SCM_INV'];
+// Assets and Inventory workbooks are now processed (multi-sheet intake in the Lambda)
+const EXCLUDED_PREFIXES: string[] = [];
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 

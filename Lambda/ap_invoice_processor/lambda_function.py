@@ -40,6 +40,7 @@ from entity_registry import (
     get_all_modules,
     sanitize_column_name,
 )
+import workbook_loaders
 
 # Legacy AP Invoice imports (backward compat)
 from column_mappings import get_mapping as legacy_get_mapping
@@ -510,6 +511,42 @@ def ensure_table_exists_dynamic(cursor, table_name, sql_columns):
     return True
 
 
+def _ensure_workbook_table(cursor, table_name, sql_columns):
+    """
+    Ensure a workbook staging table exists (Assets/Inventory per-source tables).
+
+    These tables are pre-created on the SQL side — the same ones the box
+    loaders TRUNCATE — so a schema mismatch raises instead of drop-recreating:
+    never destroy a curated staging table over a mapping bug. The table is only
+    created (all NVARCHAR(500)) when it doesn't exist yet, e.g. a brand-new
+    office/source.
+    """
+    cursor.execute(
+        "SELECT COUNT(*) FROM sys.tables WHERE name = ?", (table_name,)
+    )
+    if cursor.fetchone()[0] > 0:
+        cursor.execute(
+            "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = ?",
+            (table_name,)
+        )
+        existing = {row[0].upper() for row in cursor.fetchall()}
+        missing = [c for c in sql_columns if c.upper() not in existing]
+        if missing:
+            raise ValueError(
+                f"Table {table_name} exists but is missing expected columns: "
+                f"{', '.join(missing[:5])}"
+            )
+        print(f"  Table {table_name} exists (schema compatible)")
+        return False
+
+    col_defs = ",\n    ".join(f"[{col}] NVARCHAR(500)" for col in sql_columns)
+    print(f"  Creating table {table_name}...")
+    cursor.execute(f"CREATE TABLE [{table_name}] (\n    {col_defs}\n)")
+    cursor.connection.commit()
+    print(f"  Table {table_name} created successfully")
+    return True
+
+
 # ─── Processing Logic ─────────────────────────────────────────────────────────
 
 def process_single_file(bucket, file_info, connection_str, context=None, triggered_by=""):
@@ -595,6 +632,7 @@ def process_single_file(bucket, file_info, connection_str, context=None, trigger
         mock_number = parsed["mock_number"]
         extension = parsed["extension"]
         is_legacy = parsed["is_legacy"]
+        is_workbook = workbook_loaders.is_workbook_entity(entity_prefix)
 
         print(f"Processing: {filename} | Module={parsed['module']} Entity={entity_prefix} "
               f"Source={source} Mock={mock_number}")
@@ -646,7 +684,14 @@ def process_single_file(bucket, file_info, connection_str, context=None, trigger
         file_size_mb = file_size / (1024 * 1024)
         print(f"  Reading {extension.upper()} from S3: {file_key} ({file_size_mb:.1f} MB)")
 
-        if is_large_file:
+        if is_workbook:
+            # Assets/Inventory arrive as multi-sheet workbooks; each sheet is
+            # read individually in Step 4 (headers sit on the sheet's 2nd row,
+            # so the default single-sheet read would mis-parse it).
+            content_bytes = _download_s3_content(bucket, file_key)
+            df = None
+            chunk_iter = None
+        elif is_large_file:
             print(f"  Large file — using chunked processing "
                   f"(threshold={CHUNK_THRESHOLD / (1024*1024):.0f} MB)")
             content_bytes, chunk_iter = read_file_from_s3_chunked(
@@ -668,8 +713,45 @@ def process_single_file(bucket, file_info, connection_str, context=None, trigger
             chunk_iter = None
             content_bytes = None
 
-        # Step 4: Route to legacy or new processing path
-        if is_legacy and parsed.get("file_type"):
+        # Step 4: Route to workbook, legacy, or new processing path
+        if is_workbook:
+            # Multi-sheet workbook: one file loads several per-source staging
+            # tables (Assets -> master + distribution; Inventory -> items +
+            # OHQ + category). Sheet/column problems fail the header gate.
+            try:
+                sheet_loads = workbook_loaders.parse_workbook_sheets(
+                    content_bytes, entity_prefix, mock_number, source,
+                )
+            except ValueError as wb_err:
+                aws_files_writer.mark_gate_check_failure(
+                    connection_str, file_etag,
+                    "Check_Column_Headers", str(wb_err),
+                )
+                raise ValueError(f"Header validation failed: {wb_err}")
+            aws_files_writer.update_gate_check(
+                connection_str, file_etag, "Check_Column_Headers", aws_files_writer.CHECK_PASS,
+            )
+
+            with pyodbc.connect(connection_str) as conn:
+                cursor = conn.cursor()
+                for sl in sheet_loads:
+                    _ensure_workbook_table(cursor, sl["table"], sl["sql_columns"])
+                    print(f"  Clearing table: {sl['table']}")
+                    cursor.execute(f"DELETE FROM [{sl['table']}]")
+                    conn.commit()
+                    _batch_insert(cursor, conn, sl["table"], sl["sql_columns"], sl["rows"])
+
+            # The first sheet is the entity's master table — it names the load
+            # for AWS_FILES / plan tracking; per-sheet counts ride on the result.
+            table_name = sheet_loads[0]["table"]
+            df = sheet_loads[0]["df"]
+            result["rowCount"] = sheet_loads[0]["row_count"]
+            result["sheetTables"] = [
+                {"sheet": sl["sheet"], "table": sl["table"], "rowCount": sl["row_count"]}
+                for sl in sheet_loads
+            ]
+
+        elif is_legacy and parsed.get("file_type"):
             # Legacy AP Invoice path
             file_type = parsed["file_type"]
             mapping = legacy_get_mapping(file_type, source)

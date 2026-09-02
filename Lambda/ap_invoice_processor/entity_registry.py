@@ -7,8 +7,9 @@ table naming, and processing metadata.
 
 import re
 
-# Prefixes to exclude from processing
-EXCLUDED_PREFIXES = ["FIN_ASSETS", "SCM_INV"]
+# Prefixes to exclude from processing (Assets and Inventory workbooks are now
+# handled by the workbook intake — see workbook_loaders.py)
+EXCLUDED_PREFIXES = []
 
 # Master entity registry
 # Keys are entity prefixes as they appear in filenames (before MOCK)
@@ -33,6 +34,12 @@ ENTITY_REGISTRY = {
     "FIN_AR_INVOICE_DISTRIBUTION": {
         "module": "FIN",
         "display_name": "AR Invoice Distribution",
+        "legacy": False,
+    },
+    # Multi-sheet workbook (Assets + Asset Distribution) — see workbook_loaders.py
+    "FIN_ASSETS": {
+        "module": "FIN",
+        "display_name": "Assets",
         "legacy": False,
     },
     "FIN_AR_INVOICE_LINES": {
@@ -317,6 +324,12 @@ ENTITY_REGISTRY = {
     "SCM_CONTRACT_LINES": {
         "module": "SCM",
         "display_name": "Contract Lines",
+        "legacy": False,
+    },
+    # Multi-sheet workbook (Items + Item OHQ + Item Category) — see workbook_loaders.py
+    "SCM_INV": {
+        "module": "SCM",
+        "display_name": "Inventory",
         "legacy": False,
     },
     "SCM_ITEMS": {
