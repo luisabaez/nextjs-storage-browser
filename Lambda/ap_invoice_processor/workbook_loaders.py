@@ -199,6 +199,13 @@ WORKBOOK_ENTITIES = {
 }
 
 
+# Workbook staging tables (FIN_ASSETS_MOCK14_<office>, SCM_ITEMS_MOCK14_<bu>, ...)
+# live in the conversion database — the one the box loaders fill and the
+# FILEVAL validation views read — not the Lambda connection's default
+# database. Every workbook-path table reference is qualified with this name.
+STAGING_DATABASE = "Hacienda_ERP"
+
+
 def is_workbook_entity(entity_prefix):
     """Whether this entity prefix is a multi-sheet workbook intake."""
     return entity_prefix in WORKBOOK_ENTITIES

@@ -1083,6 +1083,10 @@ function FileBrowser() {
             <span className="admin-icon">✅</span>
             <span className="admin-text">Validations</span>
           </Link>
+          <Link href="/data-validation" className="admin-link" title="Data Validation results">
+            <span className="admin-icon">🔎</span>
+            <span className="admin-text">Data Validation</span>
+          </Link>
           {isAdmin && (
             <Link href="/admin" className="admin-link" title="Admin Dashboard">
               <span className="admin-icon">🛡️</span>

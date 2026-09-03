@@ -41,6 +41,7 @@ from entity_registry import (
     sanitize_column_name,
 )
 import workbook_loaders
+import validation_runner
 
 # Legacy AP Invoice imports (backward compat)
 from column_mappings import get_mapping as legacy_get_mapping
@@ -515,18 +516,20 @@ def _ensure_workbook_table(cursor, table_name, sql_columns):
     """
     Ensure a workbook staging table exists (Assets/Inventory per-source tables).
 
-    These tables are pre-created on the SQL side — the same ones the box
-    loaders TRUNCATE — so a schema mismatch raises instead of drop-recreating:
-    never destroy a curated staging table over a mapping bug. The table is only
-    created (all NVARCHAR(500)) when it doesn't exist yet, e.g. a brand-new
-    office/source.
+    These tables live in the conversion database (workbook_loaders.STAGING_DATABASE)
+    and are pre-created on the SQL side — the same ones the box loaders TRUNCATE
+    and the FILEVAL validation views read — so a schema mismatch raises instead
+    of drop-recreating: never destroy a curated staging table over a mapping
+    bug. The table is only created (all NVARCHAR(500)) when it doesn't exist
+    yet, e.g. a brand-new office/source.
     """
+    db = workbook_loaders.STAGING_DATABASE
     cursor.execute(
-        "SELECT COUNT(*) FROM sys.tables WHERE name = ?", (table_name,)
+        f"SELECT COUNT(*) FROM [{db}].sys.tables WHERE name = ?", (table_name,)
     )
     if cursor.fetchone()[0] > 0:
         cursor.execute(
-            "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = ?",
+            f"SELECT COLUMN_NAME FROM [{db}].INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = ?",
             (table_name,)
         )
         existing = {row[0].upper() for row in cursor.fetchall()}
@@ -536,15 +539,34 @@ def _ensure_workbook_table(cursor, table_name, sql_columns):
                 f"Table {table_name} exists but is missing expected columns: "
                 f"{', '.join(missing[:5])}"
             )
-        print(f"  Table {table_name} exists (schema compatible)")
+        print(f"  Table {db}.{table_name} exists (schema compatible)")
         return False
 
     col_defs = ",\n    ".join(f"[{col}] NVARCHAR(500)" for col in sql_columns)
-    print(f"  Creating table {table_name}...")
-    cursor.execute(f"CREATE TABLE [{table_name}] (\n    {col_defs}\n)")
+    print(f"  Creating table {db}.{table_name}...")
+    cursor.execute(f"CREATE TABLE [{db}].dbo.[{table_name}] (\n    {col_defs}\n)")
     cursor.connection.commit()
     print(f"  Table {table_name} created successfully")
     return True
+
+
+def _record_last_load(cursor, table_name, mock_number, filename, file_path,
+                      row_count, login):
+    """
+    Append the load to LAST_LOAD_BY_TABLE — the ledger the FILEVAL validation
+    views join (latest Last_Load_DTTM per Table_Name) to stamp every error row
+    with its Processed_File / load time, and the box tooling reads for
+    completeness. One row per load, never an update, to match the box loaders.
+    """
+    db = workbook_loaders.STAGING_DATABASE
+    cursor.execute(
+        f"INSERT INTO [{db}].dbo.LAST_LOAD_BY_TABLE "
+        f"(Table_Name, Last_Load_DTTM, Record_Count, Login, Processed_File_Path, "
+        f"Processed_File, MOCK) VALUES (?, GETDATE(), ?, ?, ?, ?, ?)",
+        (table_name[:100], row_count, (login or "app")[:20], file_path[:300],
+         filename[:300], mock_number[:10]),
+    )
+    cursor.connection.commit()
 
 
 # ─── Processing Logic ─────────────────────────────────────────────────────────
@@ -732,14 +754,20 @@ def process_single_file(bucket, file_info, connection_str, context=None, trigger
                 connection_str, file_etag, "Check_Column_Headers", aws_files_writer.CHECK_PASS,
             )
 
+            staging_db = workbook_loaders.STAGING_DATABASE
             with pyodbc.connect(connection_str) as conn:
                 cursor = conn.cursor()
                 for sl in sheet_loads:
+                    qualified = f"[{staging_db}].dbo.[{sl['table']}]"
                     _ensure_workbook_table(cursor, sl["table"], sl["sql_columns"])
-                    print(f"  Clearing table: {sl['table']}")
-                    cursor.execute(f"DELETE FROM [{sl['table']}]")
+                    print(f"  Clearing table: {staging_db}.{sl['table']}")
+                    cursor.execute(f"DELETE FROM {qualified}")
                     conn.commit()
-                    _batch_insert(cursor, conn, sl["table"], sl["sql_columns"], sl["rows"])
+                    _batch_insert(cursor, conn, qualified, sl["sql_columns"], sl["rows"])
+                    _record_last_load(
+                        cursor, sl["table"], mock_number, filename,
+                        f"s3://{bucket}/{file_key}", sl["row_count"], triggered_by,
+                    )
 
             # The first sheet is the entity's master table — it names the load
             # for AWS_FILES / plan tracking; per-sheet counts ride on the result.
@@ -984,7 +1012,9 @@ def _batch_insert(cursor, conn, table_name, sql_columns, rows):
     """Insert rows in batches of 1000."""
     placeholders = ", ".join(["?"] * len(sql_columns))
     col_list = ", ".join(f"[{c}]" for c in sql_columns)
-    insert_sql = f"INSERT INTO [{table_name}] ({col_list}) VALUES ({placeholders})"
+    # A caller may pass an already-qualified, bracketed name ([db].dbo.[t]).
+    target = table_name if table_name.startswith("[") else f"[{table_name}]"
+    insert_sql = f"INSERT INTO {target} ({col_list}) VALUES ({placeholders})"
     print(f"  Inserting {len(rows)} rows...")
 
     batch_size = 1000
@@ -1865,6 +1895,74 @@ def lambda_handler(event, context):
             res = sampling.entity_bu_coverage(conn_str, mock=mock)
             return {"statusCode": 200 if res.get("ok") else 400,
                     "headers": headers, "body": json.dumps(res, default=str)}
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
+    # ── Data validation (FILEVAL views) ──
+    if action == "val_programs":
+        # ?action=val_programs&mock=MOCK14 — catalog programs + runnable sources
+        try:
+            p = event.get("queryStringParameters") or {}
+            res = validation_runner.list_programs(get_connection_string(), mock=p.get("mock") or "MOCK14")
+            return {"statusCode": 200, "headers": headers, "body": json.dumps(res, default=str)}
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
+    if action == "val_run":
+        # POST { program, source, mock, actor, dry_run }
+        try:
+            body = json.loads(event.get("body") or "{}")
+            remaining = (lambda: context.get_remaining_time_in_millis()) \
+                if context and hasattr(context, "get_remaining_time_in_millis") else None
+            res = validation_runner.run_program(
+                get_connection_string(), body.get("program") or "", body.get("source") or "",
+                mock=body.get("mock") or "MOCK14", actor=body.get("actor") or "",
+                dry_run=bool(body.get("dry_run")), remaining_ms=remaining,
+            )
+            return {"statusCode": 200 if res.get("ok") else 400,
+                    "headers": headers, "body": json.dumps(res, default=str)}
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
+    if action == "val_runs":
+        # ?action=val_runs&mock=MOCK14[&program=Asset]
+        try:
+            p = event.get("queryStringParameters") or {}
+            res = validation_runner.list_runs(get_connection_string(), mock=p.get("mock") or "MOCK14",
+                                              program=p.get("program") or None)
+            return {"statusCode": 200, "headers": headers, "body": json.dumps(res, default=str)}
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
+    if action == "val_summary":
+        # ?action=val_summary&mock=MOCK14&program=Asset[&source=010]
+        try:
+            p = event.get("queryStringParameters") or {}
+            res = validation_runner.summary(get_connection_string(), p.get("mock") or "MOCK14",
+                                            p.get("program") or "", source=p.get("source") or None)
+            return {"statusCode": 200, "headers": headers, "body": json.dumps(res, default=str)}
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
+    if action == "val_detail":
+        # ?action=val_detail&mock=MOCK14&program=Asset[&source=010][&code=ASSET-02][&limit=200][&offset=0]
+        try:
+            p = event.get("queryStringParameters") or {}
+            res = validation_runner.detail(get_connection_string(), p.get("mock") or "MOCK14",
+                                           p.get("program") or "", source=p.get("source") or None,
+                                           code=p.get("code") or None, limit=p.get("limit") or 200,
+                                           offset=p.get("offset") or 0)
+            return {"statusCode": 200, "headers": headers, "body": json.dumps(res, default=str)}
         except Exception as e:
             traceback.print_exc()
             return {"statusCode": 500, "headers": headers,
