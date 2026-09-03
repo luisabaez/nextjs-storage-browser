@@ -18,7 +18,7 @@ const LAMBDA_URL = 'https://5ahxjcxhrcopng5hjgc2n6utxq0rwcmm.lambda-url.us-east-
 const PLAN_MOCK = 'MOCK14';
 const PAGE_SIZE = 200;
 
-interface ProgramEntry { program: string; rules: number; runnable: boolean; sources: string[] }
+interface ProgramEntry { program: string; rules: number; runnable: boolean; mode: 'views' | 'sp' | null; runs_via: string | null; sources: string[] }
 interface Rule {
   code: string; message: string; message_spa: string | null; long_description: string | null;
   entity: string | null; type: string | null; severity: string | null; severity_criteria: string | null;
@@ -150,7 +150,7 @@ function DataValidationPage() {
       <header className="dv-header">
         <div>
           <h1>Data Validation <span className="dv-mock">{PLAN_MOCK}</span></h1>
-          <p className="dv-sub">Results of the SQL data validations, by program and source. Assets and Inventory can be run from here; the other programs show the results their teams have logged.</p>
+          <p className="dv-sub">Results of the SQL data validations, by program and source. Programs marked runnable can be run from here for a source; the rest show the results their teams have logged.</p>
         </div>
         <div className="dv-links">
           <Link href="/validations" className="btn btn-secondary">Sampling</Link>
@@ -189,7 +189,10 @@ function DataValidationPage() {
         )}
       </section>
 
-      {running && <div className="dv-note">Running {program} for {source} — this iterates every validation view and can take a few minutes.</div>}
+      {current?.runs_via && !running && (
+        <div className="dv-note">{program} runs through the validation team&apos;s procedure <code>{current.runs_via}</code>; Preview lists the views without running them.</div>
+      )}
+      {running && <div className="dv-note">Running {program} for {source} — this runs every validation view and can take a few minutes.</div>}
       {error && <div className="dv-error">{error}</div>}
 
       {runResult && (
