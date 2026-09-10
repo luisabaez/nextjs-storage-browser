@@ -1950,6 +1950,19 @@ def lambda_handler(event, context):
             return {"statusCode": 500, "headers": headers,
                     "body": json.dumps({"ok": False, "error": str(e)})}
 
+    if action == "val_object_def":
+        # ?action=val_object_def&name=<view|procedure|function> — definition text from the
+        # source database (read-only; for checking what a validation object depends on)
+        try:
+            p = event.get("queryStringParameters") or {}
+            res = validation_seed.object_definition(get_connection_string(), p.get("name") or "")
+            return {"statusCode": 200 if res.get("ok") else 400, "headers": headers,
+                    "body": json.dumps(res, default=str)}
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
     if action == "val_seed":
         # POST { program, source, mock } — create what a run needs in the test database
         try:
@@ -1963,7 +1976,8 @@ def lambda_handler(event, context):
                         "body": json.dumps({"ok": False, "error": "Unknown or non-runnable program"})}
             source = validation_runner._check_ident((body.get("source") or "").strip().upper(), "source")
             mock = validation_runner._check_ident((body.get("mock") or "MOCK14").strip().upper(), "mock")
-            res = validation_seed.seed_for_run(get_connection_string(), spec, source, mock)
+            res = validation_seed.seed_for_run(get_connection_string(), spec, source, mock,
+                                               program=body.get("program"))
             res["ok"] = True
             return {"statusCode": 200, "headers": headers, "body": json.dumps(res, default=str)}
         except Exception as e:

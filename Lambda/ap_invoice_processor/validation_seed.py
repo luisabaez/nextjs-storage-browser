@@ -304,7 +304,7 @@ class Seeder:
             "created_names": self.report["created"][:60], "copied_names": self.report["copied"]}
 
 
-def seed_for_run(conn_str, spec, source, mock):
+def seed_for_run(conn_str, spec, source, mock, program=None):
     """Everything one program run needs in the test target. Returns the report."""
     with pyodbc.connect(conn_str, autocommit=False) as conn:
         s = Seeder(conn)
@@ -314,8 +314,32 @@ def seed_for_run(conn_str, spec, source, mock):
                    (spec.get("post_sp") or "").format(mock=mock) or None]:
             if sp:
                 s.ensure(sp)
-        s.ensure_views(spec.get("families", []), source, mock)
+        if spec.get("families"):
+            s.ensure_views(spec["families"], source, mock)
+        elif program:
+            # Catalog-driven programs (HCM / PAY / Benefits): the views are
+            # named by the catalog, not by a family + source pattern.
+            import validation_runner
+            for view in validation_runner.catalog_views(s.cur, program, mock, db=SOURCE_DB):
+                s.ensure(view)
         return s.summary()
+
+
+def object_definition(conn_str, name):
+    """Definition text of a source-database module and the objects it
+    references (read-only)."""
+    if not re.match(r"^[A-Za-z0-9_]+$", name or ""):
+        return {"ok": False, "error": "invalid name"}
+    with pyodbc.connect(conn_str) as conn:
+        cur = conn.cursor()
+        cat = _Catalog(cur)
+        kind = cat.type_of(name)
+        if not kind:
+            return {"ok": False, "error": f"{name} not found in {SOURCE_DB}"}
+        definition = cat.definition(name) if kind != "U" else None
+        refs = sorted(cat.references(name, definition)) if definition else []
+        return {"ok": True, "name": name, "type": kind, "definition": definition,
+                "references": [{"name": r, "type": cat.type_of(r)} for r in refs]}
 
 
 def status(conn_str):

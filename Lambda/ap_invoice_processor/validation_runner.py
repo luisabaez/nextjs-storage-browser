@@ -40,7 +40,9 @@ import validation_seed
 # provisioned on demand (validation_seed) before each run.
 DB = os.environ.get("VALIDATION_DB", "Hacienda_ERP")
 FSCM_SP = "SP_FSCM_INSERT_VALIDATION_ERRORS"
-PREFIX_SP = "SP_INSERT_VALIDATION_ERRORS_V3"
+# V2 inserts each catalog view separately (SELECT A.*); V3's single UNION of
+# every view fails with "Ambiguous column name 'Entity'" on the HCM views.
+PREFIX_SP = "SP_INSERT_VALIDATION_ERRORS_V2"
 
 
 def _views(families, setup_sp=None, post_sp=None):
@@ -122,11 +124,22 @@ def _clip(value, length):
     return s
 
 
-def _exec_sp(cur, conn, sql, params=()):
-    cur.execute(sql, params)
-    while cur.nextset():
-        pass
-    conn.commit()
+def _exec_sp(cur, conn, sql, params=(), messages=None):
+    """Run a stored procedure in autocommit mode — the team's procedures open
+    and roll back their own transactions, which conflicts with an outer
+    one — and collect what it PRINTs (that is how they report problems)."""
+    conn.autocommit = True
+    try:
+        cur.execute(sql, params)
+        printed = list(getattr(cur, "messages", None) or [])
+        while cur.nextset():
+            printed.extend(getattr(cur, "messages", None) or [])
+    finally:
+        conn.autocommit = False
+    if messages is not None:
+        for m in printed:
+            text = m[1] if isinstance(m, tuple) and len(m) > 1 else str(m)
+            messages.append(re.sub(r"^\[Microsoft\]\[[^\]]*\]\[SQL Server\]", "", text).strip())
 
 
 def discover_views(cur, family, source, mock):
@@ -144,9 +157,26 @@ def discover_views(cur, family, source, mock):
     return [n for _, n in sorted(found)]
 
 
+def catalog_views(cur, program, mock, db=None):
+    """Views of a catalog-driven program (HCM / PAY / Benefits): the catalog's
+    Validation_ViewPrefix + mock, Phase 1 rules for MOCKnn and Phase 2 for
+    MOCKnnHCM — the same selection SP_INSERT_VALIDATION_ERRORS_V3 makes."""
+    phase_col = "Phase2" if re.match(r"^MOCK\d\dHCM$", mock, re.I) else "Phase1"
+    cur.execute(
+        f"SELECT DISTINCT Validation_ViewPrefix FROM [{db or DB}].dbo.SETUP_ERROR_MESSAGES_SOURCE "
+        f"WHERE Validation_Program = ? AND {phase_col} = 'Yes' AND Validation_ViewPrefix IS NOT NULL "
+        f"ORDER BY Validation_ViewPrefix",
+        (program,),
+    )
+    return [f"{r[0].strip()}_{mock}_VW" for r in cur.fetchall() if r[0] and r[0].strip()]
+
+
 def _sources_for(cur, program, spec, mock):
     """Sources the program can run for: those with views for this mock, plus
-    those already logged (HCM/PAY sources only appear in the logs)."""
+    those already logged (HCM/PAY sources only appear in the logs). Against a
+    test database the source database's logs count too — they list the
+    sources a program has been run for even when the test database has no
+    results yet."""
     sources = set()
     for family in spec.get("families", []):
         cur.execute(f"SELECT name FROM [{DB}].sys.views WHERE name LIKE ?", (f"{family}_%_{mock}_VW",))
@@ -158,13 +188,15 @@ def _sources_for(cur, program, spec, mock):
             if m and not re.match(r"^\d{2}(_|$)", m.group(1)):
                 sources.add(m.group(1))
     names = _log_names(program)
-    for table, col in (("LOG_DATA_CLEANSE_RUNDTTM", "SOURCE"), ("LOG_DATA_CLEANSE", "SOURCE"),
-                       ("LOG_DATA_CLEANSE_DETAIL", "Source")):
-        cur.execute(
-            f"SELECT DISTINCT [{col}] FROM [{DB}].dbo.{table} WHERE MOCK = ? AND Validation_Program IN {_in_clause(names)}",
-            [mock] + names,
-        )
-        sources.update(r[0] for r in cur.fetchall() if r[0] and _SAFE.match(r[0]))
+    dbs = [DB] + ([validation_seed.SOURCE_DB] if validation_seed.is_test_target() else [])
+    for db in dbs:
+        for table, col in (("LOG_DATA_CLEANSE_RUNDTTM", "SOURCE"), ("LOG_DATA_CLEANSE", "SOURCE"),
+                           ("LOG_DATA_CLEANSE_DETAIL", "Source")):
+            cur.execute(
+                f"SELECT DISTINCT [{col}] FROM [{db}].dbo.{table} WHERE MOCK = ? AND Validation_Program IN {_in_clause(names)}",
+                [mock] + names,
+            )
+            sources.update(r[0] for r in cur.fetchall() if r[0] and _SAFE.match(r[0]))
     return sorted(sources)
 
 
@@ -211,7 +243,7 @@ def run_program(conn_str, program, source, mock="MOCK14", actor="", dry_run=Fals
         "total_rows": 0, "started_at": started.isoformat(), "run_number": None, "codes": {},
     }
     if validation_seed.is_test_target():
-        result["seeded"] = validation_seed.seed_for_run(conn_str, spec, source, mock)
+        result["seeded"] = validation_seed.seed_for_run(conn_str, spec, source, mock, program=program)
         if result["seeded"].get("failed"):
             result["warnings"].append(
                 f"{len(result['seeded']['failed'])} object(s) could not be created in {DB}; see seeded.failed")
@@ -278,6 +310,8 @@ def _run_via_sp(cur, conn, spec, program, source, mock, actor, dry_run, result):
     views = []
     for family in spec["families"]:
         views.extend(discover_views(cur, family, source, mock))
+    if not spec["families"]:
+        views = catalog_views(cur, program, mock)
     result["views"] = [{"view": v} for v in views]
     result["runs_via"] = spec["sp"]
     if dry_run:
@@ -285,7 +319,7 @@ def _run_via_sp(cur, conn, spec, program, source, mock, actor, dry_run, result):
             f"Preview only lists the views; {spec['sp']} runs them all at once, so counts come from a real run"
         )
         return
-    if spec["families"] and not views:
+    if not views:
         result["ok"] = False
         result["error"] = f"No {program} validation views found for {source} / {mock}"
         return
@@ -293,15 +327,20 @@ def _run_via_sp(cur, conn, spec, program, source, mock, actor, dry_run, result):
     run_number, run_dttm, bu = _new_run(cur, conn, program, source, mock, actor, label)
     result["run_number"] = run_number
     result["run_dttm"] = run_dttm.isoformat()
+    printed = []
     try:
         _exec_sp(cur, conn,
                  f"EXEC [{DB}].dbo.[{spec['sp']}] @REFRESH_TABLE = 1, @SOURCE = ?, @Validation_Program = ?, @MOCK = ?",
-                 (source, label, mock))
+                 (source, label, mock), messages=printed)
     except Exception as e:
-        conn.rollback()
         result["ok"] = False
         result["error"] = f"{spec['sp']} failed: {str(e)[:300]}"
+        result["procedure_messages"] = printed[-40:]
         return
+    result["procedure_messages"] = printed[-40:]
+    for m in printed:
+        if re.search(r"\berror\b|not valid|terminated|invalid", m, re.I):
+            result["warnings"].append(f"{spec['sp']}: {m[:200]}")
     # The procedure reports problems with PRINT, not errors: a run that inserted
     # nothing is surfaced as a warning so it isn't mistaken for a clean pass.
     cur.execute(
