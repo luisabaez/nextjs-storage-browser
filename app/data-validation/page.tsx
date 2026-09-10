@@ -43,6 +43,9 @@ const fmtDate = (iso: string | null | undefined) => (iso ? iso.replace('T', ' ')
 function DataValidationPage() {
   const [userEmail, setUserEmail] = useState('');
   const [programs, setPrograms] = useState<ProgramEntry[]>([]);
+  const [db, setDb] = useState<{ name: string; isTest: boolean } | null>(null);
+  const [seeding, setSeeding] = useState(false);
+  const [seedResult, setSeedResult] = useState<string>('');
   const [program, setProgram] = useState('');
   const [source, setSource] = useState('');
   const [summary, setSummary] = useState<Summary | null>(null);
@@ -61,7 +64,10 @@ function DataValidationPage() {
     fetchUserAttributes().then(a => setUserEmail(a.email || '')).catch(() => {});
     fetch(`${LAMBDA_URL}?action=val_programs&mock=${PLAN_MOCK}`)
       .then(r => r.json())
-      .then(d => { if (d.ok) setPrograms(d.programs); else setError(d.error || 'Could not load programs'); })
+      .then(d => {
+        if (d.ok) { setPrograms(d.programs); setDb({ name: d.db, isTest: !!d.is_test }); }
+        else setError(d.error || 'Could not load programs');
+      })
       .catch(e => setError(`Network error: ${(e as Error).message}`));
   }, []);
 
@@ -140,6 +146,27 @@ function DataValidationPage() {
     }
   };
 
+  const prepareTestDb = async () => {
+    if (!current?.runnable || !source) return;
+    setSeeding(true);
+    setSeedResult('');
+    setError('');
+    try {
+      const resp = await fetch(`${LAMBDA_URL}?action=val_seed`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ program, source, mock: PLAN_MOCK }),
+      });
+      const d = await resp.json();
+      if (!d.ok) setError(d.error || 'Prepare failed');
+      else setSeedResult(`Created ${d.created}, copied with rows ${d.copied}, already present ${d.skipped}, failed ${d.failed.length}` + (d.failed.length ? ` — ${d.failed.join('; ')}` : ''));
+    } catch (e) {
+      setError(`Network error: ${(e as Error).message}`);
+    } finally {
+      setSeeding(false);
+    }
+  };
+
   const sourceOptions = Array.from(new Set([...(current?.sources || []), ...(summary?.sources || [])])).sort();
   const rules = (summary?.rules || []).filter(r => !onlyErrors || r.count > 0);
   const totalErrors = (summary?.rules || []).reduce((s, r) => s + r.count, 0);
@@ -149,7 +176,10 @@ function DataValidationPage() {
     <div className="dv-page">
       <header className="dv-header">
         <div>
-          <h1>Data Validation <span className="dv-mock">{PLAN_MOCK}</span></h1>
+          <h1>
+            Data Validation <span className="dv-mock">{PLAN_MOCK}</span>
+            {db && <span className={`dv-mock${db.isTest ? ' dv-test' : ''}`}>{db.name}{db.isTest ? ' · test' : ''}</span>}
+          </h1>
           <p className="dv-sub">Results of the SQL data validations, by program and source. Programs marked runnable can be run from here for a source; the rest show the results their teams have logged.</p>
         </div>
         <div className="dv-links">
@@ -177,6 +207,12 @@ function DataValidationPage() {
         </label>
         {current?.runnable && (
           <div className="dv-run-btns">
+            {db?.isTest && (
+              <button className="btn btn-secondary" disabled={!source || !!running || seeding} onClick={prepareTestDb}
+                title="Create the tables, procedures and views this program needs in the test database (also done automatically on Run)">
+                {seeding ? 'Preparing…' : 'Prepare test DB'}
+              </button>
+            )}
             <button className="btn btn-secondary" disabled={!source || !!running} onClick={() => runValidation(true)}
               title={source ? 'Iterate the views and count, without storing anything' : 'Pick a source first'}>
               {running === 'preview' ? 'Previewing…' : 'Preview counts'}
@@ -189,6 +225,10 @@ function DataValidationPage() {
         )}
       </section>
 
+      {db?.isTest && (
+        <div className="dv-note">Validation is pointed at the test database <code>{db.name}</code>. Runs create the tables, procedures and views they need there by cloning definitions from Hacienda_ERP; staging tables start empty until files are loaded.</div>
+      )}
+      {seedResult && <div className="dv-note">{seedResult}</div>}
       {current?.runs_via && !running && (
         <div className="dv-note">{program} runs through the validation team&apos;s procedure <code>{current.runs_via}</code>; Preview lists the views without running them.</div>
       )}

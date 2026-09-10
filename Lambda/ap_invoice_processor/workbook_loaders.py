@@ -21,6 +21,7 @@ This module is pure parsing (no DB access) so it can be exercised locally.
 """
 
 import io
+import os
 
 import pandas as pd
 
@@ -201,9 +202,10 @@ WORKBOOK_ENTITIES = {
 
 # Workbook staging tables (FIN_ASSETS_MOCK14_<office>, SCM_ITEMS_MOCK14_<bu>, ...)
 # live in the conversion database — the one the box loaders fill and the
-# FILEVAL validation views read — not the Lambda connection's default
-# database. Every workbook-path table reference is qualified with this name.
-STAGING_DATABASE = "Hacienda_ERP"
+# FILEVAL validation views read. Every workbook-path table reference is
+# qualified with this name. VALIDATION_DB redirects a testing cycle to
+# another database (the same switch the validation runner uses).
+STAGING_DATABASE = os.environ.get("VALIDATION_DB", "Hacienda_ERP")
 
 
 def is_workbook_entity(entity_prefix):

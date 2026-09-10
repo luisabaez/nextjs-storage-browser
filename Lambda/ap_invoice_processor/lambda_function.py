@@ -42,6 +42,7 @@ from entity_registry import (
 )
 import workbook_loaders
 import validation_runner
+import validation_seed
 
 # Legacy AP Invoice imports (backward compat)
 from column_mappings import get_mapping as legacy_get_mapping
@@ -527,7 +528,18 @@ def _ensure_workbook_table(cursor, table_name, sql_columns):
     cursor.execute(
         f"SELECT COUNT(*) FROM [{db}].sys.tables WHERE name = ?", (table_name,)
     )
-    if cursor.fetchone()[0] > 0:
+    exists = cursor.fetchone()[0] > 0
+    if not exists and validation_seed.is_test_target():
+        # Testing against another database: clone the real table definition
+        # (and the load ledger) from the conversion database when it has one.
+        seeder = validation_seed.Seeder(cursor.connection)
+        seeder.ensure("LAST_LOAD_BY_TABLE")
+        seeder.ensure(table_name)
+        cursor.execute(f"SELECT COUNT(*) FROM [{db}].sys.tables WHERE name = ?", (table_name,))
+        exists = cursor.fetchone()[0] > 0
+        if exists:
+            print(f"  Table {db}.{table_name} cloned from {validation_seed.SOURCE_DB}")
+    if exists:
         cursor.execute(
             f"SELECT COLUMN_NAME FROM [{db}].INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = ?",
             (table_name,)
@@ -1901,6 +1913,37 @@ def lambda_handler(event, context):
                     "body": json.dumps({"ok": False, "error": str(e)})}
 
     # ── Data validation (FILEVAL views) ──
+    if action == "val_db":
+        # ?action=val_db — which database validation points at, and what a test target has
+        try:
+            res = validation_seed.status(get_connection_string())
+            return {"statusCode": 200, "headers": headers, "body": json.dumps(res, default=str)}
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
+    if action == "val_seed":
+        # POST { program, source, mock } — create what a run needs in the test database
+        try:
+            body = json.loads(event.get("body") or "{}")
+            if not validation_seed.is_test_target():
+                return {"statusCode": 400, "headers": headers,
+                        "body": json.dumps({"ok": False, "error": "Validation points at the source database; nothing to prepare"})}
+            spec = validation_runner.PROGRAMS.get(body.get("program") or "")
+            if not spec:
+                return {"statusCode": 400, "headers": headers,
+                        "body": json.dumps({"ok": False, "error": "Unknown or non-runnable program"})}
+            source = validation_runner._check_ident((body.get("source") or "").strip().upper(), "source")
+            mock = validation_runner._check_ident((body.get("mock") or "MOCK14").strip().upper(), "mock")
+            res = validation_seed.seed_for_run(get_connection_string(), spec, source, mock)
+            res["ok"] = True
+            return {"statusCode": 200, "headers": headers, "body": json.dumps(res, default=str)}
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
     if action == "val_programs":
         # ?action=val_programs&mock=MOCK14 — catalog programs + runnable sources
         try:

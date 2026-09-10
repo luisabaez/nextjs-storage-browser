@@ -26,13 +26,19 @@ Programs are keyed by the catalog's Validation_Program; `log_names` lists the
 labels the log tables use for the same program (e.g. Contracts is logged as
 BPA by the FSCM procedure).
 """
+import os
 import re
 from collections import Counter
 from datetime import datetime
 
 import pyodbc
 
-DB = "Hacienda_ERP"
+import validation_seed
+
+# The database validation runs against. Hacienda_ERP holds the definitions of
+# record; VALIDATION_DB points a testing cycle at another database, which is
+# provisioned on demand (validation_seed) before each run.
+DB = os.environ.get("VALIDATION_DB", "Hacienda_ERP")
 FSCM_SP = "SP_FSCM_INSERT_VALIDATION_ERRORS"
 PREFIX_SP = "SP_INSERT_VALIDATION_ERRORS_V3"
 
@@ -164,6 +170,10 @@ def _sources_for(cur, program, spec, mock):
 
 def list_programs(conn_str, mock="MOCK14"):
     mock = _check_ident(mock.upper(), "mock")
+    if validation_seed.is_test_target():
+        # A fresh test database has no catalog or log tables yet.
+        with pyodbc.connect(conn_str, autocommit=False) as conn:
+            validation_seed.Seeder(conn).ensure_core()
     with pyodbc.connect(conn_str) as conn:
         cur = conn.cursor()
         cur.execute(
@@ -178,7 +188,8 @@ def list_programs(conn_str, mock="MOCK14"):
                      "runs_via": (spec.get("sp") if spec and spec["mode"] == "sp" else None),
                      "sources": _sources_for(cur, prog, spec, mock) if spec else []}
             programs.append(entry)
-        return {"ok": True, "mock": mock, "programs": programs}
+        return {"ok": True, "mock": mock, "db": DB, "is_test": validation_seed.is_test_target(),
+                "programs": programs}
 
 
 def run_program(conn_str, program, source, mock="MOCK14", actor="", dry_run=False,
@@ -199,6 +210,11 @@ def run_program(conn_str, program, source, mock="MOCK14", actor="", dry_run=Fals
         "dry_run": bool(dry_run), "views": [], "warnings": [], "partial": False,
         "total_rows": 0, "started_at": started.isoformat(), "run_number": None, "codes": {},
     }
+    if validation_seed.is_test_target():
+        result["seeded"] = validation_seed.seed_for_run(conn_str, spec, source, mock)
+        if result["seeded"].get("failed"):
+            result["warnings"].append(
+                f"{len(result['seeded']['failed'])} object(s) could not be created in {DB}; see seeded.failed")
     with pyodbc.connect(conn_str, autocommit=False) as conn:
         cur = conn.cursor()
         if spec["mode"] == "sp":
