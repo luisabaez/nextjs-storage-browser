@@ -548,14 +548,13 @@ def _ensure_workbook_table(cursor, table_name, sql_columns):
     exists = cursor.fetchone()[0] > 0
     if not exists and validation_seed.is_test_target():
         # Testing against another database: clone the real table definition
-        # (and the load ledger) from the conversion database when it has one.
-        seeder = validation_seed.Seeder(cursor.connection)
-        seeder.ensure("LAST_LOAD_BY_TABLE")
-        seeder.ensure(table_name)
-        cursor.execute(f"SELECT COUNT(*) FROM [{db}].sys.tables WHERE name = ?", (table_name,))
-        exists = cursor.fetchone()[0] > 0
-        if exists:
+        # from the conversion database when it has one.
+        try:
+            validation_seed.clone_table(cursor, cursor.connection, table_name)
+            exists = True
             print(f"  Table {db}.{table_name} cloned from {validation_seed.SOURCE_DB}")
+        except ValueError:
+            pass  # not in the conversion database either — created below
     if exists:
         cursor.execute(
             f"SELECT COLUMN_NAME FROM [{db}].INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = ?",
@@ -588,9 +587,7 @@ def _record_last_load(cursor, table_name, mock_number, filename, file_path,
     completeness. One row per load, never an update, to match the box loaders.
     """
     db = workbook_loaders.STAGING_DATABASE
-    if validation_seed.is_test_target():
-        # A fresh test database has no ledger yet.
-        validation_seed.Seeder(cursor.connection).ensure("LAST_LOAD_BY_TABLE")
+    validation_seed.ensure_ledger(cursor)
     cursor.execute(
         f"INSERT INTO [{db}].dbo.LAST_LOAD_BY_TABLE "
         f"(Table_Name, Last_Load_DTTM, Record_Count, Login, Processed_File_Path, "
@@ -1037,19 +1034,18 @@ def process_single_file(bucket, file_info, connection_str, context=None, trigger
 
 
 def _build_rows(df, csv_columns):
-    """Build list of tuples from DataFrame for SQL insert."""
-    rows = []
-    for _, row in df.iterrows():
-        values = []
-        for csv_col in csv_columns:
-            val = str(row.get(csv_col, "")).strip()
-            values.append(val if val else None)
-        rows.append(tuple(values))
-    return rows
+    """Build list of tuples from DataFrame for SQL insert (blank -> NULL).
+    Column-wise on the frame rather than row by row: the per-row loop was
+    the slower half of loading a large file."""
+    frame = df.reindex(columns=csv_columns).fillna("").astype(str)
+    return [
+        tuple((v.strip() or None) for v in record)
+        for record in frame.itertuples(index=False, name=None)
+    ]
 
 
 def _batch_insert(cursor, conn, table_name, sql_columns, rows):
-    """Insert rows in batches of 1000."""
+    """Insert rows in batches, one round trip per batch."""
     placeholders = ", ".join(["?"] * len(sql_columns))
     col_list = ", ".join(f"[{c}]" for c in sql_columns)
     # A caller may pass an already-qualified, bracketed name ([db].dbo.[t]).
@@ -1057,7 +1053,10 @@ def _batch_insert(cursor, conn, table_name, sql_columns, rows):
     insert_sql = f"INSERT INTO {target} ({col_list}) VALUES ({placeholders})"
     print(f"  Inserting {len(rows)} rows...")
 
-    batch_size = 1000
+    # Without fast_executemany pyodbc sends every row as its own round trip
+    # (~1,000 rows/s over the VPC); with it, a batch is one array-bound call.
+    cursor.fast_executemany = True
+    batch_size = 5000
     for i in range(0, len(rows), batch_size):
         batch = rows[i:i + batch_size]
         cursor.executemany(insert_sql, batch)

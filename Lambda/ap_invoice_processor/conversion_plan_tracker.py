@@ -238,11 +238,10 @@ def ensure_setup_table_exists(cursor, mock_number):
         )
         existing_cols = {row[0].upper() for row in cursor.fetchall()}
 
-        tracking_cols = [
-            "LoadedAt", "LoadedBy", "FileTimestamp", "RowCount",
-            "LoadVersion", "PreviousLoadedAt", "S3SourceKey", "FileSize",
-        ]
-        for col in tracking_cols:
+        # Add every app-side column that is missing — the tracking columns,
+        # and the WBS / status columns when the table was created from the
+        # conversion team's copy of the plan (which lacks them).
+        for col in SETUP_COLUMNS:
             if col.upper() not in existing_cols:
                 alter_sql = (
                     f"ALTER TABLE [{table_name}] "

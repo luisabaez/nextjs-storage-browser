@@ -56,17 +56,37 @@ def _as_create_or_alter(definition):
 
 # ── catalog lookups (source database) ────────────────────────────────────────
 
+_TYPES_CACHE = None   # source object names, kept for the life of the container
+_LEDGER_OK = False
+
+
 class _Catalog:
-    """Object names of the source database, loaded once per seeding pass."""
+    """Object names of the source database. Loaded once per container; the
+    ~163,000 generated FILEVAL views are left out of the eager load (they are
+    looked up individually when asked for) — loading them per call cost
+    about 40 seconds."""
 
     def __init__(self, cur):
+        global _TYPES_CACHE
         self.cur = cur
-        cur.execute(f"SELECT name, type FROM [{SOURCE_DB}].sys.objects WHERE type IN ('U','V','P','FN','IF','TF','TR')")
-        self.types = {name.upper(): t.strip() for name, t in cur.fetchall()}
-        self.callables = {n for n, t in self.types.items() if t in ("FN", "IF", "TF", "V", "P", "U")}
+        if _TYPES_CACHE is None:
+            cur.execute(
+                f"SELECT name, type FROM [{SOURCE_DB}].sys.objects "
+                f"WHERE type IN ('U','V','P','FN','IF','TF','TR') AND name NOT LIKE 'FILEVAL%'")
+            _TYPES_CACHE = {name.upper(): t.strip() for name, t in cur.fetchall()}
+        self.types = _TYPES_CACHE
 
     def type_of(self, name):
-        return self.types.get(name.upper())
+        key = name.upper()
+        if key in self.types:
+            return self.types[key]
+        if key.startswith("FILEVAL"):
+            self.cur.execute(f"SELECT type FROM [{SOURCE_DB}].sys.objects WHERE name = ?", (name,))
+            r = self.cur.fetchone()
+            if r:
+                self.types[key] = r[0].strip()
+                return self.types[key]
+        return None
 
     def definition(self, name):
         self.cur.execute(
@@ -108,8 +128,37 @@ def _column_defs(cur, table):
             t += "(MAX)" if clen == -1 else f"({clen})"
         elif t in ("DECIMAL", "NUMERIC"):
             t += f"({prec},{scale})"
-        defs.append(f"[{col}] {t} {'NULL' if nullable == 'YES' else 'NOT NULL'}")
+        # Every column nullable: the clones are empty staging tables the app
+        # fills (blanks become NULL) or configuration copies the app's own
+        # trackers add rows to with only the columns they know.
+        defs.append(f"[{col}] {t} NULL")
     return defs
+
+
+def _relax_not_null(cur, conn, table):
+    """Make every column of an existing target table nullable (see above)."""
+    cur.execute(
+        "SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, NUMERIC_PRECISION, NUMERIC_SCALE "
+        "FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = ? AND IS_NULLABLE = 'NO'", (table,))
+    for col, dtype, clen, prec, scale in cur.fetchall():
+        t = dtype.upper()
+        if t in ("VARCHAR", "NVARCHAR", "CHAR", "NCHAR", "VARBINARY", "BINARY"):
+            t += "(MAX)" if clen == -1 else f"({clen})"
+        elif t in ("DECIMAL", "NUMERIC"):
+            t += f"({prec},{scale})"
+        cur.execute(f"ALTER TABLE [dbo].[{table}] ALTER COLUMN [{col}] {t} NULL")
+    conn.commit()
+
+
+def ensure_ledger(cursor):
+    """The load ledger must exist in the target before a load writes to it.
+    Checked once per container; nothing to do against the source database."""
+    global _LEDGER_OK
+    if _LEDGER_OK or not is_test_target():
+        return
+    if not _exists(cursor, "LAST_LOAD_BY_TABLE"):
+        clone_table(cursor, cursor.connection, "LAST_LOAD_BY_TABLE")
+    _LEDGER_OK = True
 
 
 def clone_table(cur, conn, table, with_rows=False):
@@ -223,6 +272,9 @@ class Seeder:
         self.ensure(plan)
         if not _exists(self.cur, plan):
             return
+        # The app's own plan tracker inserts rows into this same table with
+        # only the columns it knows; the source copy carried NOT NULL columns.
+        _relax_not_null(self.cur, self.conn, plan)
         self.cur.execute(f"SELECT DISTINCT LTRIM(RTRIM(Table_Name)) FROM [dbo].[{plan}] WHERE Table_Name IS NOT NULL")
         for (name,) in self.cur.fetchall():
             if name and re.match(r"^[A-Za-z0-9_]+$", name) and self.catalog.type_of(name) == "U":
