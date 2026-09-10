@@ -445,19 +445,26 @@ def read_file_from_s3_chunked(bucket, key, extension):
 
 # ─── Table Management ─────────────────────────────────────────────────────────
 
+def _staging_table(table_name):
+    """Fully qualified staging table name in the database loads point at
+    (workbook_loaders.STAGING_DATABASE, i.e. the VALIDATION_DB switch)."""
+    return f"[{workbook_loaders.STAGING_DATABASE}].dbo.[{table_name}]"
+
+
 def ensure_table_exists_legacy(cursor, table_name, file_type, source):
     """Check if legacy AP Invoice table exists; create if not."""
+    db = workbook_loaders.STAGING_DATABASE
     cursor.execute(
-        "SELECT COUNT(*) FROM sys.tables WHERE name = ?",
+        f"SELECT COUNT(*) FROM [{db}].sys.tables WHERE name = ?",
         (table_name,)
     )
     exists = cursor.fetchone()[0] > 0
 
     if exists:
-        print(f"  Table {table_name} exists")
+        print(f"  Table {db}.{table_name} exists")
         return False
 
-    create_sql = legacy_get_create_table_sql(table_name, file_type, source)
+    create_sql = legacy_get_create_table_sql(_staging_table(table_name), file_type, source)
     if not create_sql:
         raise ValueError(
             f"Cannot auto-create table {table_name}: "
@@ -475,10 +482,14 @@ def ensure_table_exists_dynamic(cursor, table_name, sql_columns):
     """
     Check if a table exists; create it dynamically from SQL column names.
     All columns are NVARCHAR(500) to match the existing pattern.
-    If the table exists but has a different schema, drop and recreate it.
+    If the table exists but has a different schema: in a test database it is
+    dropped and recreated; in the conversion database (the definitions of
+    record, whose tables are curated) the load fails instead — never drop
+    there.
     """
+    db = workbook_loaders.STAGING_DATABASE
     cursor.execute(
-        "SELECT COUNT(*) FROM sys.tables WHERE name = ?",
+        f"SELECT COUNT(*) FROM [{db}].sys.tables WHERE name = ?",
         (table_name,)
     )
     exists = cursor.fetchone()[0] > 0
@@ -486,7 +497,7 @@ def ensure_table_exists_dynamic(cursor, table_name, sql_columns):
     if exists:
         # Verify schema matches — get existing column names
         cursor.execute(
-            "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+            f"SELECT COLUMN_NAME FROM [{db}].INFORMATION_SCHEMA.COLUMNS "
             "WHERE TABLE_NAME = ? ORDER BY ORDINAL_POSITION",
             (table_name,)
         )
@@ -494,17 +505,23 @@ def ensure_table_exists_dynamic(cursor, table_name, sql_columns):
         expected_cols = {col.upper() for col in sql_columns}
 
         if expected_cols.issubset(existing_cols):
-            print(f"  Table {table_name} exists (schema compatible)")
+            print(f"  Table {db}.{table_name} exists (schema compatible)")
             return False
 
-        # Schema mismatch — drop and recreate
-        print(f"  Table {table_name} exists but schema differs, recreating...")
-        cursor.execute(f"DROP TABLE [{table_name}]")
+        missing = [c for c in sql_columns if c.upper() not in existing_cols]
+        if not validation_seed.is_test_target():
+            raise ValueError(
+                f"Table {db}.{table_name} exists but is missing expected columns: "
+                f"{', '.join(missing[:5])} (tables in {db} are never dropped)"
+            )
+        # Test database: schema mismatch — drop and recreate
+        print(f"  Table {db}.{table_name} exists but schema differs, recreating...")
+        cursor.execute(f"DROP TABLE {_staging_table(table_name)}")
         cursor.connection.commit()
 
     # Build CREATE TABLE with all NVARCHAR(500) columns
     col_defs = ",\n    ".join(f"[{col}] NVARCHAR(500)" for col in sql_columns)
-    create_sql = f"CREATE TABLE [{table_name}] (\n    {col_defs}\n)"
+    create_sql = f"CREATE TABLE {_staging_table(table_name)} (\n    {col_defs}\n)"
 
     print(f"  Creating table {table_name}...")
     cursor.execute(create_sql)
@@ -571,6 +588,9 @@ def _record_last_load(cursor, table_name, mock_number, filename, file_path,
     completeness. One row per load, never an update, to match the box loaders.
     """
     db = workbook_loaders.STAGING_DATABASE
+    if validation_seed.is_test_target():
+        # A fresh test database has no ledger yet.
+        validation_seed.Seeder(cursor.connection).ensure("LAST_LOAD_BY_TABLE")
     cursor.execute(
         f"INSERT INTO [{db}].dbo.LAST_LOAD_BY_TABLE "
         f"(Table_Name, Last_Load_DTTM, Record_Count, Login, Processed_File_Path, "
@@ -825,18 +845,22 @@ def process_single_file(bucket, file_info, connection_str, context=None, trigger
 
                 if not was_created:
                     print(f"  Truncating table: {table_name}")
-                    cursor.execute(f"DELETE FROM [{table_name}]")
+                    cursor.execute(f"DELETE FROM {_staging_table(table_name)}")
                     conn.commit()
 
                 if is_large_file:
                     result["rowCount"] = _insert_chunks(
                         df, chunk_iter, csv_columns, sql_columns,
-                        table_name, cursor, conn, context,
+                        _staging_table(table_name), cursor, conn, context,
                     )
                 else:
                     rows = _build_rows(df, csv_columns)
-                    _batch_insert(cursor, conn, table_name, sql_columns, rows)
+                    _batch_insert(cursor, conn, _staging_table(table_name), sql_columns, rows)
                     result["rowCount"] = len(rows)
+                _record_last_load(
+                    cursor, table_name, mock_number, filename,
+                    f"s3://{bucket}/{file_key}", result["rowCount"], triggered_by,
+                )
 
         else:
             # New multi-module processing path
@@ -883,18 +907,22 @@ def process_single_file(bucket, file_info, connection_str, context=None, trigger
 
                 if not was_created:
                     print(f"  Truncating table: {table_name}")
-                    cursor.execute(f"DELETE FROM [{table_name}]")
+                    cursor.execute(f"DELETE FROM {_staging_table(table_name)}")
                     conn.commit()
 
                 if is_large_file:
                     result["rowCount"] = _insert_chunks(
                         df, chunk_iter, csv_columns, sql_columns,
-                        table_name, cursor, conn, context,
+                        _staging_table(table_name), cursor, conn, context,
                     )
                 else:
                     rows = _build_rows(df, csv_columns)
-                    _batch_insert(cursor, conn, table_name, sql_columns, rows)
+                    _batch_insert(cursor, conn, _staging_table(table_name), sql_columns, rows)
                     result["rowCount"] = len(rows)
+                _record_last_load(
+                    cursor, table_name, mock_number, filename,
+                    f"s3://{bucket}/{file_key}", result["rowCount"], triggered_by,
+                )
 
         # Gates 4 & 5 pass + record final state on the seq 1 row
         aws_files_writer.mark_load_success(
