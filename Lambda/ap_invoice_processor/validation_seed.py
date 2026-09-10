@@ -227,6 +227,12 @@ class Seeder:
         for (name,) in self.cur.fetchall():
             if name and re.match(r"^[A-Za-z0-9_]+$", name) and self.catalog.type_of(name) == "U":
                 self.ensure(name)
+        # The setup procedures call the mock's helper procedures by a name built
+        # at run time (EXEC 'UPDATE_' + @Mock + '_ASSET_RECEIVED_ALL'), which the
+        # dependency scan cannot see — copy every UPDATE_<mock>_* procedure.
+        for name in sorted(n for n, t in self.catalog.types.items()
+                           if t == "P" and n.startswith(f"UPDATE_{mock.upper()}_")):
+            self.ensure(name)
 
     def ensure_views(self, families, source, mock):
         """Copy the source's FILEVAL views for these families."""
