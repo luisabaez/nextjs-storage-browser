@@ -1950,6 +1950,19 @@ def lambda_handler(event, context):
             return {"statusCode": 500, "headers": headers,
                     "body": json.dumps({"ok": False, "error": str(e)})}
 
+    if action == "val_plan_check":
+        # POST { mock, pairs: [[entity_display, entity_prefix, source], ...] } — what the
+        # file-expected gate will decide for these files (read-only)
+        try:
+            body = json.loads(event.get("body") or "{}")
+            res = validation_seed.plan_gate_check(get_connection_string(), body.get("mock") or "MOCK14",
+                                                  body.get("pairs") or [])
+            return {"statusCode": 200, "headers": headers, "body": json.dumps(res, default=str)}
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
     if action == "val_object_def":
         # ?action=val_object_def&name=<view|procedure|function> — definition text from the
         # source database (read-only; for checking what a validation object depends on)

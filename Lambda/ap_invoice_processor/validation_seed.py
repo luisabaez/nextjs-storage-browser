@@ -342,6 +342,39 @@ def object_definition(conn_str, name):
                 "references": [{"name": r, "type": cat.type_of(r)} for r in refs]}
 
 
+def plan_gate_check(conn_str, mock, pairs):
+    """What the file-expected gate will decide for (entity display, entity
+    prefix, source) pairs, read from the target database's plan the same way
+    process_single_file reads it (read-only)."""
+    mock = re.sub(r"[^A-Za-z0-9_]", "", mock or "")
+    plan = f"SETUP_CONVERSION_PLAN_{mock}"
+    out = {"ok": True, "db": TARGET_DB, "plan": plan, "rows": []}
+    with pyodbc.connect(conn_str) as conn:
+        cur = conn.cursor()
+        cur.execute(f"SELECT COUNT(*) FROM [{TARGET_DB}].sys.tables WHERE name = ?", (plan,))
+        out["plan_exists"] = cur.fetchone()[0] > 0
+        for display, prefix, source in pairs:
+            entry = {"entity": display, "prefix": prefix, "source": source, "matches": []}
+            if out["plan_exists"]:
+                cur.execute(
+                    f"SELECT [Entity], [SubEntity], [Table_Name], [File_Expected], [ExcludedFromMock] "
+                    f"FROM [{TARGET_DB}].dbo.[{plan}] "
+                    f"WHERE LTRIM(RTRIM(ISNULL([SOURCE], ''))) = ? AND ("
+                    f"LTRIM(RTRIM(ISNULL([Entity], ''))) = ? OR LTRIM(RTRIM(ISNULL([SubEntity], ''))) = ? "
+                    f"OR [Table_Name] LIKE ?)",
+                    (source, display, prefix, f"{prefix}%_{mock}_{source}"),
+                )
+                for r in cur.fetchall():
+                    entry["matches"].append({"entity": r[0], "sub_entity": r[1], "table": r[2],
+                                             "file_expected": r[3], "excluded": r[4]})
+            # The gate's own rule: TOP 1 by Entity display + SOURCE; 'N' rejects.
+            gate = [m for m in entry["matches"] if (m["entity"] or "").strip() == display]
+            entry["gate"] = ("REJECT" if gate and (gate[0]["file_expected"] or "").strip().upper() == "N"
+                             else "PASS")
+            out["rows"].append(entry)
+    return out
+
+
 def status(conn_str):
     """Where validation points, and what the target already has."""
     with pyodbc.connect(conn_str) as conn:
