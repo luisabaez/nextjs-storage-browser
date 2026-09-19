@@ -43,6 +43,7 @@ from entity_registry import (
 import workbook_loaders
 import validation_runner
 import validation_seed
+import validation_report
 
 # Legacy AP Invoice imports (backward compat)
 from column_mappings import get_mapping as legacy_get_mapping
@@ -699,7 +700,14 @@ def process_single_file(bucket, file_info, connection_str, context=None, trigger
         # treat that as Expected=Y so onboarding doesn't break.
         file_expected_ok = True
         file_expected_msg = ""
+        if is_workbook:
+            # Assets / Inventory workbooks are validated, corrected by the
+            # client and re-submitted (_V2, or a new timestamp): every version
+            # is expected, and each load replaces the staging tables.
+            print("  File_Expected gate skipped: workbook entity, re-submissions expected")
         try:
+            if is_workbook:
+                raise StopIteration
             with pyodbc.connect(connection_str) as fe_conn:
                 fe_cur = fe_conn.cursor()
                 setup_table = f"SETUP_CONVERSION_PLAN_{mock_number}"
@@ -717,6 +725,8 @@ def process_single_file(bucket, file_info, connection_str, context=None, trigger
                         file_expected_msg = (
                             f"Entity {entity_prefix}/{source} has File_Expected=N in {setup_table}"
                         )
+        except StopIteration:
+            pass
         except Exception as fe_err:
             # Don't block processing if the lookup itself blows up
             print(f"  WARNING: File_Expected lookup failed: {fe_err}")
@@ -954,6 +964,7 @@ def process_single_file(bucket, file_info, connection_str, context=None, trigger
             file_key=dest_key,
             file_size=file_info.get("size", 0),
             etag=file_etag,
+            flip_file_expected=not is_workbook,
         )
 
         # Step 7 (Phase 4): Recompute Validation Group state.
@@ -2019,9 +2030,25 @@ def lambda_handler(event, context):
                 get_connection_string(), body.get("program") or "", body.get("source") or "",
                 mock=body.get("mock") or "MOCK14", actor=body.get("actor") or "",
                 dry_run=bool(body.get("dry_run")), remaining_ms=remaining,
+                bucket=bucket,
             )
             return {"statusCode": 200 if res.get("ok") else 400,
                     "headers": headers, "body": json.dumps(res, default=str)}
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
+    if action == "val_reports":
+        # ?action=val_reports&mock=MOCK14[&program=Asset][&source=010] — Excel reports in S3
+        try:
+            p = event.get("queryStringParameters") or {}
+            mock = validation_runner._check_ident((p.get("mock") or "MOCK14").upper(), "mock")
+            reports = validation_report.list_reports(bucket, mock, p.get("program") or None,
+                                                     p.get("source") or None)
+            return {"statusCode": 200, "headers": headers,
+                    "body": json.dumps({"ok": True, "prefix": validation_report.REPORT_PREFIX,
+                                        "reports": reports}, default=str)}
         except Exception as e:
             traceback.print_exc()
             return {"statusCode": 500, "headers": headers,

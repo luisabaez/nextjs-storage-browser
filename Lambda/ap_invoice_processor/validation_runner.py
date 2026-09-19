@@ -34,6 +34,7 @@ from datetime import datetime
 import pyodbc
 
 import validation_seed
+import validation_report
 
 # The database validation runs against. Hacienda_ERP holds the definitions of
 # record; VALIDATION_DB points a testing cycle at another database, which is
@@ -225,11 +226,13 @@ def list_programs(conn_str, mock="MOCK14"):
 
 
 def run_program(conn_str, program, source, mock="MOCK14", actor="", dry_run=False,
-                remaining_ms=None):
+                remaining_ms=None, bucket=None):
     """
     Run one program for one source. dry_run lists the views (and, in "views"
     mode, counts their rows) without writing anything. remaining_ms() (Lambda
     context) lets a long run stop cleanly and report the views it skipped.
+    With a bucket, a real run also writes the client-facing Excel report
+    (validation_report) and returns its key.
     """
     spec = PROGRAMS.get(program)
     if not spec:
@@ -247,14 +250,37 @@ def run_program(conn_str, program, source, mock="MOCK14", actor="", dry_run=Fals
         if result["seeded"].get("failed"):
             result["warnings"].append(
                 f"{len(result['seeded']['failed'])} object(s) could not be created in {DB}; see seeded.failed")
+    records = []
     with pyodbc.connect(conn_str, autocommit=False) as conn:
         cur = conn.cursor()
         if spec["mode"] == "sp":
             _run_via_sp(cur, conn, spec, program, source, mock, actor, dry_run, result)
+            if result["ok"] and not dry_run:
+                records = _detail_records(cur, spec["label"] or program, source, mock)
         else:
-            _run_views(cur, conn, spec, program, source, mock, actor, dry_run, remaining_ms, result)
+            _run_views(cur, conn, spec, program, source, mock, actor, dry_run, remaining_ms, result, records)
+    if bucket and result["ok"] and not dry_run:
+        try:
+            key = validation_report.report_key(mock, program, source)
+            validation_report.write_report(bucket, key, validation_report.build_workbook(records))
+            result["report_key"] = key
+            result["report_name"] = key.rsplit("/", 1)[-1]
+            result["report_rows"] = len(records)
+        except Exception as e:
+            result["warnings"].append(f"Excel report not written: {str(e)[:200]}")
     result["elapsed_s"] = round((datetime.now() - started).total_seconds(), 1)
     return result
+
+
+def _detail_records(cur, log_program, source, mock):
+    cols = ["ERROR_MSG", "Entity", "File", "File_PROCESSED_DTTM", "Source", "VALIDATION_TYPE"] + \
+           [f"Col{i}" for i in range(1, _MAX_COLS + 1)]
+    cur.execute(
+        f"SELECT {', '.join(f'[{c}]' for c in cols)} FROM [{DB}].dbo.LOG_DATA_CLEANSE_DETAIL "
+        f"WHERE MOCK = ? AND [Source] = ? AND Validation_Program = ? ORDER BY Validation_Code, ERROR_MSG",
+        (mock, source, log_program),
+    )
+    return validation_report.records_from_detail_rows(cur.fetchall())
 
 
 def _new_run(cur, conn, program, source, mock, actor, log_program):
@@ -361,7 +387,7 @@ def _run_via_sp(cur, conn, spec, program, source, mock, actor, dry_run, result):
 
 # ── mode "views": iterate the views here ─────────────────────────────────────
 
-def _run_views(cur, conn, spec, program, source, mock, actor, dry_run, remaining_ms, result):
+def _run_views(cur, conn, spec, program, source, mock, actor, dry_run, remaining_ms, result, records=None):
     if spec["setup_sp"] and not dry_run:
         try:
             _exec_sp(cur, conn, f"EXEC [{DB}].dbo.[{spec['setup_sp']}] @SOURCE = ?, @Mock = ?", (source, mock))
@@ -420,6 +446,8 @@ def _run_views(cur, conn, spec, program, source, mock, actor, dry_run, remaining
         entry["codes"] = dict(codes)
         result["total_rows"] += len(rows)
         all_codes.update(codes)
+        if records is not None and rows and not dry_run:
+            records.extend(validation_report.records_from_view_rows(cols, rows))
 
         if not dry_run and rows:
             _store_rows(cur, conn, view, cols, rows, program, source, mock, bu, run_dttm, lengths, result["warnings"])

@@ -357,11 +357,10 @@ def upsert_conversion_plan_row(cursor, mock_number, parsed, table_name,
             params.append(bu_value)
 
         if match_by_table:
-            update_sql += (
-                ", [FileName] = ? WHERE LTRIM(RTRIM(ISNULL([Table_Name], ''))) = ? "
-                "AND LTRIM(RTRIM(ISNULL([FileName], ''))) IN ('', ?)"
-            )
-            params.extend([original_filename, table_name, original_filename])
+            # A corrected re-submission (_V2, or a new timestamp) takes over
+            # the same row; LoadVersion counts the loads.
+            update_sql += ", [FileName] = ? WHERE LTRIM(RTRIM(ISNULL([Table_Name], ''))) = ?"
+            params.extend([original_filename, table_name])
         else:
             update_sql += " WHERE [FileName] = ?"
             params.append(original_filename)
@@ -478,7 +477,7 @@ def _flip_file_expected_after_load(cursor, mock_number, parsed, etag=None):
 
 def track_file_load(connection_str, mock_number, parsed, table_name,
                     row_count, df=None, triggered_by="",
-                    file_key="", file_size=0, etag=None):
+                    file_key="", file_size=0, etag=None, flip_file_expected=True):
     """
     High-level function to track a file load in the conversion plan.
 
@@ -500,8 +499,15 @@ def track_file_load(connection_str, mock_number, parsed, table_name,
                 row_count, df=df, triggered_by=triggered_by,
                 file_key=file_key, file_size=file_size,
             )
-            # Phase 3: post-load housekeeping
-            _flip_file_expected_after_load(cursor, mock_number, parsed, etag=etag)
+            # Phase 3: post-load housekeeping. Entities that are validated,
+            # corrected by the client and re-submitted (Assets / Inventory
+            # workbooks) keep File_Expected as it is, so the next version
+            # loads without an admin reset.
+            if flip_file_expected:
+                _flip_file_expected_after_load(cursor, mock_number, parsed, etag=etag)
+            else:
+                print(f"  File_Expected left unchanged for {parsed.get('entity_prefix')} "
+                      f"(re-submissions expected)")
     except Exception as e:
         # Don't fail the whole file load if tracking fails
         print(f"  WARNING: Failed to track file in conversion plan: {e}")
