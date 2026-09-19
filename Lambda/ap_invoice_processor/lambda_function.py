@@ -2970,6 +2970,20 @@ def lambda_handler(event, context):
                 "body": json.dumps({"error": str(e)}),
             }
 
+    if action == "list_input":
+        # ?action=list_input — what a processing run would pick up right now (read-only)
+        try:
+            files = list_input_files(bucket)
+            return {"statusCode": 200, "headers": headers,
+                    "body": json.dumps({"ok": True, "bucket": bucket, "count": len(files),
+                                        "files": [{"name": f["name"], "size": f["size"],
+                                                   "last_modified": f["last_modified"]} for f in files]},
+                                       default=str)}
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
     # ── PROCESS / CONTINUE ACTION ──
     if action in ("process", "continue"):
         try:
