@@ -357,7 +357,8 @@ def plan_gate_check(conn_str, mock, pairs):
             entry = {"entity": display, "prefix": prefix, "source": source, "matches": []}
             if out["plan_exists"]:
                 cur.execute(
-                    f"SELECT [Entity], [SubEntity], [Table_Name], [File_Expected], [ExcludedFromMock] "
+                    f"SELECT [Entity], [SubEntity], [Table_Name], [File_Expected], [ExcludedFromMock], "
+                    f"[FileName], [LoadedAt], [LoadVersion], [ASSET_BOOK] "
                     f"FROM [{TARGET_DB}].dbo.[{plan}] "
                     f"WHERE LTRIM(RTRIM(ISNULL([SOURCE], ''))) = ? AND ("
                     f"LTRIM(RTRIM(ISNULL([Entity], ''))) = ? OR LTRIM(RTRIM(ISNULL([SubEntity], ''))) = ? "
@@ -366,7 +367,9 @@ def plan_gate_check(conn_str, mock, pairs):
                 )
                 for r in cur.fetchall():
                     entry["matches"].append({"entity": r[0], "sub_entity": r[1], "table": r[2],
-                                             "file_expected": r[3], "excluded": r[4]})
+                                             "file_expected": r[3], "excluded": r[4],
+                                             "file_name": r[5], "loaded_at": r[6],
+                                             "load_version": r[7], "asset_book": r[8]})
             # The gate's own rule: TOP 1 by Entity display + SOURCE; 'N' rejects.
             gate = [m for m in entry["matches"] if (m["entity"] or "").strip() == display]
             entry["gate"] = ("REJECT" if gate and (gate[0]["file_expected"] or "").strip().upper() == "N"

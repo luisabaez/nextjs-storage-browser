@@ -271,9 +271,12 @@ def upsert_conversion_plan_row(cursor, mock_number, parsed, table_name,
     """
     Insert or update a row in SETUP_CONVERSION_PLAN_{MOCK} for a loaded file.
 
-    Keyed on FileName so each distinct file version (original, _V2, _V3)
-    gets its own row.  If the exact same filename is uploaded again
-    (duplicate upload), the existing row is updated instead of duplicated.
+    Matched on FileName first (a re-upload of the same file updates its row
+    and bumps LoadVersion). Otherwise the plan's existing row for the target
+    table is updated — the conversion team's plan already lists one row per
+    table, carrying columns such as ASSET_BOOK that their validations read,
+    so a load must attach to that row rather than add a duplicate beside it.
+    A new row is inserted only when the plan has no row for the table yet.
 
     Args:
         cursor: pyodbc cursor
@@ -313,9 +316,21 @@ def upsert_conversion_plan_row(cursor, mock_number, parsed, table_name,
         (original_filename,)
     )
     existing = cursor.fetchone()
+    match_by_table = False
+    if not existing:
+        # The plan's own row for this table (prefer one no file has claimed yet)
+        cursor.execute(
+            f"SELECT TOP 1 [LoadedAt], [LoadVersion] FROM [{setup_table}] "
+            f"WHERE LTRIM(RTRIM(ISNULL([Table_Name], ''))) = ? "
+            f"ORDER BY CASE WHEN LTRIM(RTRIM(ISNULL([FileName], ''))) = '' THEN 0 ELSE 1 END",
+            (table_name,)
+        )
+        existing = cursor.fetchone()
+        match_by_table = existing is not None
 
     if existing:
-        # Same file uploaded again — update in place, increment LoadVersion
+        # Same file uploaded again (or the plan's row for this table) —
+        # update in place; LoadVersion counts loads into the row
         previous_loaded_at = existing[0] or ""
         current_version = int(existing[1] or "0")
         new_version = current_version + 1
@@ -341,12 +356,20 @@ def upsert_conversion_plan_row(cursor, mock_number, parsed, table_name,
             update_sql += ", [BU] = ?"
             params.append(bu_value)
 
-        update_sql += " WHERE [FileName] = ?"
-        params.append(original_filename)
+        if match_by_table:
+            update_sql += (
+                ", [FileName] = ? WHERE LTRIM(RTRIM(ISNULL([Table_Name], ''))) = ? "
+                "AND LTRIM(RTRIM(ISNULL([FileName], ''))) IN ('', ?)"
+            )
+            params.extend([original_filename, table_name, original_filename])
+        else:
+            update_sql += " WHERE [FileName] = ?"
+            params.append(original_filename)
 
         cursor.execute(update_sql, params)
         cursor.connection.commit()
-        print(f"  Updated {setup_table}: {original_filename} (re-upload #{new_version})")
+        print(f"  Updated {setup_table}: {original_filename} "
+              f"({'plan row for ' + table_name if match_by_table else 're-upload'}, load #{new_version})")
 
     else:
         # New file (or new version like _V2, _V3) — insert a new row
