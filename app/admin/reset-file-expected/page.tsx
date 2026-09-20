@@ -9,11 +9,18 @@ import '../../components/enhanced-file-browser.css';
 import '../admin.css';
 import config from '../../../amplify_outputs.json';
 import { isAdminUser } from '../types';
+import { fetchAppConfig } from '../../lib/symphony';
 import Link from 'next/link';
 
 Amplify.configure(config);
 
 const LAMBDA_URL = 'https://5ahxjcxhrcopng5hjgc2n6utxq0rwcmm.lambda-url.us-east-1.on.aws/';
+// App default, shown until the configured Mock Cycle arrives.
+const DEFAULT_MOCK = 'MOCK03HCM';
+
+// The Mock box takes a full cycle token or just the number:
+// '14' / 'mock14' -> MOCK14, '03hcm' / 'MOCK03HCM' -> MOCK03HCM, '13PRE' -> MOCK13PRE.
+const mockToken = (v: string) => `MOCK${v.trim().toUpperCase().replace(/^MOCK/, '')}`;
 
 interface ResetResponse {
   ok: boolean;
@@ -32,7 +39,7 @@ function ResetFileExpectedPage() {
   const [isAdmin, setIsAdmin] = useState(false);
   const [authChecked, setAuthChecked] = useState(false);
 
-  const [mock, setMock] = useState('12');
+  const [mock, setMock] = useState(DEFAULT_MOCK);
   const [entity, setEntity] = useState('');
   const [source, setSource] = useState('');
   const [vgid, setVgid] = useState('');
@@ -58,6 +65,13 @@ function ResetFileExpectedPage() {
     })();
   }, []);
 
+  // Start on the configured Mock Cycle unless the user already typed another one.
+  useEffect(() => {
+    fetchAppConfig().then(cfg => {
+      if (cfg.ok && cfg.current_mock) setMock(prev => (prev === DEFAULT_MOCK ? cfg.current_mock : prev));
+    });
+  }, []);
+
   const canSubmit = !!mock.trim() && !!source.trim() && (
     (matchBy === 'entity_source' && !!entity.trim()) ||
     (matchBy === 'vgid_source'    && !!vgid.trim())
@@ -66,7 +80,7 @@ function ResetFileExpectedPage() {
   const submit = async () => {
     if (!canSubmit) return;
     if (!window.confirm(
-      `Flip File_Expected back to Y for ${matchBy === 'entity_source' ? entity : vgid} / ${source} in MOCK${mock}?\n\n` +
+      `Flip File_Expected back to Y for ${matchBy === 'entity_source' ? entity : vgid} / ${source} in ${mockToken(mock)}?\n\n` +
       'Affected rows will be marked re-upload-ready. Reason will be appended to Notes.'
     )) return;
 
@@ -76,7 +90,7 @@ function ResetFileExpectedPage() {
     try {
       const qs = new URLSearchParams({
         action: 'reset_file_expected',
-        mock: `MOCK${mock.replace(/^MOCK/i, '').trim()}`,
+        mock: mockToken(mock),
         source: source.trim(),
         reason: reason.trim(),
         actor: userEmail,
@@ -117,20 +131,20 @@ function ResetFileExpectedPage() {
         <p style={{ marginTop: 0, color: '#444' }}>
           When a file successfully loads, the Lambda automatically flips
           <code style={{ background: '#f3f4f6', padding: '2px 6px', borderRadius: 4, margin: '0 4px' }}>File_Expected = N</code>
-          on the matching <code>SETUP_CONVERSION_PLAN_MOCK{mock || 'N'}</code> row(s).
+          on the matching <code>SETUP_CONVERSION_PLAN_{mock.trim() ? mockToken(mock) : 'MOCKnn'}</code> row(s).
           Any new upload for the same entity will then be rejected with
           <strong> &quot;File Not Expected&quot;</strong>. Use this tool to flip it back
           to <code>Y</code> when a corrected re-upload is genuinely needed.
         </p>
 
-        <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr 1fr', gap: 12, alignItems: 'end', marginTop: 16 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '160px 1fr 1fr', gap: 12, alignItems: 'end', marginTop: 16 }}>
           <label>
             <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>Mock</div>
             <input
               type="text"
               value={mock}
               onChange={e => setMock(e.target.value)}
-              placeholder="12"
+              placeholder="MOCK03HCM or 14"
               style={{ width: '100%', padding: '8px 10px', border: '1px solid #d1d5db', borderRadius: 6 }}
               disabled={submitting}
             />

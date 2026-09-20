@@ -23,12 +23,17 @@ def parse_filename(filename):
     Parse any FIN/SCM/HCM data filename to extract metadata.
 
     Expected pattern:
-        {ENTITY_PREFIX}_MOCK{N}[PRE]_{SOURCE}_{YYYYMMDD}_{HHMM}.{csv|xlsx}
+        {ENTITY_PREFIX}_MOCK{NN}[HCM][PRE[n]]_{SOURCE}_{YYYYMMDD}_{HHMM}.{csv|xlsx}
+
+    The mock cycle is the whole token, returned upper-cased in mock_number:
+    MOCK14, MOCK03HCM (phase-2 HCM cycle), MOCK13PRE, MOCK14PRE2, MOCK05HCMPRE.
 
     Examples:
         FIN_AP_INVOICE_HDR_MOCK10_PRIFAS_20240101_1200.csv
         HCM_PERSON_MOCK11PRE_HACIENDA_20240301_0900.csv
         SCM_SUPPLIER_MOCK10_SALUD_20240201_1430.xlsx
+        HCM_WORK_SCHEDULE_MOCK03HCM_312_20260616.csv
+        HCM_PERSON_NID_MOCK04HCM_KRONOSPOL_20260710.csv
 
     Returns:
         dict with keys: filename, module, entity_prefix, entity_display,
@@ -102,14 +107,14 @@ def parse_filename(filename):
     # Backward compat
     result["pillar"] = entity_info["module"]
 
-    # Extract the remainder after entity prefix: _MOCK{N}[PRE]_{SOURCE}[_{DATE}[_{TIME}]].ext
+    # Extract the remainder after entity prefix: _MOCK{NN}[HCM][PRE[n]]_{SOURCE}[_{DATE}[_{TIME}]].ext
     remainder = name[len(entity_prefix):]
     ext = ".csv" if result["extension"] == "csv" else ".xlsx"
     ext_re = re.escape(ext)
 
     # Pattern 1: Standard format — _MOCK{N}_{SOURCE}_{YYYYMMDD}_{HHMM}.ext
     m = re.match(
-        r'^_(MOCK\d+(?:PRE)?)_([A-Z0-9_]+)_(\d{8})_(\d{4})' + ext_re + r'$',
+        r'^_(MOCK\d{1,2}(?:HCM)?(?:PRE\d*)?)_([A-Z0-9_]+)_(\d{8})_(\d{4})' + ext_re + r'$',
         remainder, re.IGNORECASE,
     )
     if m:
@@ -122,7 +127,7 @@ def parse_filename(filename):
 
     # Pattern 2: Dashed date — _MOCK{N}_{SOURCE}_{YYYY-MM-DD}.ext
     m = re.match(
-        r'^_(MOCK\d+(?:PRE)?)_([A-Z0-9_]+)_(\d{4}-\d{2}-\d{2})' + ext_re + r'$',
+        r'^_(MOCK\d{1,2}(?:HCM)?(?:PRE\d*)?)_([A-Z0-9_]+)_(\d{4}-\d{2}-\d{2})' + ext_re + r'$',
         remainder, re.IGNORECASE,
     )
     if m:
@@ -135,7 +140,7 @@ def parse_filename(filename):
 
     # Pattern 3: YYYYMMDD without time — _MOCK{N}_{SOURCE}_{YYYYMMDD}.ext
     m = re.match(
-        r'^_(MOCK\d+(?:PRE)?)_([A-Z0-9_]+?)_(\d{8})' + ext_re + r'$',
+        r'^_(MOCK\d{1,2}(?:HCM)?(?:PRE\d*)?)_([A-Z0-9_]+?)_(\d{8})' + ext_re + r'$',
         remainder, re.IGNORECASE,
     )
     if m:
@@ -148,7 +153,7 @@ def parse_filename(filename):
 
     # Pattern 4: Underscored YYYY_MM_DD — _MOCK{N}_{SOURCE}_{YYYY}_{MM}_{DD}.ext
     m = re.match(
-        r'^_(MOCK\d+(?:PRE)?)_(.+?)_(\d{4})_(\d{2})_(\d{2})' + ext_re + r'$',
+        r'^_(MOCK\d{1,2}(?:HCM)?(?:PRE\d*)?)_(.+?)_(\d{4})_(\d{2})_(\d{2})' + ext_re + r'$',
         remainder, re.IGNORECASE,
     )
     if m:
@@ -161,7 +166,7 @@ def parse_filename(filename):
 
     # Pattern 5: US date MM_DD_YYYY — _MOCK{N}_{SOURCE}_{MM}_{DD}_{YYYY}.ext
     m = re.match(
-        r'^_(MOCK\d+(?:PRE)?)_(.+?)_(\d{2})_(\d{2})_(\d{4})' + ext_re + r'$',
+        r'^_(MOCK\d{1,2}(?:HCM)?(?:PRE\d*)?)_(.+?)_(\d{2})_(\d{2})_(\d{4})' + ext_re + r'$',
         remainder, re.IGNORECASE,
     )
     if m:
@@ -174,7 +179,7 @@ def parse_filename(filename):
 
     # Pattern 6: No date at all — _MOCK{N}_{SOURCE}.ext
     m = re.match(
-        r'^_(MOCK\d+(?:PRE)?)_([A-Z0-9_]+)' + ext_re + r'$',
+        r'^_(MOCK\d{1,2}(?:HCM)?(?:PRE\d*)?)_([A-Z0-9_]+)' + ext_re + r'$',
         remainder, re.IGNORECASE,
     )
     if m:

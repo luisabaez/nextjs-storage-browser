@@ -27,7 +27,7 @@ interface ParsedFileInfo {
   module: string;           // FIN, HCM, SCM
   entityPrefix: string;     // FIN_AP_INVOICE_HDR, HCM_PERSON, etc.
   entityDisplay: string;    // "AP Invoice Header", "Person", etc.
-  mockNumber: string;       // MOCK10, MOCK10PRE, MOCK11PRE
+  mockNumber: string;       // MOCK10, MOCK10PRE, MOCK03HCM, MOCK05HCMPRE
   source: string;           // PRIFAS, HACIENDA, etc.
   dateStr: string;
   timeStr: string;
@@ -335,12 +335,14 @@ function parseFilename(filename: string): ParsedFileInfo {
   base.entityDisplay = entityInfo.displayName;
   base.isLegacy = entityInfo.legacy;
 
-  // Extract remainder: _MOCK{N}[PRE]_{SOURCE}[_{DATE}[_{TIME}]].ext
+  // Extract remainder: _MOCK{NN}[HCM][PRE[n]]_{SOURCE}[_{DATE}[_{TIME}]].ext
+  // The mock cycle is the whole token — MOCK14, MOCK03HCM (phase-2 HCM cycle),
+  // MOCK13PRE, MOCK14PRE2, MOCK05HCMPRE. Keep in step with file_validator.py.
   const remainder = name.substring(matchedPrefix.length);
   const extEsc = (base.extension === 'csv' ? '.csv' : '.xlsx').replace('.', '\\.');
 
   // Pattern 1: Standard — _MOCK{N}_{SOURCE}_{YYYYMMDD}_{HHMM}.ext
-  let m = remainder.match(new RegExp(`^_(MOCK\\d+(?:PRE)?)_([A-Z0-9_]+)_(\\d{8})_(\\d{4})${extEsc}$`, 'i'));
+  let m = remainder.match(new RegExp(`^_(MOCK\\d{1,2}(?:HCM)?(?:PRE\\d*)?)_([A-Z0-9_]+)_(\\d{8})_(\\d{4})${extEsc}$`, 'i'));
   if (m) {
     base.mockNumber = m[1].toUpperCase();
     base.source = m[2].toUpperCase();
@@ -351,7 +353,7 @@ function parseFilename(filename: string): ParsedFileInfo {
   }
 
   // Pattern 2: Dashed date — _MOCK{N}_{SOURCE}_{YYYY-MM-DD}.ext
-  m = remainder.match(new RegExp(`^_(MOCK\\d+(?:PRE)?)_([A-Z0-9_]+)_(\\d{4}-\\d{2}-\\d{2})${extEsc}$`, 'i'));
+  m = remainder.match(new RegExp(`^_(MOCK\\d{1,2}(?:HCM)?(?:PRE\\d*)?)_([A-Z0-9_]+)_(\\d{4}-\\d{2}-\\d{2})${extEsc}$`, 'i'));
   if (m) {
     base.mockNumber = m[1].toUpperCase();
     base.source = m[2].toUpperCase();
@@ -362,7 +364,7 @@ function parseFilename(filename: string): ParsedFileInfo {
   }
 
   // Pattern 3: YYYYMMDD without time — _MOCK{N}_{SOURCE}_{YYYYMMDD}.ext
-  m = remainder.match(new RegExp(`^_(MOCK\\d+(?:PRE)?)_([A-Z0-9_]+?)_(\\d{8})${extEsc}$`, 'i'));
+  m = remainder.match(new RegExp(`^_(MOCK\\d{1,2}(?:HCM)?(?:PRE\\d*)?)_([A-Z0-9_]+?)_(\\d{8})${extEsc}$`, 'i'));
   if (m) {
     base.mockNumber = m[1].toUpperCase();
     base.source = m[2].toUpperCase();
@@ -373,7 +375,7 @@ function parseFilename(filename: string): ParsedFileInfo {
   }
 
   // Pattern 4: Underscored YYYY_MM_DD — _MOCK{N}_{SOURCE}_{YYYY}_{MM}_{DD}.ext
-  m = remainder.match(new RegExp(`^_(MOCK\\d+(?:PRE)?)_(.+?)_(\\d{4})_(\\d{2})_(\\d{2})${extEsc}$`, 'i'));
+  m = remainder.match(new RegExp(`^_(MOCK\\d{1,2}(?:HCM)?(?:PRE\\d*)?)_(.+?)_(\\d{4})_(\\d{2})_(\\d{2})${extEsc}$`, 'i'));
   if (m) {
     base.mockNumber = m[1].toUpperCase();
     base.source = m[2].toUpperCase();
@@ -384,7 +386,7 @@ function parseFilename(filename: string): ParsedFileInfo {
   }
 
   // Pattern 5: US date MM_DD_YYYY — _MOCK{N}_{SOURCE}_{MM}_{DD}_{YYYY}.ext
-  m = remainder.match(new RegExp(`^_(MOCK\\d+(?:PRE)?)_(.+?)_(\\d{2})_(\\d{2})_(\\d{4})${extEsc}$`, 'i'));
+  m = remainder.match(new RegExp(`^_(MOCK\\d{1,2}(?:HCM)?(?:PRE\\d*)?)_(.+?)_(\\d{2})_(\\d{2})_(\\d{4})${extEsc}$`, 'i'));
   if (m) {
     base.mockNumber = m[1].toUpperCase();
     base.source = m[2].toUpperCase();
@@ -395,7 +397,7 @@ function parseFilename(filename: string): ParsedFileInfo {
   }
 
   // Pattern 6: No date — _MOCK{N}_{SOURCE}.ext
-  m = remainder.match(new RegExp(`^_(MOCK\\d+(?:PRE)?)_([A-Z0-9_]+)${extEsc}$`, 'i'));
+  m = remainder.match(new RegExp(`^_(MOCK\\d{1,2}(?:HCM)?(?:PRE\\d*)?)_([A-Z0-9_]+)${extEsc}$`, 'i'));
   if (m) {
     base.mockNumber = m[1].toUpperCase();
     base.source = m[2].toUpperCase();
@@ -1998,9 +2000,10 @@ function DataFileDashboard() {
           </div>
         </div>}
 
-        {/* Phase 6.5 — pipeline metrics strip (auto-refresh every 30s) */}
+        {/* Phase 6.5 — pipeline metrics strip (auto-refresh every 30s).
+            With no Mock filter picked it starts on the configured Mock Cycle. */}
         <PipelineMetrics
-          defaultMock={filterMock && filterMock !== 'all' ? filterMock : 'MOCK12'}
+          defaultMock={filterMock && filterMock !== 'all' ? filterMock : undefined}
           onJump={target => setActiveTab(target)}
         />
 

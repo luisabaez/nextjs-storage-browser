@@ -11,6 +11,8 @@ import config from '../../../../amplify_outputs.json';
 import {
   isAdminUser,
   CognitoUser,
+  UserRole,
+  USER_ROLE_LABELS,
   SOURCE_TAGS,
   SourceTag,
   MOCK_TAGS,
@@ -32,6 +34,14 @@ Amplify.configure(config);
 const APPROVAL_HANDLER_URL = 'https://w47wliqar3ka27qsezzckqpoza0kkmbt.lambda-url.us-east-1.on.aws/';
 const APPROVAL_TOKEN = 'hacienda-erp-approval-2024';
 
+// One-line summary of what each security role can do (shown under the role select)
+const ROLE_DESCRIPTIONS: Record<UserRole, string> = {
+  '': 'No security role assigned. The user only has the file access configured below.',
+  super_user: 'Validation team: full access to every source, configuration and rule edits, and all certification pages.',
+  agency_user: 'Certifies validations and files for the sources and business units allowed below, and works the Data Cleanse Log.',
+  certification_reviewer: 'Read-only: views the Certification Status dashboards and generates the Status Report.',
+};
+
 function UserDetailPage() {
   const params = useParams();
   const router = useRouter();
@@ -47,6 +57,7 @@ function UserDetailPage() {
 
   // Permission states
   const [selectedIsAdmin, setSelectedIsAdmin] = useState(false);
+  const [selectedRole, setSelectedRole] = useState<UserRole>('');
   const [selectedSources, setSelectedSources] = useState<SourceTag[]>([]);
   const [selectedEntities, setSelectedEntities] = useState<string[]>([]);
   const [selectedMocks, setSelectedMocks] = useState<string[]>([]);
@@ -114,6 +125,8 @@ function UserDetailPage() {
             (await fetchPermissionsFromBackend(foundUser.email)) || getUserPermissions(foundUser.email);
           if (permissions) {
             setSelectedIsAdmin(!!permissions.isAdmin);
+            // The admin flag always means super user, whatever role was stored with it
+            setSelectedRole(permissions.isAdmin ? 'super_user' : permissions.role || '');
             setSelectedSources(permissions.allowedSources || []);
             setSelectedEntities(permissions.allowedEntities || []);
             setSelectedMocks(permissions.allowedMocks || []);
@@ -162,6 +175,21 @@ function UserDetailPage() {
     setSelectedBusinessUnits(prev =>
       prev.includes(unit) ? prev.filter(u => u !== unit) : [...prev, unit]
     );
+    setSaveMessage(null);
+  };
+
+  // Admin flag and security role move together: the admin flag always means
+  // super user, so the two controls can never disagree.
+  const handleAdminToggle = (checked: boolean) => {
+    setSelectedIsAdmin(checked);
+    if (checked) setSelectedRole('super_user');
+    else if (selectedRole === 'super_user') setSelectedRole('');
+    setSaveMessage(null);
+  };
+
+  const handleRoleChange = (role: UserRole) => {
+    setSelectedRole(role);
+    setSelectedIsAdmin(role === 'super_user');
     setSaveMessage(null);
   };
 
@@ -228,12 +256,22 @@ function UserDetailPage() {
   const handleSave = async () => {
     if (!user) return;
 
+    // An agency user must be limited to their own source / agency
+    if (selectedRole === 'agency_user' && selectedSources.length === 0 && selectedBusinessUnits.length === 0) {
+      setSaveMessage({
+        type: 'error',
+        text: 'An Agency User must be limited to their own agency. Select at least one source or business unit before saving.',
+      });
+      return;
+    }
+
     setIsSaving(true);
     setSaveMessage(null);
 
     try {
       const perms = {
         isAdmin: selectedIsAdmin,
+        role: selectedRole,
         allowedSources: selectedSources,
         allowedEntities: selectedEntities,
         allowedMocks: selectedMocks,
@@ -404,10 +442,7 @@ function UserDetailPage() {
                 type="checkbox"
                 checked={selectedIsAdmin || isUserAdmin}
                 disabled={isUserAdmin}
-                onChange={(e) => {
-                  setSelectedIsAdmin(e.target.checked);
-                  setSaveMessage(null);
-                }}
+                onChange={(e) => handleAdminToggle(e.target.checked)}
               />
               <div className="admin-toggle-content">
                 <div className="admin-toggle-title">
@@ -423,6 +458,30 @@ function UserDetailPage() {
                 </div>
               </div>
             </label>
+          </div>
+
+          {/* Security Role — what the user may do with certifications and configuration */}
+          <div className="admin-toggle-section">
+            <div className="admin-toggle-content" style={{ padding: '16px 18px' }}>
+              <label className="admin-toggle-title" htmlFor="security-role">
+                Security role
+              </label>
+              <select
+                id="security-role"
+                className="filter-select"
+                value={isUserAdmin ? 'super_user' : selectedRole}
+                disabled={isUserAdmin}
+                onChange={(e) => handleRoleChange(e.target.value as UserRole)}
+              >
+                <option value="">No role</option>
+                {(Object.keys(USER_ROLE_LABELS) as Array<keyof typeof USER_ROLE_LABELS>).map(role => (
+                  <option key={role} value={role}>{USER_ROLE_LABELS[role]}</option>
+                ))}
+              </select>
+              <div className="admin-toggle-description" style={{ marginTop: 8 }}>
+                {ROLE_DESCRIPTIONS[isUserAdmin ? 'super_user' : selectedRole]}
+              </div>
+            </div>
           </div>
 
           {/* Permission Tabs */}

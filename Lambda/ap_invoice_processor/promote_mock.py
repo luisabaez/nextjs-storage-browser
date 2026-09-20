@@ -114,8 +114,12 @@ def _normalise_mock(value: str) -> str:
         '14' / 'mock14' / 'MOCK14'  → 'MOCK14'
         '13PRE' / 'mock13pre'        → 'MOCK13PRE'   (PRE = dev/test sibling)
         '14PRE2'                     → 'MOCK14PRE2'  (multiple PRE rounds)
+        '03HCM' / 'mock03hcm'        → 'MOCK03HCM'   (phase-2 HCM cycle)
+        '05HCMPRE' / 'MOCK05HCMPRE'  → 'MOCK05HCMPRE' (PRE sibling of an HCM cycle)
     Leading digits trigger the MOCK prefix; anything that already starts with
     MOCK is left alone. Free-form labels (e.g. 'SANDBOX') pass through as-is.
+    The result is always upper-case and is used verbatim as the table suffix
+    (SETUP_CONVERSION_PLAN_MOCK03HCM), so type HCM cycles with both digits.
     """
     s = (value or "").strip().upper()
     if not s:

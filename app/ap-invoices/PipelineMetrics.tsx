@@ -12,8 +12,11 @@
  * passes onJump for tab navigation). Auto-refresh can be paused.
  */
 import React, { useCallback, useEffect, useState } from 'react';
+import { fetchAppConfig } from '../lib/symphony';
 
 const LAMBDA_URL = 'https://5ahxjcxhrcopng5hjgc2n6utxq0rwcmm.lambda-url.us-east-1.on.aws/';
+// App default, used when the configured Mock Cycle cannot be read.
+const DEFAULT_MOCK = 'MOCK03HCM';
 
 interface Metrics {
   ok: boolean;
@@ -39,8 +42,9 @@ interface Props {
   onJump?: (target: 'aws_files' | 'validation_runs' | 'vbl_groups' | 'file_config') => void;
 }
 
-export function PipelineMetrics({ defaultMock = 'MOCK12', onJump }: Props) {
-  const [mock, setMock] = useState(defaultMock);
+export function PipelineMetrics({ defaultMock, onJump }: Props) {
+  // A Mock filter picked on the dashboard wins; otherwise wait for the configured cycle.
+  const [mock, setMock] = useState(defaultMock || '');
   const [windowHours, setWindowHours] = useState(24);
   const [data, setData] = useState<Metrics | null>(null);
   const [loading, setLoading] = useState(false);
@@ -49,7 +53,16 @@ export function PipelineMetrics({ defaultMock = 'MOCK12', onJump }: Props) {
   const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
   const [collapsed, setCollapsed] = useState(false);
 
+  // Nothing is fetched until the Mock Cycle is known, so a slow first response
+  // can never replace the configured cycle's data.
+  useEffect(() => {
+    fetchAppConfig().then(cfg => {
+      setMock(prev => prev || (cfg.ok && cfg.current_mock ? cfg.current_mock : DEFAULT_MOCK));
+    });
+  }, []);
+
   const load = useCallback(async () => {
+    if (!mock) return;
     setLoading(true); setError('');
     try {
       const qs = new URLSearchParams({

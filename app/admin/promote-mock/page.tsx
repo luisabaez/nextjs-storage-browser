@@ -51,8 +51,9 @@ function PromoteMockPage() {
   const [isAdmin, setIsAdmin] = useState(false);
   const [authChecked, setAuthChecked] = useState(false);
 
-  // Form — accepts plain numbers (13), MOCK-prefixed (MOCK13), or PRE
-  // siblings (13PRE / MOCK13PRE) for dev-team testing tracks.
+  // Form — accepts plain numbers (13), MOCK-prefixed (MOCK13), phase-2 HCM
+  // cycles (03HCM / MOCK03HCM), or PRE siblings (13PRE / MOCK05HCMPRE) for
+  // dev-team testing tracks.
   const [sourceMock, setSourceMock] = useState('13');
   const [targetMock, setTargetMock] = useState('14');
 
@@ -113,10 +114,10 @@ function PromoteMockPage() {
       return;
     }
     const rowMsg = totalRowsToCopy > 0
-      ? `Copies ${totalRowsToCopy.toLocaleString()} structural row(s) from MOCK${sourceMock}; clears tracking columns (LoadedAt, Latest_*, Approval_*, etc.) on the new Mock.`
-      : `Source has 0 rows. MOCK${targetMock} tables will be created EMPTY with the correct shape — ready to receive data when files are loaded.`;
+      ? `Copies ${totalRowsToCopy.toLocaleString()} structural row(s) from ${preview.source_mock}; clears tracking columns (LoadedAt, Latest_*, Approval_*, etc.) on the new Mock.`
+      : `Source has 0 rows. ${preview.target_mock} tables will be created EMPTY with the correct shape — ready to receive data when files are loaded.`;
     if (!window.confirm(
-      `This will create ${tablesToCreate.length} MOCK${targetMock} table(s).\n\n${rowMsg}\n\nProceed?`
+      `This will create ${tablesToCreate.length} ${preview.target_mock} table(s).\n\n${rowMsg}\n\nProceed?`
     )) return;
 
     setError('');
@@ -189,8 +190,9 @@ function PromoteMockPage() {
           <strong>Mock label syntax:</strong>
           <ul style={{ margin: '4px 0 0 18px', padding: 0 }}>
             <li><code>13</code> or <code>MOCK13</code> — production Mock</li>
+            <li><code>03HCM</code> or <code>MOCK03HCM</code> — phase-2 HCM Mock Cycle (type both digits: <code>03</code>, not <code>3</code>)</li>
             <li><code>13PRE</code> or <code>MOCK13PRE</code> — dev/test sibling Mock running in parallel with Mock 13</li>
-            <li><code>14PRE2</code> — second PRE round for Mock 14</li>
+            <li><code>14PRE2</code> — second PRE round for Mock 14; <code>05HCMPRE</code> — PRE sibling of an HCM cycle</li>
           </ul>
           The <strong>PRE</strong> suffix is part of the filename pattern
           (<code>FIN_AP_INVOICE_HDR_MOCK13PRE_PRIFAS_…csv</code>) and creates parallel tables like
@@ -205,7 +207,7 @@ function PromoteMockPage() {
               type="text"
               value={sourceMock}
               onChange={e => setSourceMock(e.target.value)}
-              placeholder="13 / MOCK13 / 13PRE"
+              placeholder="13 / MOCK13 / 03HCM / 13PRE"
               style={{ width: '100%', padding: '8px 10px', border: '1px solid #d1d5db', borderRadius: 6 }}
               disabled={previewing || promoting}
             />
@@ -216,7 +218,7 @@ function PromoteMockPage() {
               type="text"
               value={targetMock}
               onChange={e => setTargetMock(e.target.value)}
-              placeholder="14 / 13PRE / 14PRE2"
+              placeholder="14 / 04HCM / 13PRE / 14PRE2"
               style={{ width: '100%', padding: '8px 10px', border: '1px solid #d1d5db', borderRadius: 6 }}
               disabled={previewing || promoting}
             />

@@ -9,11 +9,14 @@ import '../../components/enhanced-file-browser.css';
 import '../admin.css';
 import config from '../../../amplify_outputs.json';
 import { isAdminUser } from '../types';
+import { fetchAppConfig } from '../../lib/symphony';
 import Link from 'next/link';
 
 Amplify.configure(config);
 
 const LAMBDA_URL = 'https://5ahxjcxhrcopng5hjgc2n6utxq0rwcmm.lambda-url.us-east-1.on.aws/';
+// App default, used when the configured Mock Cycle cannot be read.
+const DEFAULT_MOCK = 'MOCK03HCM';
 
 interface VBLMember {
   VBL_Group_ID: string;
@@ -51,7 +54,7 @@ function VBLApprovalsPage() {
   const [isAdmin, setIsAdmin] = useState(false);
   const [authChecked, setAuthChecked] = useState(false);
 
-  const [mock, setMock] = useState('MOCK12');
+  const [mock, setMock] = useState('');
   const [groups, setGroups] = useState<VBLGroup[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -79,7 +82,16 @@ function VBLApprovalsPage() {
     })();
   }, []);
 
+  // Nothing is fetched until the configured Mock Cycle is known, so a slow first
+  // response can never replace the configured cycle's data.
+  useEffect(() => {
+    fetchAppConfig().then(cfg => {
+      setMock(prev => prev || (cfg.ok && cfg.current_mock ? cfg.current_mock : DEFAULT_MOCK));
+    });
+  }, []);
+
   const load = useCallback(async () => {
+    if (!mock) return;
     setLoading(true); setError('');
     try {
       const resp = await fetch(`${LAMBDA_URL}?action=vbl_groups&mock=${encodeURIComponent(mock)}`);

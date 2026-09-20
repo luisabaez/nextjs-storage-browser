@@ -85,12 +85,18 @@ export function addDynamicEntityTag(tag: string): void {
 // ============================================
 // MOCK NUMBER TAGS
 // ============================================
-// Generate mock tags from MOCK6 to MOCK15, each with a PRE version
+// Generate mock tags from MOCK6 to MOCK16, each with a PRE version, plus the
+// Phase-2 HCM cycles (MOCK01HCM … MOCK06HCM and their PRE siblings)
 export function generateMockTags(): string[] {
   const mocks: string[] = [];
-  for (let i = 6; i <= 15; i++) {
+  for (let i = 6; i <= 16; i++) {
     mocks.push(`MOCK${i}`);
     mocks.push(`MOCK${i}PRE`);
+  }
+  for (let i = 1; i <= 6; i++) {
+    const n = String(i).padStart(2, '0');
+    mocks.push(`MOCK${n}HCM`);
+    mocks.push(`MOCK${n}HCMPRE`);
   }
   return mocks;
 }
@@ -177,10 +183,23 @@ export interface AdminUser {
   isAdmin: boolean;
 }
 
+// Security roles. A user flagged isAdmin (or on ADMIN_EMAILS) is a super user.
+//   super_user              validation team: configuration, rule edits, every source
+//   agency_user             certifies validations and files for their own sources / BUs
+//   certification_reviewer  read-only certification dashboards + status report
+export type UserRole = 'super_user' | 'agency_user' | 'certification_reviewer' | '';
+
+export const USER_ROLE_LABELS: Record<Exclude<UserRole, ''>, string> = {
+  super_user: 'Super User',
+  agency_user: 'Agency User',
+  certification_reviewer: 'Certification Review',
+};
+
 // Extended permissions interface with all permission types
 export interface UserPermissions {
   email: string;
   isAdmin?: boolean;          // Grants full admin access (bypasses all checks)
+  role?: UserRole;            // Security role ('' / missing = no role assigned)
   allowedSources: SourceTag[];
   allowedEntities: string[];  // Dynamic, so string[] instead of type
   allowedMocks: string[];
@@ -279,6 +298,25 @@ export function isAdminUser(email: string): boolean {
   return false;
 }
 
+// ── Security roles (read the same cached permissions as isAdminUser) ──
+export function getUserRole(email: string): UserRole {
+  if (!email) return '';
+  if (isAdminUser(email)) return 'super_user';
+  if (typeof window === 'undefined') return '';
+  try {
+    const role = getUserPermissions(email.toLowerCase())?.role || '';
+    return role === 'super_user' || role === 'agency_user' || role === 'certification_reviewer' ? role : '';
+  } catch {
+    return '';
+  }
+}
+
+export const isSuperUser = (email: string): boolean => getUserRole(email) === 'super_user';
+export const canCertify = (email: string): boolean =>
+  ['super_user', 'agency_user'].includes(getUserRole(email));
+export const canReviewCertifications = (email: string): boolean =>
+  ['super_user', 'certification_reviewer'].includes(getUserRole(email));
+
 // ============================================
 // PERMISSION STORAGE
 // ============================================
@@ -342,6 +380,7 @@ export function saveUserFullPermissions(
   email: string,
   permissions: {
     isAdmin?: boolean;
+    role?: UserRole;
     allowedSources: SourceTag[];
     allowedEntities: string[];
     allowedMocks: string[];
@@ -353,6 +392,7 @@ export function saveUserFullPermissions(
   all[email.toLowerCase()] = {
     email: email.toLowerCase(),
     isAdmin: !!permissions.isAdmin,
+    role: permissions.role || '',
     allowedSources: permissions.allowedSources,
     allowedEntities: permissions.allowedEntities,
     allowedMocks: permissions.allowedMocks,
@@ -413,6 +453,7 @@ export async function pushPermissionsToBackend(
   email: string,
   permissions: {
     isAdmin?: boolean;
+    role?: UserRole;
     allowedSources: SourceTag[];
     allowedEntities: string[];
     allowedMocks: string[];
@@ -545,14 +586,16 @@ export function extractEntityFromPath(path: string): string | null {
 export function extractMockFromPath(path: string): string | null {
   const upperPath = path.toUpperCase();
 
-  // Match patterns like "MOCK 8", "MOCK8", "MOCK8PRE", "MOCK 8 PRE"
-  const mockPattern = /MOCK\s*(\d+)\s*(PRE)?/gi;
+  // Match patterns like "MOCK 8", "MOCK8", "MOCK8PRE", "MOCK 8 PRE", and the
+  // Phase-2 HCM cycles "MOCK03HCM" / "MOCK05HCMPRE"
+  const mockPattern = /MOCK\s*(\d+)\s*(HCM)?\s*(PRE)?/gi;
   const match = mockPattern.exec(upperPath);
 
   if (match) {
     const mockNum = match[1];
-    const isPre = match[2] ? 'PRE' : '';
-    return `MOCK${mockNum}${isPre}`;
+    const isHcm = match[2] ? 'HCM' : '';
+    const isPre = match[3] ? 'PRE' : '';
+    return `MOCK${mockNum}${isHcm}${isPre}`;
   }
 
   return null;

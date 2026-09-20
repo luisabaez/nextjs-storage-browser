@@ -8,8 +8,11 @@
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Chip, LabelledInput, pillToneForStatus, BUScopeNotice } from './ValidationGroupsTab';
+import { fetchAppConfig } from '../../lib/symphony';
 
 const LAMBDA_URL = 'https://5ahxjcxhrcopng5hjgc2n6utxq0rwcmm.lambda-url.us-east-1.on.aws/';
+// App default, used when the configured Mock Cycle cannot be read.
+const DEFAULT_MOCK = 'MOCK03HCM';
 
 interface Run {
   Validation_Run_ID: string;
@@ -37,7 +40,7 @@ const STATUS_OPTIONS = [
 export function ValidationRunsTab({ userBUFilter }: {
   userBUFilter: string[] | null;
 }) {
-  const [mock, setMock] = useState('MOCK12');
+  const [mock, setMock] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
   const [vgFilter, setVgFilter] = useState('');
   const [runs, setRuns] = useState<Run[]>([]);
@@ -45,7 +48,16 @@ export function ValidationRunsTab({ userBUFilter }: {
   const [error, setError] = useState('');
   const [selected, setSelected] = useState<Run | null>(null);
 
+  // Nothing is fetched until the configured Mock Cycle is known, so a slow first
+  // response can never replace the configured cycle's data.
+  useEffect(() => {
+    fetchAppConfig().then(cfg => {
+      setMock(prev => prev || (cfg.ok && cfg.current_mock ? cfg.current_mock : DEFAULT_MOCK));
+    });
+  }, []);
+
   const load = useCallback(async () => {
+    if (!mock) return;
     setLoading(true); setError('');
     try {
       const qs = new URLSearchParams({ action: 'validation_runs', mock });

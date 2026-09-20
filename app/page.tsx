@@ -8,7 +8,7 @@ import './components/enhanced-file-browser.css';
 import config from '../amplify_outputs.json';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
-import { isAdminUser, syncCurrentUserPermissions } from './admin/types';
+import { isAdminUser, getUserRole, UserRole, syncCurrentUserPermissions } from './admin/types';
 
 // Components
 import { CustomFileBrowser, FileItem } from './components/CustomFileBrowser';
@@ -134,6 +134,7 @@ const defaultQuickLinks: QuickLink[] = [
 function FileBrowser() {
   const [userEmail, setUserEmail] = useState<string>('');
   const [isAdmin, setIsAdmin] = useState(false);
+  const [userRole, setUserRole] = useState<UserRole>('');
   const [currentPath, setCurrentPath] = useState<string>('');
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -286,6 +287,7 @@ function FileBrowser() {
         // access reflects what an admin set — on any device.
         await syncCurrentUserPermissions(email);
         setIsAdmin(isAdminUser(email));
+        setUserRole(getUserRole(email));
         setRefreshKey(prev => prev + 1);
       } catch (error) {
         console.error('Error fetching user attributes', error);
@@ -1075,18 +1077,44 @@ function FileBrowser() {
         </div>
 
         <div className="header-right">
-          <Link href="/ap-invoices" className="admin-link" title="File Processing Dashboard">
-            <span className="admin-icon">📋</span>
-            <span className="admin-text">File Processing</span>
-          </Link>
-          <Link href="/validations" className="admin-link" title="Validations & Sampling">
-            <span className="admin-icon">✅</span>
-            <span className="admin-text">Validations</span>
-          </Link>
-          <Link href="/data-validation" className="admin-link" title="Data Validation results">
-            <span className="admin-icon">🔎</span>
-            <span className="admin-text">Data Validation</span>
-          </Link>
+          {/* Agency users and certification reviewers only certify / review */}
+          {userRole !== 'agency_user' && userRole !== 'certification_reviewer' && (
+            <>
+              <Link href="/ap-invoices" className="admin-link" title="File Processing Dashboard">
+                <span className="admin-icon">📋</span>
+                <span className="admin-text">File Processing</span>
+              </Link>
+              <Link href="/validations" className="admin-link" title="Validations & Sampling">
+                <span className="admin-icon">✅</span>
+                <span className="admin-text">Validations</span>
+              </Link>
+            </>
+          )}
+          {/* Record-level validation results: super users only */}
+          {userRole === 'super_user' && (
+            <Link href="/data-validation" className="admin-link" title="Data Validation results">
+              <span className="admin-icon">🔎</span>
+              <span className="admin-text">Data Validation</span>
+            </Link>
+          )}
+          {userRole && (
+            <>
+              <Link href="/data-cleanse-log" className="admin-link" title="Data Cleanse Log">
+                <span className="admin-icon">🧹</span>
+                <span className="admin-text">Cleanse Log</span>
+              </Link>
+              <Link href="/certifications" className="admin-link" title="Certification Status and Status Report">
+                <span className="admin-icon">📜</span>
+                <span className="admin-text">Certifications</span>
+              </Link>
+            </>
+          )}
+          {userRole === 'super_user' && (
+            <Link href="/config" className="admin-link" title="Configuration">
+              <span className="admin-icon">⚙️</span>
+              <span className="admin-text">Configuration</span>
+            </Link>
+          )}
           {isAdmin && (
             <Link href="/admin" className="admin-link" title="Admin Dashboard">
               <span className="admin-icon">🛡️</span>

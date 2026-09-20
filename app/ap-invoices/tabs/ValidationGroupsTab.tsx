@@ -15,8 +15,11 @@
  * ?action=vg_dependencies_refresh (Phase 4).
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { fetchAppConfig } from '../../lib/symphony';
 
 const LAMBDA_URL = 'https://5ahxjcxhrcopng5hjgc2n6utxq0rwcmm.lambda-url.us-east-1.on.aws/';
+// App default, used when the configured Mock Cycle cannot be read.
+const DEFAULT_MOCK = 'MOCK03HCM';
 
 interface VG {
   Validation_Group_ID: string;
@@ -44,7 +47,7 @@ export function ValidationGroupsTab({ userEmail, userBUFilter }: {
   userEmail: string;
   userBUFilter: string[] | null;
 }) {
-  const [mock, setMock] = useState('MOCK12');
+  const [mock, setMock] = useState('');
   const [groups, setGroups] = useState<VG[]>([]);
   const [moduleFilter, setModuleFilter] = useState('');
   const [search, setSearch] = useState('');
@@ -53,7 +56,16 @@ export function ValidationGroupsTab({ userEmail, userBUFilter }: {
   const [refreshingDeps, setRefreshingDeps] = useState(false);
   const [selectedVG, setSelectedVG] = useState<VG | null>(null);
 
+  // Nothing is fetched until the configured Mock Cycle is known, so a slow first
+  // response can never replace the configured cycle's data.
+  useEffect(() => {
+    fetchAppConfig().then(cfg => {
+      setMock(prev => prev || (cfg.ok && cfg.current_mock ? cfg.current_mock : DEFAULT_MOCK));
+    });
+  }, []);
+
   const load = useCallback(async () => {
+    if (!mock) return;
     setLoading(true); setError('');
     try {
       const resp = await fetch(`${LAMBDA_URL}?action=validation_groups&mock=${encodeURIComponent(mock)}`);

@@ -342,6 +342,29 @@ def object_definition(conn_str, name):
                 "references": [{"name": r, "type": cat.type_of(r)} for r in refs]}
 
 
+def list_objects(conn_str, like, db=None):
+    """Names and types of objects matching a LIKE pattern (read-only metadata),
+    plus what the connected login may do to each table or view."""
+    db = db or SOURCE_DB
+    if not re.match(r"^[A-Za-z0-9_]+$", db) or not re.match(r"^[A-Za-z0-9_%\[\]\-]+$", like or ""):
+        return {"ok": False, "error": "invalid pattern or database"}
+    with pyodbc.connect(conn_str) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"SELECT TOP 400 name, type FROM [{db}].sys.objects "
+            f"WHERE type IN ('U','V','P','FN','IF','TF') AND name LIKE ? ORDER BY name", (like,))
+        rows = [(n, t.strip()) for n, t in cur.fetchall()]
+        out = []
+        for name, kind in rows:
+            entry = {"name": name, "type": kind}
+            if kind in ("U", "V") and len(rows) <= 40:
+                for perm in ("SELECT", "INSERT", "UPDATE", "DELETE"):
+                    cur.execute("SELECT HAS_PERMS_BY_NAME(?, 'OBJECT', ?)", (f"{db}.dbo.{name}", perm))
+                    entry[perm.lower()] = cur.fetchone()[0]
+            out.append(entry)
+        return {"ok": True, "db": db, "objects": out}
+
+
 def plan_gate_check(conn_str, mock, pairs):
     """What the file-expected gate will decide for (entity display, entity
     prefix, source) pairs, read from the target database's plan the same way

@@ -150,8 +150,8 @@ _TARGET_SET = set(TARGET_TABLES)
 # ── Config helpers ─────────────────────────────────────────────────────────────
 
 def _short_name(table):
-    """Friendly label: strip the _MOCKnn_VW[_TBL] suffix."""
-    return re.sub(r'_MOCK\d+_VW(_TBL)?$', '', table, flags=re.IGNORECASE)
+    """Friendly label: strip the _MOCKnn[HCM][PRE[n]]_VW[_TBL] suffix."""
+    return re.sub(r'_MOCK\d{1,2}(?:HCM)?(?:PRE\d*)?_VW(_TBL)?$', '', table, flags=re.IGNORECASE)
 
 
 def _children_of(target):

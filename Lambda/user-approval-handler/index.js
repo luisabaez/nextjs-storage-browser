@@ -140,9 +140,11 @@ exports.handler = async (event) => {
       if (!targetEmail) return jsonResponse(400, { ok: false, error: "email required" });
       const p = payload.permissions || {};
       const asArray = (v) => (Array.isArray(v) ? v : []);
+      const asRole = (v) => (["super_user", "agency_user", "certification_reviewer"].includes(v) ? v : "");
       const item = {
         email: targetEmail,
         isAdmin: !!p.isAdmin,
+        role: asRole(p.role),
         allowedSources: asArray(p.allowedSources),
         allowedEntities: asArray(p.allowedEntities),
         allowedMocks: asArray(p.allowedMocks),

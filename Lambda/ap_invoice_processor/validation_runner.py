@@ -33,6 +33,7 @@ from datetime import datetime
 
 import pyodbc
 
+import api_util
 import validation_seed
 import validation_report
 
@@ -162,7 +163,7 @@ def catalog_views(cur, program, mock, db=None):
     """Views of a catalog-driven program (HCM / PAY / Benefits): the catalog's
     Validation_ViewPrefix + mock, Phase 1 rules for MOCKnn and Phase 2 for
     MOCKnnHCM — the same selection SP_INSERT_VALIDATION_ERRORS_V3 makes."""
-    phase_col = "Phase2" if re.match(r"^MOCK\d\dHCM$", mock, re.I) else "Phase1"
+    phase_col = "Phase2" if api_util.is_hcm_mock(mock) else "Phase1"
     cur.execute(
         f"SELECT DISTINCT Validation_ViewPrefix FROM [{db or DB}].dbo.SETUP_ERROR_MESSAGES_SOURCE "
         f"WHERE Validation_Program = ? AND {phase_col} = 'Yes' AND Validation_ViewPrefix IS NOT NULL "
@@ -210,13 +211,13 @@ def list_programs(conn_str, mock="MOCK14"):
     with pyodbc.connect(conn_str) as conn:
         cur = conn.cursor()
         cur.execute(
-            f"SELECT Validation_Program, COUNT(*) FROM [{DB}].dbo.SETUP_ERROR_MESSAGES_SOURCE "
+            f"SELECT Validation_Program, COUNT(*), MAX(Pillar) FROM [{DB}].dbo.SETUP_ERROR_MESSAGES_SOURCE "
             f"WHERE Validation_Program IS NOT NULL GROUP BY Validation_Program ORDER BY 1"
         )
         programs = []
-        for prog, n in cur.fetchall():
+        for prog, n, pillar in cur.fetchall():
             spec = PROGRAMS.get(prog)
-            entry = {"program": prog, "rules": n, "runnable": spec is not None,
+            entry = {"program": prog, "rules": n, "pillar": (pillar or "").strip(), "runnable": spec is not None,
                      "mode": spec["mode"] if spec else None,
                      "runs_via": (spec.get("sp") if spec and spec["mode"] == "sp" else None),
                      "sources": _sources_for(cur, prog, spec, mock) if spec else []}
@@ -232,7 +233,9 @@ def run_program(conn_str, program, source, mock="MOCK14", actor="", dry_run=Fals
     mode, counts their rows) without writing anything. remaining_ms() (Lambda
     context) lets a long run stop cleanly and report the views it skipped.
     With a bucket, a real run also writes the client-facing Excel report
-    (validation_report) and returns its key.
+    (validation_report) and returns its key: the four-sheet HCM workbook for a
+    procedure-run program of the HCM pillar, the Data + Summary workbook for
+    everything else.
     """
     spec = PROGRAMS.get(program)
     if not spec:
@@ -255,19 +258,28 @@ def run_program(conn_str, program, source, mock="MOCK14", actor="", dry_run=Fals
         cur = conn.cursor()
         if spec["mode"] == "sp":
             _run_via_sp(cur, conn, spec, program, source, mock, actor, dry_run, result)
-            if result["ok"] and not dry_run:
-                records = _detail_records(cur, spec["label"] or program, source, mock)
         else:
             _run_views(cur, conn, spec, program, source, mock, actor, dry_run, remaining_ms, result, records)
-    if bucket and result["ok"] and not dry_run:
-        try:
-            key = validation_report.report_key(mock, program, source)
-            validation_report.write_report(bucket, key, validation_report.build_workbook(records))
-            result["report_key"] = key
-            result["report_name"] = key.rsplit("/", 1)[-1]
-            result["report_rows"] = len(records)
-        except Exception as e:
-            result["warnings"].append(f"Excel report not written: {str(e)[:200]}")
+        if bucket and result["ok"] and not dry_run:
+            try:
+                hcm = spec["mode"] == "sp" and _is_hcm_program(cur, program)
+                if hcm:
+                    records = _hcm_detail_records(cur, spec["label"] or program, source, mock)
+                elif spec["mode"] == "sp":
+                    records = _detail_records(cur, spec["label"] or program, source, mock)
+                legend = validation_report.legend_rows(cur, result["codes"], "Validation_Program = ?", (program,))
+                if hcm:
+                    key = validation_report.hcm_report_key(mock, program, source)
+                    content = validation_report.build_hcm_workbook(records, legend, mock)
+                else:
+                    key = validation_report.report_key(mock, program, source)
+                    content = validation_report.build_workbook(records, legend)
+                validation_report.write_report(bucket, key, content)
+                result["report_key"] = key
+                result["report_name"] = key.rsplit("/", 1)[-1]
+                result["report_rows"] = len(records)
+            except Exception as e:
+                result["warnings"].append(f"Excel report not written: {str(e)[:200]}")
     result["elapsed_s"] = round((datetime.now() - started).total_seconds(), 1)
     return result
 
@@ -281,6 +293,26 @@ def _detail_records(cur, log_program, source, mock):
         (mock, source, log_program),
     )
     return validation_report.records_from_detail_rows(cur.fetchall())
+
+
+def _is_hcm_program(cur, program):
+    """The catalog files the program's rules under the HCM pillar."""
+    cur.execute(
+        f"SELECT COUNT(*) FROM [{DB}].dbo.SETUP_ERROR_MESSAGES_SOURCE WHERE Validation_Program = ? AND Pillar = 'HCM'",
+        (program,),
+    )
+    return cur.fetchone()[0] > 0
+
+
+def _hcm_detail_records(cur, log_program, source, mock):
+    """The program's stored rows in the HCM workbook's column order."""
+    cur.execute(
+        f"SELECT {', '.join(f'[{c}]' for c in validation_report.HCM_DETAIL_COLS)} "
+        f"FROM [{DB}].dbo.LOG_DATA_CLEANSE_DETAIL "
+        f"WHERE MOCK = ? AND [Source] = ? AND Validation_Program = ? ORDER BY Validation_Code, ERROR_MSG",
+        (mock, source, log_program),
+    )
+    return cur.fetchall()
 
 
 def _new_run(cur, conn, program, source, mock, actor, log_program):

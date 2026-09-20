@@ -13,8 +13,11 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Chip, LabelledInput, pillToneForStatus, BUScopeNotice } from './ValidationGroupsTab';
+import { fetchAppConfig } from '../../lib/symphony';
 
 const LAMBDA_URL = 'https://5ahxjcxhrcopng5hjgc2n6utxq0rwcmm.lambda-url.us-east-1.on.aws/';
+// App default, used when the configured Mock Cycle cannot be read.
+const DEFAULT_MOCK = 'MOCK03HCM';
 
 interface VBLMember {
   Validation_Group_ID: string;
@@ -48,7 +51,7 @@ interface VBL {
 export function VBLGroupsTab({ userBUFilter }: {
   userBUFilter: string[] | null;
 }) {
-  const [mock, setMock] = useState('MOCK12');
+  const [mock, setMock] = useState('');
   const [groups, setGroups] = useState<VBL[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -59,7 +62,16 @@ export function VBLGroupsTab({ userBUFilter }: {
   // Phase 6.8 — navigation to full detail page
   const router = useRouter();
 
+  // Nothing is fetched until the configured Mock Cycle is known, so a slow first
+  // response can never replace the configured cycle's data.
+  useEffect(() => {
+    fetchAppConfig().then(cfg => {
+      setMock(prev => prev || (cfg.ok && cfg.current_mock ? cfg.current_mock : DEFAULT_MOCK));
+    });
+  }, []);
+
   const load = useCallback(async () => {
+    if (!mock) return;
     setLoading(true); setError('');
     try {
       const resp = await fetch(`${LAMBDA_URL}?action=vbl_groups&mock=${encodeURIComponent(mock)}`);

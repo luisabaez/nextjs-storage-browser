@@ -1,0 +1,82 @@
+/* Shared styles for the Data Symphony pages (configuration, data cleanse log,
+   certifications). Buttons (.btn, .btn-primary, .btn-secondary) are global. */
+.sy-page { max-width: 1400px; margin: 0 auto; padding: 24px; }
+.sy-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 20px; }
+.sy-header h1 { margin: 0 0 4px; display: flex; align-items: center; gap: 10px; }
+.sy-mock { font-size: 12px; font-weight: 600; background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; border-radius: 999px; padding: 2px 10px; }
+.sy-test { background: #fef3c7; color: #92400e; border-color: #fde68a; }
+.sy-sub { margin: 0; color: #4b5563; font-size: 13px; max-width: 760px; }
+.sy-links { display: flex; gap: 8px; flex-shrink: 0; }
+
+.sy-controls { display: flex; gap: 16px; align-items: flex-end; flex-wrap: wrap; background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px 20px; margin-bottom: 16px; }
+.sy-controls label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; font-weight: 600; min-width: 220px; }
+.sy-controls select { padding: 8px 10px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 14px; background: #fff; }
+.sy-run-btns { display: flex; gap: 8px; margin-left: auto; }
+
+.sy-note { background: #fffbeb; border: 1px solid #fde68a; color: #92400e; padding: 10px 12px; border-radius: 6px; margin-bottom: 12px; font-size: 13px; }
+.sy-error { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; padding: 10px 12px; border-radius: 6px; margin-bottom: 12px; }
+
+.sy-card { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px 20px; margin-bottom: 16px; }
+.sy-card h2 { margin: 0 0 8px; font-size: 17px; }
+.sy-card-ok { background: #f0fdf4; border-color: #86efac; }
+.sy-card-err { background: #fef2f2; border-color: #fecaca; }
+.sy-card-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; }
+.sy-card-tools { display: flex; align-items: center; gap: 12px; font-size: 13px; }
+.sy-total { color: #4b5563; }
+.sy-check { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.sy-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+.sy-chip { font-family: ui-monospace, monospace; font-size: 12px; background: #f3f4f6; border: 1px solid #e5e7eb; border-radius: 999px; padding: 2px 8px; }
+.sy-warnings { margin: 8px 0 0 18px; color: #92400e; font-size: 13px; }
+
+.sy-scroll { overflow-x: auto; }
+.sy-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.sy-table th { text-align: left; padding: 8px 10px; background: #f9fafb; border-bottom: 1px solid #e5e7eb; white-space: nowrap; }
+.sy-table td { padding: 8px 10px; border-bottom: 1px solid #f3f4f6; vertical-align: top; }
+.sy-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+.sy-table .mono { font-family: ui-monospace, monospace; white-space: nowrap; }
+.sy-table tr.sy-clickable { cursor: pointer; }
+.sy-table tr.sy-clickable:hover { background: #f9fafb; }
+.sy-table tr.sy-selected { background: #eff6ff; cursor: pointer; }
+.sy-detail td { white-space: nowrap; max-width: 420px; overflow: hidden; text-overflow: ellipsis; }
+.sy-muted { color: #6b7280; }
+.sy-link { background: none; border: none; padding: 0; color: #1d4ed8; text-decoration: underline; cursor: pointer; font: inherit; }
+.small { font-size: 12px; }
+
+.sy-sev { font-size: 12px; font-weight: 600; border-radius: 999px; padding: 2px 8px; background: #f3f4f6; color: #374151; }
+.sy-sev-high, .sy-sev-critical { background: #fee2e2; color: #991b1b; }
+.sy-sev-medium { background: #fef3c7; color: #92400e; }
+.sy-sev-low { background: #dcfce7; color: #166534; }
+
+/* header pills */
+.sy-pill { font-size: 12px; font-weight: 600; border-radius: 999px; padding: 2px 10px; background: #f3f4f6; color: #374151; border: 1px solid #e5e7eb; }
+.sy-pill-role { background: #ecfdf5; color: #065f46; border-color: #a7f3d0; }
+
+/* tabs */
+.sy-tabs { display: flex; gap: 4px; border-bottom: 1px solid #e5e7eb; margin-bottom: 16px; flex-wrap: wrap; }
+.sy-tab { background: none; border: none; border-bottom: 2px solid transparent; padding: 10px 16px; font-size: 14px; font-weight: 600; color: #6b7280; cursor: pointer; }
+.sy-tab:hover { color: #111827; }
+.sy-tab.active { color: #1d4ed8; border-bottom-color: #1d4ed8; }
+
+/* forms */
+.sy-field { display: flex; flex-direction: column; gap: 4px; font-size: 13px; font-weight: 600; }
+.sy-field input, .sy-field select, .sy-field textarea, .sy-input { padding: 8px 10px; border: 1px solid #d1d5db; border-radius: 6px; font: inherit; font-weight: 400; background: #fff; }
+.sy-field textarea, textarea.sy-input { min-height: 64px; resize: vertical; }
+.sy-readonly { background: #f9fafb; color: #6b7280; }
+.sy-form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px 16px; }
+.sy-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; flex-wrap: wrap; }
+
+/* stat tiles */
+.sy-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.sy-stat { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 14px 16px; }
+.sy-stat-num { font-size: 26px; font-weight: 700; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.sy-stat-label { font-size: 12px; color: #6b7280; margin-top: 2px; }
+
+/* status badges + progress */
+.sy-badge { font-size: 12px; font-weight: 600; border-radius: 999px; padding: 2px 8px; background: #f3f4f6; color: #374151; white-space: nowrap; }
+.sy-badge-ok { background: #dcfce7; color: #166534; }
+.sy-badge-warn { background: #fef3c7; color: #92400e; }
+.sy-badge-bad { background: #fee2e2; color: #991b1b; }
+.sy-progress { height: 8px; border-radius: 999px; background: #e5e7eb; overflow: hidden; min-width: 90px; }
+.sy-progress > span { display: block; height: 100%; background: #16a34a; }
+.sy-success { background: #f0fdf4; border: 1px solid #86efac; color: #166534; padding: 10px 12px; border-radius: 6px; margin-bottom: 12px; font-size: 13px; }
+.sy-denied { max-width: 560px; margin: 80px auto; text-align: center; background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 32px; }

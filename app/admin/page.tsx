@@ -8,7 +8,7 @@ import '@aws-amplify/ui-react/styles.css';
 import '../components/enhanced-file-browser.css';
 import './admin.css';
 import config from '../../amplify_outputs.json';
-import { isAdminUser, CognitoUser, ApprovalAction, ADMIN_EMAILS, syncCurrentUserPermissions, syncAllPermissions } from './types';
+import { isAdminUser, getUserRole, USER_ROLE_LABELS, CognitoUser, ApprovalAction, ADMIN_EMAILS, syncCurrentUserPermissions, syncAllPermissions } from './types';
 import Link from 'next/link';
 
 Amplify.configure(config);
@@ -332,6 +332,10 @@ function AdminDashboard() {
           <span className="tab-icon">🚢</span>
           VBL + Sterling
         </Link>
+        <Link href="/config" className="admin-nav-tab" style={{ textDecoration: 'none' }}>
+          <span className="tab-icon">⚙️</span>
+          Configuration
+        </Link>
       </nav>
 
       {/* Main Content */}
@@ -603,6 +607,7 @@ function AdminDashboard() {
                     filteredUsers.map(user => {
                       const isApproved = approvedEmails.includes(user.email.toLowerCase());
                       const isUserAdmin = isAdminUser(user.email);
+                      const userRole = getUserRole(user.email);
                       return (
                         <tr key={user.email}>
                           <td>
@@ -615,6 +620,9 @@ function AdminDashboard() {
                               </Link>
                               {isUserAdmin && (
                                 <span className="admin-badge">Admin</span>
+                              )}
+                              {userRole && (
+                                <span className="admin-badge">{USER_ROLE_LABELS[userRole]}</span>
                               )}
                             </div>
                           </td>

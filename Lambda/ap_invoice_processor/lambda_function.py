@@ -44,6 +44,27 @@ import workbook_loaders
 import validation_runner
 import validation_seed
 import validation_report
+# Feature modules: each exposes ACTIONS and handle(action, event, bucket, headers, conn_str)
+import app_settings
+import rules_admin
+import cleanse_log
+import certifications
+
+import api_util
+import authz
+
+FEATURE_MODULES = (app_settings, rules_admin, cleanse_log, certifications, validation_report)
+
+# Actions only a super user may call: action -> (where the caller's e-mail
+# travels, its field name, what is being attempted). The pages hide these
+# controls from other roles; this is the check that actually holds.
+SUPER_USER_ACTIONS = {
+    "val_run": ("body", "actor", "running validations"),
+    "val_seed": ("body", "actor", "preparing the test database"),
+    "val_detail": ("query", "email", "viewing validation detail rows"),
+    "val_objects": ("query", "email", "listing database objects"),
+    "val_object_def": ("query", "email", "reading database object definitions"),
+}
 
 # Legacy AP Invoice imports (backward compat)
 from column_mappings import get_mapping as legacy_get_mapping
@@ -1202,6 +1223,19 @@ def lambda_handler(event, context):
     if event.get("requestContext", {}).get("http", {}).get("method") == "OPTIONS":
         return {"statusCode": 200, "headers": headers, "body": ""}
 
+    if action in SUPER_USER_ACTIONS:
+        where, field, what = SUPER_USER_ACTIONS[action]
+        try:
+            carrier = api_util.body(event) if where == "body" else api_util.params(event)
+            authz.require((carrier.get(field) or "").strip(), what=what)
+        except api_util.ApiError as denied:
+            return api_util.fail(headers, str(denied), denied.status)
+
+    # ── Feature modules (configuration, rules, data cleanse log, certifications, reports) ──
+    for feature in FEATURE_MODULES:
+        if action in getattr(feature, "ACTIONS", ()):
+            return feature.handle(action, event, bucket, headers, get_connection_string())
+
     # ── ENTITIES ACTION ──
     if action == "entities":
         try:
@@ -1974,6 +2008,18 @@ def lambda_handler(event, context):
             return {"statusCode": 500, "headers": headers,
                     "body": json.dumps({"ok": False, "error": str(e)})}
 
+    if action == "val_objects":
+        # ?action=val_objects&like=<pattern>[&db=] — object names/types + table permissions (read-only)
+        try:
+            p = event.get("queryStringParameters") or {}
+            res = validation_seed.list_objects(get_connection_string(), p.get("like") or "", p.get("db") or None)
+            return {"statusCode": 200 if res.get("ok") else 400, "headers": headers,
+                    "body": json.dumps(res, default=str)}
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
     if action == "val_object_def":
         # ?action=val_object_def&name=<view|procedure|function> — definition text from the
         # source database (read-only; for checking what a validation object depends on)
@@ -2044,8 +2090,11 @@ def lambda_handler(event, context):
         try:
             p = event.get("queryStringParameters") or {}
             mock = validation_runner._check_ident((p.get("mock") or "MOCK14").upper(), "mock")
-            reports = validation_report.list_reports(bucket, mock, p.get("program") or None,
-                                                     p.get("source") or None)
+            program = p.get("program") or None
+            spec = validation_runner.PROGRAMS.get(program or "", {})
+            reports = validation_report.list_reports(
+                bucket, mock, program, p.get("source") or None,
+                include_agency=spec.get("sp") == validation_runner.PREFIX_SP)
             return {"statusCode": 200, "headers": headers,
                     "body": json.dumps({"ok": True, "prefix": validation_report.REPORT_PREFIX,
                                         "reports": reports}, default=str)}
