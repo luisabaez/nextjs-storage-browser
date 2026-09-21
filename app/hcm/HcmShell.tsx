@@ -75,7 +75,9 @@ export function partyLabel(p: { source: string; agency: string; bu?: string; par
   if (!agency) return `${source} · Source level`;
   const given = (p.party || '').trim();
   if (given.includes(' · ')) return given;
-  let name = (given && given.toUpperCase() !== source ? given : agency).replace(/^(\d{3,5})\s*[-–]\s*/, '$1 ');
+  // The server names a party by its agency code; the BU carries the agency's name.
+  const named = [given, (p.bu || '').trim()].find((v) => v.toUpperCase() !== source && /[A-Za-z]/.test(v));
+  let name = (named || given || agency).replace(/^(\d{3,5})\s*[-–]\s*/, '$1 ');
   if (!/^\d/.test(name)) {
     const code = /^\d{3}/.test(agency) ? agency.slice(0, 3) : (p.bu || '').trim().slice(0, 3);
     if (code) name = `${code} ${name}`;

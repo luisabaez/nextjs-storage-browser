@@ -28,6 +28,8 @@ type Filter = 'pending' | 'all';
 
 const COLUMNS = 7;
 const clean = (v: string | null | undefined) => (v ?? '').trim();
+// Many rules carry the same wording in both columns; show it once.
+const spanish = (v: Validation) => (clean(v.message_spa).toLowerCase() !== clean(v.message).toLowerCase() ? clean(v.message_spa) : '');
 const day = (v: string | null | undefined) => clean(v).slice(0, 10);
 const commitmentOf = (v: Validation): Commitment => ({ reviewed: !!v.reviewed, targetDate: day(v.target_date), notes: v.notes ?? '' });
 
@@ -200,7 +202,7 @@ function Validations() {
         <section aria-label="Validation rule">
           <h3>About this validation</h3>
           <dl className="hval-facts">
-            {clean(v.message_spa) && <div className="hval-fact-wide"><dt>Mensaje</dt><dd lang="es">{clean(v.message_spa)}</dd></div>}
+            {spanish(v) && <div className="hval-fact-wide"><dt>Mensaje</dt><dd lang="es">{spanish(v)}</dd></div>}
             <div className="hval-fact-wide"><dt>Message</dt><dd>{clean(v.message) || '—'}</dd></div>
             <div><dt>Entity</dt><dd>{clean(v.entity) || '—'}</dd></div>
             <div><dt>Type</dt><dd>{clean(v.type) || '—'}</dd></div>
@@ -329,8 +331,8 @@ function Validations() {
                       </button>
                     </td>
                     <td data-label="Message" className="hval-message">
-                      {clean(v.message_spa) && <span lang="es">{clean(v.message_spa)}</span>}
-                      <span className={clean(v.message_spa) ? 'hval-english' : undefined}>{clean(v.message) || (clean(v.message_spa) ? '' : '—')}</span>
+                      {spanish(v) && <span lang="es">{spanish(v)}</span>}
+                      <span className={spanish(v) ? 'hval-english' : undefined}>{clean(v.message) || (spanish(v) ? '' : '—')}</span>
                     </td>
                     <td data-label="Entity">{clean(v.entity) || '—'}</td>
                     <td data-label="Type">{clean(v.type) || '—'}</td>

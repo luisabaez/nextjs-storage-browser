@@ -40,6 +40,7 @@ everything, including revoking.
 import io
 import json
 import re
+import time
 import uuid
 from datetime import datetime
 
@@ -459,7 +460,20 @@ def _check_open(cur, mock, source, agency):
                        "sign-off before anything can change.", 409)
 
 
+# The aggregate over the log takes seconds and every portal page asks for it,
+# while the log only changes when validations are run: keep it briefly.
+_COUNTS_TTL = 120
+_counts_cache = {}
+
+
 def _log_counts(cur, db, mock, flags, source):
+    key = (db, mock, flags, _s(source).upper())
+    hit = _counts_cache.get(key)
+    if hit and time.time() - hit[0] < _COUNTS_TTL:
+        return hit[1]
+    whole = _counts_cache.get((db, mock, flags, ""))
+    if source and whole and time.time() - whole[0] < _COUNTS_TTL:
+        return [r for r in whole[1] if _s(r[0]).upper() == key[3]]
     where, args = "d.[MOCK] = ?", [mock]
     if source:
         where += " AND d.[Source] = ?"
@@ -470,7 +484,9 @@ def _log_counts(cur, db, mock, flags, source):
         f"AND EXISTS (SELECT 1 FROM [{db}].dbo.[{CATALOG_TABLE}] e "
         f"WHERE e.[VALIDATION_CODE] = d.[Validation_Code] AND ({flags})) "
         "GROUP BY d.[Source], LEFT(LTRIM(ISNULL(d.[BU], '')), 3), d.[Validation_Code]", tuple(args))
-    return cur.fetchall()
+    rows = [tuple(r) for r in cur.fetchall()]
+    _counts_cache[key] = (time.time(), rows)
+    return rows
 
 
 def _reported(conn, cur, mock, warnings, source=None):
