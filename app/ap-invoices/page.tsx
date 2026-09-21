@@ -8,6 +8,7 @@ import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import Link from 'next/link';
 import { FilePreviewModal } from '../components/FilePreviewModal';
 import { getUserPermissions, isAdminUser } from '../admin/types';
+import { useSymphonySession, usePortalGuard } from '../lib/symphony';
 import outputs from '../../amplify_outputs.json';
 import './ap-invoices.css';
 // Phase 6 dashboard tabs
@@ -2950,4 +2951,13 @@ function Phase6Placeholder({ title, description, extraNote }: {
   );
 }
 
-export default withAuthenticator(DataFileDashboard);
+// Users who work only in the HCM portal are sent there. Known administrators see
+// the page at once; everyone else waits until the session says where they belong.
+function GuardedDataFileDashboard() {
+  const session = useSymphonySession();
+  const toPortal = usePortalGuard(session);
+  if (toPortal || (!session.ready && !isAdminUser(session.email))) return null;
+  return <DataFileDashboard />;
+}
+
+export default withAuthenticator(GuardedDataFileDashboard);

@@ -1,0 +1,72 @@
+/* /hcm/files: one source and agency's folders (module > file type > entity >
+   files) and, for the validation team, the list of sources and agencies next
+   to them. Cards, badges and buttons come from ../hcm.css and ../../lib/symphony.css. */
+.hf-toolbar { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 10px 20px; margin-bottom: 20px; }
+.hf-search { flex: 1 1 280px; max-width: 440px; }
+.hf-search input { padding: 10px 12px; font-size: 15px; }
+.hf-count { margin: 0; color: #475569; font-size: 14px; }
+.hf-none { margin: 0; color: #64748b; font-size: 14px; }
+.hcm-app .btn.hf-small { padding: 7px 14px; font-size: 13px; }
+
+/* module: a top-level section */
+.hf-module { margin-bottom: 28px; }
+.hf-module-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px; margin-bottom: 10px; }
+.hf-module-title { margin: 0; font-size: 20px; }
+.hf-module-meta { color: #64748b; font-size: 14px; }
+
+/* file type: a folder that opens and closes */
+.hf-type { background: #fff; border: 1px solid #dbe2ec; border-radius: 12px; margin-bottom: 10px; }
+.hf-type-heading { margin: 0; font-size: inherit; }
+.hf-type-toggle { width: 100%; display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; padding: 14px 18px; background: none; border: none; border-radius: 11px; font: inherit; color: inherit; text-align: left; cursor: pointer; }
+.hf-type-toggle:hover { background: #f8fafc; }
+.hf-type-toggle[aria-expanded="true"] { border-radius: 11px 11px 0 0; }
+.hf-chevron { display: flex; color: #64748b; transition: transform 150ms ease; }
+.hf-chevron svg { width: 18px; height: 18px; }
+.hf-type-toggle[aria-expanded="true"] .hf-chevron { transform: rotate(90deg); }
+.hf-type-icon { width: 36px; height: 36px; border-radius: 8px; background: #eff6ff; color: #1d4ed8; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.hf-type-icon svg { width: 20px; height: 20px; }
+.hf-type-name { font-size: 16px; font-weight: 700; }
+.hf-type-meta { margin-left: auto; display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; color: #64748b; font-size: 14px; }
+.hf-type-body { border-top: 1px solid #eef2f7; padding: 4px 18px 8px 48px; }
+
+/* entity: a heading, its certification state and its files */
+.hf-entity { padding: 12px 0; border-bottom: 1px solid #eef2f7; scroll-margin-top: 24px; }
+.hf-entity:last-child { border-bottom: none; }
+.hf-entity-linked { margin: 8px 0 8px -16px; padding: 12px; border: 1px solid #bfdbfe; border-left: 4px solid #2563eb; border-radius: 8px; background: #f8fbff; }
+.hf-entity-linked:last-child { border-bottom: 1px solid #bfdbfe; }
+.hf-entity-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin-bottom: 4px; }
+.hf-entity-name { margin: 0; font-size: 15px; font-weight: 700; }
+
+.hf-files { list-style: none; margin: 0; padding: 0; }
+.hf-file { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px; padding: 8px 0; }
+.hf-file + .hf-file { border-top: 1px solid #f1f5f9; }
+.hf-file-icon { display: flex; color: #64748b; flex-shrink: 0; }
+.hf-file-icon svg { width: 20px; height: 20px; }
+.hf-file-main { flex: 1 1 280px; min-width: 0; }
+.hf-file-name { font-weight: 600; word-break: break-word; overflow-wrap: anywhere; }
+.hf-file-meta { font-size: 13px; color: #64748b; }
+.hf-file-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+
+/* validation team: sources and agencies on the left, the chosen one's folders on the right */
+.hf-staff-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px 16px; margin-bottom: 16px; }
+.hf-staff { display: grid; grid-template-columns: 320px minmax(0, 1fr); gap: 24px; align-items: start; }
+.hf-parties { position: sticky; top: 16px; background: #fff; border: 1px solid #dbe2ec; border-radius: 12px; padding: 16px; }
+.hf-parties h2 { margin: 0 0 12px; font-size: 16px; }
+.hf-parties .hf-none { margin-top: 12px; }
+.hf-party-list { list-style: none; margin: 12px 0 0; padding: 0; max-height: calc(100vh - 240px); min-height: 160px; overflow-y: auto; }
+.hf-party { width: 100%; display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; background: none; border: none; border-left: 4px solid transparent; border-radius: 6px; font: inherit; color: inherit; text-align: left; cursor: pointer; }
+.hf-party:hover { background: #f1f5f9; }
+.hf-party-list .hf-party:focus-visible { outline-offset: -3px; }
+.hf-party-name { font-weight: 600; overflow-wrap: anywhere; }
+.hf-party-meta { font-size: 13px; color: #64748b; }
+.hf-party-active { background: #eff6ff; border-left-color: #2563eb; }
+.hf-party-active .hf-party-name { font-weight: 700; color: #1e3a8a; }
+.hf-folders { min-width: 0; scroll-margin-top: 12px; }
+
+@media (max-width: 900px) {
+  .hf-staff { grid-template-columns: minmax(0, 1fr); }
+  .hf-parties { position: static; }
+  .hf-party-list { max-height: 260px; }
+  .hf-type-body { padding-left: 18px; }
+  .hf-entity-linked { margin-left: 0; }
+}

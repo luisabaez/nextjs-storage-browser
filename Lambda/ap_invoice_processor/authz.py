@@ -14,9 +14,15 @@ A user flagged isAdmin (or on the bootstrap list) is a super user. The
 caller's identity is the e-mail the page sends; this is the same trust model
 as the rest of the app's Lambda actions, enforced here so a page bug or a
 hand-made request cannot skip the role rules.
+
+An agency user acts for parties. A party is Source + Agency, stored with the
+permissions as "SOURCE|AGENCY"; the agency may be empty ("RHUM|" is the person
+who certifies for the source system itself). Users saved before parties
+existed keep their allowed sources / business units.
 """
 import json
 import os
+import re
 import time
 import urllib.parse
 import urllib.request
@@ -113,3 +119,50 @@ def can_act_on(email, *codes):
     if units:
         return bool(given & units)
     return bool(given & sources)
+
+
+# ── parties (Source + Agency) ────────────────────────────────────────────────
+
+_AGENCY_CODE = re.compile(r"^(\d{3})(?!\d)")
+
+
+def agency_code(value):
+    """The three-digit agency number a value starts with ('018-Junta De
+    Planificacion' -> '018'); any other value is compared upper-cased."""
+    text = str(value if value is not None else "").strip()
+    m = _AGENCY_CODE.match(text)
+    return m.group(1) if m else text.upper()
+
+
+def party_key(source, agency):
+    return str(source if source is not None else "").strip().upper(), agency_code(agency)
+
+
+def parties(email):
+    """None = every party (super users / reviewers); otherwise the set of
+    (SOURCE, AGENCY_CODE) an agency user acts for — empty when none are stored."""
+    if role_of(email) in (SUPER_USER, CERT_REVIEWER):
+        return None
+    out = set()
+    for entry in get_permissions(email).get("parties") or []:
+        source, sep, agency = str(entry).partition("|")
+        if sep and source.strip():
+            out.add(party_key(source, agency))
+    return out
+
+
+def can_act_on_party(email, source, agency, bu=""):
+    """Whether the caller may act for Source + Agency. The agency alone is
+    never enough: RHUM serves dozens of agencies. Only a row without an agency
+    (the log carries no agency column) is read from the first three characters
+    of its BU, the agency number; a BU never widens a row that names its
+    agency. A user without parties falls back to the allowed sources /
+    business units."""
+    allowed = parties(email)
+    if allowed is None:
+        return True
+    bu = str(bu if bu is not None else "").strip()
+    if not allowed:
+        return can_act_on(email, source, agency, bu, bu[:3])
+    agency = str(agency if agency is not None else "").strip()
+    return party_key(source, agency or bu[:3]) in allowed

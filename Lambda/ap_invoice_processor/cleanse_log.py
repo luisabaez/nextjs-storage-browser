@@ -14,8 +14,14 @@ up by name, and a cycle that has no view yet is answered by an equivalent
 query over the rule catalog and the detail log, so a new cycle works before
 its views are created. The log holds counts only.
 
-Agency users see the rows of the sources / business units they are allowed;
-super users and certification reviewers see everything.
+Agency users see the rows of their parties (source + agency; a party with a
+blank agency is the source-level view and sees the whole source); super users
+and certification reviewers see everything. The screen also receives the
+rules behind the codes it shows — message, severity and path forward — which
+is the agency users' read-only view of the validation rules.
+
+In a test target whose log has nothing for the cycle yet, the main database
+is read instead, so the screens have something to show.
 """
 import io
 import uuid
@@ -46,6 +52,7 @@ DETAIL_TABLE = "LOG_DATA_CLEANSE_DETAIL"
 
 MAX_ROWS = 20000          # rows returned to the screen
 MAX_BYTES = 4_500_000     # approximate response size; a function URL stops at 6 MB
+MAX_RULE_BYTES = 1_000_000  # the rules travel in the same response as the rows
 EXPORT_MAX_ROWS = 100000
 _XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
@@ -53,7 +60,8 @@ _XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 # ── request ──────────────────────────────────────────────────────────────────
 
 def parse_request(values):
-    """Validated (mock, pillar, layout, email, db) from query-string or body values."""
+    """Validated (mock, pillar, layout, email, db and the optional source /
+    agency / bu filters) from query-string or body values."""
     mock = api_util.mock(values.get("mock"))
     pillar = (values.get("pillar") or "").strip().upper() or ("HCM" if api_util.is_hcm_mock(mock) else "FSCM")
     if pillar not in PILLARS:
@@ -65,7 +73,10 @@ def parse_request(values):
     if not email:
         raise ApiError("email is required")
     return {"mock": mock, "pillar": pillar, "layout": layout, "email": email,
-            "db": (values.get("db") or "").strip().lower()}
+            "db": (values.get("db") or "").strip().lower(),
+            "source": (values.get("source") or "").strip().upper(),
+            "agency": authz.agency_code(values.get("agency") or ""),
+            "bu": (values.get("bu") or "").strip().upper()}
 
 
 # ── which view ───────────────────────────────────────────────────────────────
@@ -182,57 +193,172 @@ def _index(columns, name):
     return lowered.index(name) if name in lowered else None
 
 
-def read_rows(cur, email, restricted, max_rows, max_bytes=None):
-    """Rows of the executed cursor the caller may see. An agency user gets the
-    rows whose Source, BU or BU prefix is within their allowed set; a result
-    with neither column shows them nothing."""
+def _limited_to_agencies(email):
+    """Whether an agency user's rights name agencies within a source: parties
+    with an agency, or the older business-unit list."""
+    parties = authz.parties(email)
+    if parties:
+        return any(agency for _, agency in parties)
+    return bool(authz.get_permissions(email).get("allowedBusinessUnits"))
+
+
+def row_filters(req, restricted):
+    """(allowed, wanted): two tests of a row's (source, agency, bu). `allowed`
+    is the caller's parties; `wanted` is the request's own filters. The log has
+    no Agency column, so a row's agency is read from its BU, whose first three
+    characters are the agency number (the same reading authz makes)."""
+    email, decided = req["email"], {}
+
+    def allowed(source, agency, bu):
+        if not restricted:
+            return True
+        key = (source, agency, bu)
+        if key not in decided:   # thousands of rows, a handful of distinct parties
+            # A party with a blank agency is the source-level view: the whole source.
+            decided[key] = (authz.can_act_on_party(email, source, agency, bu)
+                            or authz.can_act_on_party(email, source, ""))
+        return decided[key]
+
+    def wanted(source, agency, bu):
+        return ((not req["source"] or source.upper() == req["source"])
+                and (not req["agency"] or req["agency"] in (authz.agency_code(agency), bu[:3].upper()))
+                and (not req["bu"] or bu.upper() == req["bu"]))
+
+    return allowed, wanted
+
+
+def read_rows(cur, allowed, wanted, max_rows, max_bytes=None):
+    """(columns, rows, total, sources, seen) of the executed cursor. `seen`
+    counts what the database returned; `sources` are those of the rows the
+    caller may see, so the screen's source list survives a source filter;
+    `rows` / `total` are the allowed rows the request asked for."""
     columns = [d[0] for d in cur.description]
-    i_source, i_bu = _index(columns, "source"), _index(columns, "bu")
-    rows, sources, total, size = [], set(), 0, 0
+    i_source, i_agency, i_bu = (_index(columns, name) for name in ("source", "agency", "bu"))
+
+    def text(r, i):
+        return str(r[i] or "").strip() if i is not None else ""
+
+    rows, sources, seen, total, size = [], set(), 0, 0, 0
     for r in cur:
-        source = r[i_source] if i_source is not None else None
-        if restricted:
-            bu = str(r[i_bu] or "").strip() if i_bu is not None else ""
-            if not authz.can_act_on(email, source, bu, bu[:3]):
-                continue
+        seen += 1
+        source, bu = text(r, i_source), text(r, i_bu)
+        agency = text(r, i_agency) or bu
+        if not allowed(source, agency, bu):
+            continue
+        if source:
+            sources.add(source)
+        if not wanted(source, agency, bu):
+            continue
         total += 1
-        if str(source or "").strip():
-            sources.add(str(source).strip())
         if len(rows) < max_rows and (max_bytes is None or size < max_bytes):
             row = [_cell(v) for v in r]
             size += sum(len(str(v)) for v in row if v is not None) + 5 * len(row)
             rows.append(row)
-    return columns, rows, total, sorted(sources)
+    return columns, rows, total, sorted(sources), seen
 
 
-def load(conn_str, req, max_rows, max_bytes=None):
+def _read(conn, cur, req, layout, read_db, filters, limits, warnings):
+    """(view name or None, read_rows result) for the log as `read_db` holds it."""
+    mock, pillar = req["mock"], req["pillar"]
+    view = _resolve_view(conn, cur, view_candidates(pillar, layout, mock), read_db, warnings)
+    if view:
+        sql, args = f"SELECT * FROM [{read_db}].dbo.[{view}]", ()
+    else:
+        if read_db.upper() != SOURCE.upper():
+            missing = [t for t in (CATALOG_TABLE, DETAIL_TABLE) if not _exists(cur, read_db, t)]
+            if missing:
+                _clone(conn, missing, warnings)
+        sql, args = fallback_sql(read_db, mock, pillar, layout)
+        warnings.append(f"No {pillar} Data Cleanse Log view exists for {mock}; "
+                        f"the log was built from {CATALOG_TABLE} and {DETAIL_TABLE}")
+    cur.execute(sql, args)
+    return view, read_rows(cur, *filters, *limits)
+
+
+def _catalog_columns(cur):
+    cur.execute(f"SELECT COLUMN_NAME FROM [{DB}].INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = ?", (CATALOG_TABLE,))
+    return {r[0].upper() for r in cur.fetchall()}
+
+
+def read_rules(conn, cur, columns, rows, warnings):
+    """{code: rule} for the validation codes in `rows`: what each rule says and
+    its path forward, from the rule catalog the application edits. The team's
+    Notes / InternalNote are never part of it."""
+    i_code = _index(columns, "validation code")
+    if i_code is None:
+        return {}
+    # Upper-cased for the lookup, kept as the rows spell it for the answer.
+    codes = {str(r[i_code]).strip().upper(): str(r[i_code]).strip() for r in rows if r[i_code]}
+    if not codes:
+        return {}
+    have = _catalog_columns(cur)
+    if not have and DB.upper() != SOURCE.upper():
+        _clone(conn, [CATALOG_TABLE], warnings)
+        have = _catalog_columns(cur)
+    if not have:
+        warnings.append(f"{CATALOG_TABLE} does not exist in {DB}; the rules are not included")
+        return {}
+    # Two columns the team added later; an older copy of the table lacks them.
+    spanish, forward = (f"[{c}]" if c in have else f"NULL AS [{c}]" for c in ("ERROR_MESSAGE_SPA", "PATH_FORWARD"))
+    rules, wanted, size = {}, sorted(codes), 0
+    for start in range(0, len(wanted), 500):   # SQL Server takes at most 2,100 parameters
+        batch = wanted[start:start + 500]
+        cur.execute(
+            f"SELECT [VALIDATION_CODE], [ERROR_MESSAGE], {spanish}, {forward}, [Severity], [ENTITY], [VALIDATION_TYPE] "
+            f"FROM [{DB}].dbo.[{CATALOG_TABLE}] WHERE UPPER(LTRIM(RTRIM([VALIDATION_CODE]))) IN "
+            f"({', '.join('?' * len(batch))})", batch)
+        for r in cur.fetchall():
+            # The database compares by its collation, so a match need not be one here.
+            code = codes.get(str(r[0]).strip().upper())
+            if code is None or code in rules:
+                continue
+            size += 100 + sum(len(str(v)) for v in r if v is not None)
+            if size > MAX_RULE_BYTES:
+                warnings.append(f"Only the rules of the first {len(rules):,} validation codes are included")
+                return rules
+            rules[code] = {"message": r[1], "message_spa": r[2], "path_forward": r[3],
+                           "severity": r[4], "entity": r[5], "type": r[6]}
+    return rules
+
+
+def load(conn_str, req, max_rows, max_bytes=None, with_rules=False):
     """The log for a parsed request, from the mock's view or the equivalent query."""
     mock, pillar, layout = req["mock"], req["pillar"], req["layout"]
     role = authz.require(req["email"], authz.AGENCY_USER, authz.CERT_REVIEWER, what="viewing the Data Cleanse Log")
+    restricted = role == authz.AGENCY_USER
     is_test = validation_seed.is_test_target()
     read_db = SOURCE if (is_test and req["db"] == "main") else DB
     warnings = []
+    if layout == "summary" and (req["agency"] or req["bu"] or (restricted and _limited_to_agencies(req["email"]))):
+        # The summary has no BU column, so an agency's part of it cannot be told apart.
+        layout = "by_bu"
+        warnings.append("The summary is not kept by agency; the log by BU is shown instead")
+    filters, limits = row_filters(req, restricted), (max_rows, max_bytes)
     with pyodbc.connect(conn_str, autocommit=False) as conn:
         cur = conn.cursor()
-        view = _resolve_view(conn, cur, view_candidates(pillar, layout, mock), read_db, warnings)
-        if view:
-            sql, args = f"SELECT * FROM [{read_db}].dbo.[{view}]", ()
-        else:
-            if read_db.upper() != SOURCE.upper():
-                missing = [t for t in (CATALOG_TABLE, DETAIL_TABLE) if not _exists(cur, read_db, t)]
-                if missing:
-                    _clone(conn, missing, warnings)
-            sql, args = fallback_sql(read_db, mock, pillar, layout)
-            warnings.append(f"No {pillar} Data Cleanse Log view exists for {mock}; "
-                            f"the log was built from {CATALOG_TABLE} and {DETAIL_TABLE}")
-        cur.execute(sql, args)
-        columns, rows, total, sources = read_rows(cur, req["email"], role == authz.AGENCY_USER, max_rows, max_bytes)
+        read_warnings = []
+        view, result = _read(conn, cur, req, layout, read_db, filters, limits, read_warnings)
+        if is_test and req["db"] != "main" and result[4] == 0:
+            # Nothing has been run in the test target for this cycle yet.
+            read_db = SOURCE
+            read_warnings = [f"The test database has no log rows for {mock}; showing the main database."]
+            view, result = _read(conn, cur, req, layout, read_db, filters, limits, read_warnings)
+        warnings += read_warnings
+        columns, rows, total, sources, _ = result
+        rules = read_rules(conn, cur, columns, rows, warnings) if with_rules else None
+    if restricted:
+        # The team's working notes are not for the agencies.
+        keep = [i for i, c in enumerate(columns) if c.strip().lower() not in ("notes", "internalnote")]
+        columns, rows = [columns[i] for i in keep], [[r[i] for i in keep] for r in rows]
     if len(rows) < total:
         warnings.append(f"Only the first {len(rows):,} of {total:,} rows are included")
-    return {"mock": mock, "pillar": pillar, "layout": layout, "db": read_db, "is_test": is_test,
+    data = {"mock": mock, "pillar": pillar, "layout": layout, "db": read_db, "is_test": is_test,
             "source": "view" if view else "query", "view_name": view,
             "columns": columns, "rows": rows, "total": total, "truncated": len(rows) < total,
             "sources": sources, "warnings": warnings}
+    if with_rules:
+        data["rules"] = rules
+    return data
 
 
 # ── export ───────────────────────────────────────────────────────────────────
@@ -270,7 +396,7 @@ def build_workbook(title, columns, rows):
 
 def _export(conn_str, req, bucket):
     data = load(conn_str, req, EXPORT_MAX_ROWS)
-    name = export_name(req["pillar"], req["layout"], req["mock"])
+    name = export_name(req["pillar"], data["layout"], req["mock"])
     # Unique per request: an export is filtered to its caller, so two
     # requests must never share one key. The download keeps the team's name.
     key = f"{EXPORT_PREFIX}/{req['mock']}/{name[:-len('.xlsx')]}_{uuid.uuid4().hex[:8]}.xlsx"
@@ -284,7 +410,7 @@ def handle(action, event, bucket, headers, conn_str):
     def run():
         if action == "cleanse_log":
             req = parse_request(api_util.params(event))
-            return api_util.ok(headers, load(conn_str, req, MAX_ROWS, MAX_BYTES))
+            return api_util.ok(headers, load(conn_str, req, MAX_ROWS, MAX_BYTES, with_rules=True))
         req = parse_request(api_util.body(event))
         return api_util.ok(headers, _export(conn_str, req, bucket))
 

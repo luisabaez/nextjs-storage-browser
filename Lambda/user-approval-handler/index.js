@@ -141,6 +141,19 @@ exports.handler = async (event) => {
       const p = payload.permissions || {};
       const asArray = (v) => (Array.isArray(v) ? v : []);
       const asRole = (v) => (["super_user", "agency_user", "certification_reviewer"].includes(v) ? v : "");
+      // Source / agency assignments as "SOURCE|AGENCY"; the agency is empty for a
+      // source-level certifier. Anything that is not a clean pair is dropped.
+      const asParties = (v) => {
+        const parties = new Set();
+        for (const entry of asArray(v)) {
+          if (typeof entry !== "string") continue;
+          const parts = entry.toUpperCase().split("|").map((s) => s.trim());
+          if (parts.length === 2 && /^[A-Z0-9_]{1,20}$/.test(parts[0]) && /^[A-Z0-9_-]{0,20}$/.test(parts[1])) {
+            parties.add(parts.join("|"));
+          }
+        }
+        return [...parties].slice(0, 200);
+      };
       const item = {
         email: targetEmail,
         isAdmin: !!p.isAdmin,
@@ -149,6 +162,7 @@ exports.handler = async (event) => {
         allowedEntities: asArray(p.allowedEntities),
         allowedMocks: asArray(p.allowedMocks),
         allowedBusinessUnits: asArray(p.allowedBusinessUnits),
+        parties: asParties(p.parties),
         updatedBy: payload.actor || "",
         updatedAt: new Date().toISOString(),
       };

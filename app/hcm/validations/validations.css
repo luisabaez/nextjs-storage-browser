@@ -1,0 +1,71 @@
+/* Validations & Path Forward: extras on top of ../hcm.css and ../../lib/symphony.css */
+.hval-notes { margin: 0; padding-left: 18px; }
+.hval-progress { flex: 1 1 160px; max-width: 280px; }
+
+/* Pending / All and the search box */
+.hval-tools { display: flex; align-items: flex-end; justify-content: space-between; flex-wrap: wrap; gap: 12px 24px; margin-bottom: 8px; }
+.hval-filter { display: inline-flex; border: 1px solid #cbd5e1; border-radius: 8px; overflow: hidden; background: #fff; }
+.hval-filter-btn { background: none; border: none; padding: 10px 18px; font: inherit; font-size: 14px; font-weight: 600; color: #475569; cursor: pointer; }
+.hval-filter-btn + .hval-filter-btn { border-left: 1px solid #cbd5e1; }
+.hval-filter-btn:hover { background: #f1f5f9; }
+.hval-filter-btn.active { background: #1e3a5f; color: #fff; }
+.hval-filter-btn:focus-visible { outline-offset: -3px; }
+.hval-filter-btn.active:focus-visible { outline-color: #fff; }
+.hval-search { flex: 0 1 320px; }
+.hval-hint { margin: 0 0 12px; }
+
+/* the list */
+.hval-table { background: #fff; border: 1px solid #dbe2ec; border-radius: 12px; border-collapse: separate; border-spacing: 0; overflow: hidden; font-size: 14px; margin-bottom: 16px; }
+.hval-table th { background: #f8fafc; }
+.hval-table td { padding: 12px 10px; }
+.hval-row { cursor: pointer; }
+.hval-row:hover { background: #f8fafc; }
+.hval-row-open, .hval-row-open:hover { background: #eff6ff; }
+.hval-row-open td { border-bottom-color: transparent; }
+.hval-code { font-family: ui-monospace, monospace; font-weight: 600; text-align: left; overflow-wrap: anywhere; }
+.hval-message { min-width: 240px; }
+.hval-message span { display: block; }
+.hval-english { margin-top: 2px; font-size: 13px; color: #64748b; }
+.hval-when { display: block; margin-top: 4px; font-size: 12px; color: #64748b; }
+
+/* the open validation: its rule, the path forward and the commitment */
+.hval-detail > td { padding: 0; background: #eff6ff; border-bottom: 1px solid #bfdbfe; }
+.hval-panel { margin: 0 12px 12px; padding: 18px 20px; background: #fff; border: 1px solid #bfdbfe; border-radius: 10px; }
+.hval-panel h3 { margin: 0 0 8px; font-size: 15px; }
+.hval-panel-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px 28px; }
+.hval-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 16px; margin: 0; }
+.hval-facts > div { min-width: 0; }
+.hval-fact-wide { grid-column: 1 / -1; }
+.hval-facts dt { font-size: 12px; font-weight: 600; color: #64748b; }
+.hval-facts dd { margin: 2px 0 0; overflow-wrap: anywhere; }
+.hval-comment-text { white-space: pre-wrap; }
+.hval-forward { margin: 0; padding: 14px 16px; background: #eff6ff; border: 1px solid #bfdbfe; border-left: 4px solid #2563eb; border-radius: 8px; font-size: 15px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.hval-forward-empty { background: #f8fafc; border-color: #e2e8f0; border-left-color: #94a3b8; color: #475569; }
+
+.hval-commit { margin-top: 18px; padding-top: 16px; border-top: 1px solid #e2e8f0; }
+.hval-check { display: flex; align-items: flex-start; gap: 10px; font-size: 15px; font-weight: 600; cursor: pointer; margin-bottom: 14px; }
+.hval-check input { width: 20px; height: 20px; margin: 1px 0 0; flex-shrink: 0; }
+.hval-fields { display: flex; flex-wrap: wrap; gap: 12px 16px; margin-bottom: 14px; }
+.hval-fields .sy-field { flex: 0 0 200px; }
+.hval-fields .hval-comment { flex: 1 1 320px; }
+.hval-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px; }
+
+.hval-next { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin: 20px 0 0; color: #334155; }
+
+/* tablets in portrait and smaller: one card per validation */
+@media (max-width: 900px) {
+  .hval-table, .hval-table tbody, .hval-table tr, .hval-table td { display: block; width: 100%; }
+  .hval-table { background: none; border: none; border-radius: 0; overflow: visible; }
+  .hval-table thead { position: absolute; left: -9999px; }
+  .hval-row { background: #fff; border: 1px solid #dbe2ec; border-radius: 12px; padding: 12px 16px; margin-bottom: 10px; }
+  .hval-row-open { border-color: #bfdbfe; border-bottom-left-radius: 0; border-bottom-right-radius: 0; margin-bottom: 0; }
+  .hval-table .hval-row td { border: none; padding: 4px 0; text-align: left; }
+  .hval-row td[data-label]::before { content: attr(data-label); display: block; font-size: 12px; font-weight: 600; color: #64748b; }
+  .hval-when { display: inline; margin-left: 8px; }
+  .hval-detail { margin-bottom: 10px; }
+  .hval-detail > td { border: 1px solid #bfdbfe; border-top: none; border-radius: 0 0 12px 12px; padding-top: 1px; }
+  .hval-panel { margin: 0 8px 8px; padding: 14px; }
+  .hval-panel-grid { grid-template-columns: minmax(0, 1fr); }
+  .hval-fields .sy-field { flex: 1 1 100%; }
+  .hval-search { flex: 1 1 100%; }
+}

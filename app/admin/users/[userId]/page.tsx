@@ -10,6 +10,7 @@ import './user-detail.css';
 import config from '../../../../amplify_outputs.json';
 import {
   isAdminUser,
+  ADMIN_EMAILS,
   CognitoUser,
   UserRole,
   USER_ROLE_LABELS,
@@ -24,7 +25,9 @@ import {
   saveUserFullPermissions,
   pushPermissionsToBackend,
   fetchPermissionsFromBackend,
+  formatParty,
 } from '../../types';
+import { apiGet, fetchAppConfig, ApiResult } from '../../../lib/symphony';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 
@@ -38,8 +41,19 @@ const APPROVAL_TOKEN = 'hacienda-erp-approval-2024';
 const ROLE_DESCRIPTIONS: Record<UserRole, string> = {
   '': 'No security role assigned. The user only has the file access configured below.',
   super_user: 'Validation team: full access to every source, configuration and rule edits, and all certification pages.',
-  agency_user: 'Certifies validations and files for the sources and business units allowed below, and works the Data Cleanse Log.',
+  agency_user: 'Certifies validations and files for the source / agency assignments below, and works the Data Cleanse Log.',
   certification_reviewer: 'Read-only: views the Certification Status dashboards and generates the Status Report.',
+};
+
+// Source / agency pairs the configured cycle expects (suggestions for the assignments editor)
+interface KnownParty { source: string; agency: string; party: string }
+interface KnownPartiesResponse extends ApiResult { parties?: KnownParty[] }
+
+// Same rule the server applies to an agency: "018-Junta De Planificacion" is agency 018
+const agencyCode = (value: string): string => {
+  const v = (value || '').trim();
+  const m = /^(\d{3})(?!\d)/.exec(v);
+  return m ? m[1] : v.toUpperCase();
 };
 
 function UserDetailPage() {
@@ -62,6 +76,13 @@ function UserDetailPage() {
   const [selectedEntities, setSelectedEntities] = useState<string[]>([]);
   const [selectedMocks, setSelectedMocks] = useState<string[]>([]);
   const [selectedBusinessUnits, setSelectedBusinessUnits] = useState<string[]>([]);
+
+  // Source / agency assignments of an agency user ("SOURCE|AGENCY")
+  const [selectedParties, setSelectedParties] = useState<string[]>([]);
+  const [newPartySource, setNewPartySource] = useState('');
+  const [newPartyAgency, setNewPartyAgency] = useState('');
+  const [partyError, setPartyError] = useState('');
+  const [knownParties, setKnownParties] = useState<KnownParty[]>([]);
 
   // Entity tags (can be dynamic)
   const [entityTags, setEntityTags] = useState<string[]>([]);
@@ -97,6 +118,18 @@ function UserDetailPage() {
     checkAdmin();
   }, []);
 
+  // Known source / agency pairs of the configured cycle, offered as suggestions.
+  // The manual inputs work without them, so a failed call is simply ignored.
+  useEffect(() => {
+    if (!isAdmin || !adminEmail) return;
+    (async () => {
+      const cfg = await fetchAppConfig(adminEmail);
+      if (!cfg.ok || !cfg.current_mock) return;
+      const res = await apiGet<KnownPartiesResponse>('cert_expected', { mock: cfg.current_mock, email: adminEmail });
+      if (res.ok && Array.isArray(res.parties)) setKnownParties(res.parties);
+    })();
+  }, [isAdmin, adminEmail]);
+
   // Fetch user data
   const fetchUserData = useCallback(async () => {
     if (!userId) return;
@@ -131,6 +164,7 @@ function UserDetailPage() {
             setSelectedEntities(permissions.allowedEntities || []);
             setSelectedMocks(permissions.allowedMocks || []);
             setSelectedBusinessUnits(permissions.allowedBusinessUnits || []);
+            setSelectedParties(permissions.parties || []);
           }
         }
       }
@@ -178,18 +212,37 @@ function UserDetailPage() {
     setSaveMessage(null);
   };
 
-  // Admin flag and security role move together: the admin flag always means
-  // super user, so the two controls can never disagree.
+  // The admin flag always means super user, but the super user role can be given
+  // on its own (HCM portal only), so the role never changes the admin flag.
   const handleAdminToggle = (checked: boolean) => {
     setSelectedIsAdmin(checked);
     if (checked) setSelectedRole('super_user');
-    else if (selectedRole === 'super_user') setSelectedRole('');
     setSaveMessage(null);
   };
 
   const handleRoleChange = (role: UserRole) => {
     setSelectedRole(role);
-    setSelectedIsAdmin(role === 'super_user');
+    setSaveMessage(null);
+  };
+
+  // Source / agency assignments
+  const handleAddParty = () => {
+    const source = newPartySource.trim().toUpperCase();
+    const agency = agencyCode(newPartyAgency);
+    if (!/^[A-Z0-9_]{1,20}$/.test(source) || !/^[A-Z0-9_-]{0,20}$/.test(agency)) {
+      setPartyError('Enter a source (letters, digits and _) and, for an agency, its code (letters, digits, _ and -). Up to 20 characters each.');
+      return;
+    }
+    const party = `${source}|${agency}`;
+    setSelectedParties(prev => (prev.includes(party) ? prev : [...prev, party]));
+    setNewPartySource('');
+    setNewPartyAgency('');
+    setPartyError('');
+    setSaveMessage(null);
+  };
+
+  const handleRemoveParty = (party: string) => {
+    setSelectedParties(prev => prev.filter(p => p !== party));
     setSaveMessage(null);
   };
 
@@ -257,10 +310,11 @@ function UserDetailPage() {
     if (!user) return;
 
     // An agency user must be limited to their own source / agency
-    if (selectedRole === 'agency_user' && selectedSources.length === 0 && selectedBusinessUnits.length === 0) {
+    if (selectedRole === 'agency_user' && selectedParties.length === 0 &&
+        selectedSources.length === 0 && selectedBusinessUnits.length === 0) {
       setSaveMessage({
         type: 'error',
-        text: 'An Agency User must be limited to their own agency. Select at least one source or business unit before saving.',
+        text: 'An Agency User must be limited to their own agency. Add at least one source / agency assignment, or select a source or business unit, before saving.',
       });
       return;
     }
@@ -276,6 +330,7 @@ function UserDetailPage() {
         allowedEntities: selectedEntities,
         allowedMocks: selectedMocks,
         allowedBusinessUnits: selectedBusinessUnits,
+        parties: selectedParties,
       };
       // Write to the backend (source of truth, cross-device) first, then cache locally.
       const ok = await pushPermissionsToBackend(user.email, perms, adminEmail);
@@ -345,7 +400,18 @@ function UserDetailPage() {
     );
   }
 
-  const isUserAdmin = isAdminUser(user.email);
+  // Only the built-in admins are locked. An admin flag granted on this page can be
+  // taken back, which is how a super user saved earlier becomes portal-only.
+  const isUserAdmin = ADMIN_EMAILS.some(e => e.toLowerCase() === user.email.toLowerCase());
+
+  // Suggestions for the assignments editor: every known source, and the agencies
+  // of the source being typed (agency code -> the name the team uses for it)
+  const typedSource = newPartySource.trim().toUpperCase();
+  const knownSources = Array.from(new Set(knownParties.map(p => (p.source || '').toUpperCase()))).filter(Boolean).sort();
+  const knownAgencies = new Map<string, string>();
+  knownParties
+    .filter(p => p.agency && (!typedSource || (p.source || '').toUpperCase() === typedSource))
+    .forEach(p => knownAgencies.set(agencyCode(p.agency), p.party || ''));
 
   return (
     <div className="admin-container">
@@ -379,7 +445,7 @@ function UserDetailPage() {
                 <span className={`status-tag ${user.status.toLowerCase()}`}>
                   {user.status}
                 </span>
-                {isUserAdmin && (
+                {(isUserAdmin || selectedIsAdmin) && (
                   <span className="admin-badge">Admin</span>
                 )}
               </div>
@@ -450,6 +516,9 @@ function UserDetailPage() {
                   Grant Admin Access
                 </div>
                 <div className="admin-toggle-description">
+                  Developer access: file browser, file processing, configuration and the HCM portal.
+                </div>
+                <div className="admin-toggle-description">
                   {isUserAdmin
                     ? 'This user is a built-in admin and cannot be revoked here.'
                     : selectedIsAdmin
@@ -470,7 +539,7 @@ function UserDetailPage() {
                 id="security-role"
                 className="filter-select"
                 value={isUserAdmin ? 'super_user' : selectedRole}
-                disabled={isUserAdmin}
+                disabled={isUserAdmin || selectedIsAdmin}
                 onChange={(e) => handleRoleChange(e.target.value as UserRole)}
               >
                 <option value="">No role</option>
@@ -479,10 +548,73 @@ function UserDetailPage() {
                 ))}
               </select>
               <div className="admin-toggle-description" style={{ marginTop: 8 }}>
+                HCM portal access. Super users and certification reviewers see every agency; agency users see only the source / agency pairs below.
+              </div>
+              <div className="admin-toggle-description">
                 {ROLE_DESCRIPTIONS[isUserAdmin ? 'super_user' : selectedRole]}
               </div>
             </div>
           </div>
+
+          {/* Source / Agency assignments — what an agency user sees in the HCM portal */}
+          {!isUserAdmin && selectedRole === 'agency_user' && (
+            <div className="admin-toggle-section">
+              <div className="admin-toggle-content" style={{ padding: '16px 18px' }}>
+                <div className="admin-toggle-title">Source / Agency assignments</div>
+                {selectedParties.length === 0 ? (
+                  <div className="admin-toggle-description">No assignments yet.</div>
+                ) : (
+                  <ul className="party-list">
+                    {selectedParties.map(party => (
+                      <li key={party} className="party-row">
+                        <span className="tag-name">{formatParty(party)}</span>
+                        <button
+                          type="button"
+                          className="btn btn-sm btn-secondary"
+                          onClick={() => handleRemoveParty(party)}
+                        >
+                          Remove
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                <div className="party-add">
+                  <input
+                    type="text"
+                    list="known-party-sources"
+                    placeholder="Source (e.g., RHUM)"
+                    value={newPartySource}
+                    onChange={(e) => setNewPartySource(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleAddParty()}
+                  />
+                  <input
+                    type="text"
+                    list="known-party-agencies"
+                    placeholder="Agency (e.g., 018)"
+                    value={newPartyAgency}
+                    onChange={(e) => setNewPartyAgency(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleAddParty()}
+                  />
+                  <button type="button" className="btn btn-sm btn-primary" onClick={handleAddParty}>
+                    Add
+                  </button>
+                  <datalist id="known-party-sources">
+                    {knownSources.map(source => <option key={source} value={source} />)}
+                  </datalist>
+                  <datalist id="known-party-agencies">
+                    {Array.from(knownAgencies).map(([agency, name]) => (
+                      <option key={agency} value={agency}>{name}</option>
+                    ))}
+                  </datalist>
+                </div>
+                <div className="admin-toggle-description">
+                  Leave Agency empty for a source-level certifier (the person who certifies for the whole source).
+                </div>
+                {partyError && <div className="admin-toggle-description party-error">{partyError}</div>}
+              </div>
+            </div>
+          )}
 
           {/* Permission Tabs */}
           <div className="permission-tabs">

@@ -1,0 +1,110 @@
+/* HCM portal: the shell (header, context bar) and the building blocks its pages
+   share. Tables, forms, notes and badges come from ../lib/symphony.css; buttons
+   (.btn, .btn-primary, .btn-secondary) are global. */
+.hcm-app { min-height: 100vh; display: flex; flex-direction: column; background: #f4f6fa; color: #1e293b; font-size: 15px; }
+.hcm-app :focus-visible { outline: 3px solid #2563eb; outline-offset: 2px; border-radius: 4px; }
+.hcm-skip { position: absolute; left: -9999px; top: 12px; z-index: 10; background: #fff; color: #1e3a5f; padding: 8px 12px; border-radius: 6px; font-weight: 600; }
+.hcm-skip:focus { left: 12px; }
+
+/* header */
+.hcm-header { background: #1e3a5f; color: #fff; display: flex; align-items: center; flex-wrap: wrap; gap: 12px 24px; padding: 12px 32px; }
+.hcm-header :focus-visible { outline-color: #fff; }
+.hcm-brand { display: flex; align-items: center; gap: 12px; color: #fff; text-decoration: none; }
+.hcm-brand-mark { width: 40px; height: 40px; border-radius: 8px; background: #fff; color: #1e3a5f; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.hcm-brand-mark svg { width: 24px; height: 24px; }
+.hcm-brand-name { display: block; font-size: 18px; font-weight: 700; line-height: 1.2; }
+.hcm-brand-sub { display: block; font-size: 13px; color: #cbd5e1; }
+.hcm-nav-link { display: inline-flex; align-items: center; gap: 6px; color: #fff; text-decoration: none; font-size: 14px; font-weight: 600; padding: 8px 14px; border-radius: 8px; background: rgba(255, 255, 255, 0.12); }
+.hcm-nav-link:hover { background: rgba(255, 255, 255, 0.22); }
+.hcm-nav-link svg { width: 16px; height: 16px; }
+.hcm-user { margin-left: auto; display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; font-size: 14px; }
+.hcm-user-email { color: #e2e8f0; word-break: break-all; }
+.hcm-quiet-link { color: #cbd5e1; font-size: 13px; }
+.hcm-quiet-link:hover { color: #fff; }
+.hcm-signout { background: transparent; border: 1px solid rgba(255, 255, 255, 0.45); color: #fff; border-radius: 8px; padding: 8px 14px; font: inherit; font-size: 14px; font-weight: 600; cursor: pointer; }
+.hcm-signout:hover { background: rgba(255, 255, 255, 0.15); }
+
+/* context bar: mock cycle + source / agency */
+.hcm-context { background: #fff; border-bottom: 1px solid #e2e8f0; display: flex; align-items: center; flex-wrap: wrap; gap: 10px 28px; padding: 10px 32px; }
+.hcm-context-field { display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; font-size: 13px; font-weight: 600; color: #475569; }
+.hcm-context-field select { min-width: 0; padding: 7px 10px; border: 1px solid #cbd5e1; border-radius: 6px; font: inherit; font-size: 14px; font-weight: 400; background: #fff; color: #1e293b; max-width: 360px; }
+.hcm-context-value { font-size: 14px; font-weight: 600; color: #1e293b; }
+.hcm-viewing { background: #fef3c7; border-bottom: 1px solid #fcd34d; color: #78350f; display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; padding: 10px 32px; font-size: 14px; }
+.hcm-viewing .btn { padding: 6px 14px; }
+
+/* page body */
+.hcm-main { width: 100%; max-width: 1200px; margin: 0 auto; padding: 28px 32px 48px; flex: 1; }
+.hcm-main-wide { max-width: 1600px; }
+.hcm-heading { margin-bottom: 20px; }
+.hcm-title { margin: 0; font-size: 26px; line-height: 1.25; }
+.hcm-subtitle { margin: 6px 0 0; color: #475569; font-size: 15px; max-width: 760px; }
+.hcm-section { margin: 28px 0 12px; font-size: 13px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: #64748b; }
+.hcm-app .btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; text-decoration: none; font-weight: 600; }
+.hcm-app .btn:disabled { opacity: 0.55; cursor: not-allowed; }
+.hcm-app .sy-badge { font-size: 13px; padding: 3px 10px; }
+
+/* home tiles: <a class="hcm-tile"> with .hcm-tile-icon, .hcm-tile-body (title + text), optional .hcm-tile-badge */
+.hcm-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; }
+.hcm-tile { position: relative; display: flex; flex-direction: column; gap: 14px; min-height: 184px; padding: 22px 20px; background: #fff; border: 1px solid #dbe2ec; border-radius: 14px; color: #1e293b; text-decoration: none; box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05); transition: border-color 150ms ease, box-shadow 150ms ease, transform 150ms ease; }
+a.hcm-tile:hover { border-color: #2563eb; box-shadow: 0 8px 20px rgba(30, 58, 95, 0.12); transform: translateY(-2px); }
+.hcm-tile-icon { width: 52px; height: 52px; border-radius: 12px; background: #eff6ff; color: #1d4ed8; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.hcm-tile-icon svg { width: 28px; height: 28px; }
+.hcm-tile-body { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.hcm-tile-title { font-size: 18px; font-weight: 700; line-height: 1.25; }
+.hcm-tile-text { font-size: 14px; line-height: 1.45; color: #475569; }
+.hcm-tile-badge { position: absolute; top: 16px; right: 16px; }
+.hcm-tile-disabled { background: #f8fafc; border-style: dashed; box-shadow: none; color: #64748b; }
+.hcm-tile-disabled .hcm-tile-icon { background: #e2e8f0; color: #64748b; }
+.hcm-tiles-small { grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
+.hcm-tiles-small .hcm-tile { flex-direction: row; align-items: center; min-height: 0; padding: 14px 16px; }
+.hcm-tiles-small .hcm-tile-icon { width: 40px; height: 40px; border-radius: 10px; }
+.hcm-tiles-small .hcm-tile-icon svg { width: 22px; height: 22px; }
+.hcm-tiles-small .hcm-tile-title { font-size: 15px; }
+.hcm-tiles-small .hcm-tile-text { font-size: 13px; }
+
+/* one-line progress summary above the tiles */
+.hcm-summary { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px; background: #fff; border: 1px solid #dbe2ec; border-left: 4px solid #2563eb; border-radius: 10px; padding: 14px 18px; margin-bottom: 20px; }
+.hcm-summary-party { font-weight: 700; }
+.hcm-summary-text { margin: 0; color: #334155; }
+
+/* cards, banners, empty states, messages */
+.hcm-card { background: #fff; border: 1px solid #dbe2ec; border-radius: 12px; padding: 20px 24px; margin-bottom: 16px; }
+.hcm-card > h2 { margin: 0 0 8px; font-size: 18px; }
+.hcm-card-head { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px 16px; margin-bottom: 12px; }
+.hcm-card-head h2 { margin: 0; font-size: 18px; }
+.hcm-banner { background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af; border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; font-size: 14px; }
+.hcm-empty { text-align: center; background: #fff; border: 1px dashed #cbd5e1; border-radius: 12px; padding: 40px 24px; color: #475569; }
+.hcm-empty h2 { margin: 0 0 6px; font-size: 18px; color: #1e293b; }
+.hcm-empty p { margin: 0; }
+.hcm-message { max-width: 560px; margin: 48px auto; text-align: center; background: #fff; border: 1px solid #dbe2ec; border-radius: 12px; padding: 32px; }
+.hcm-message h2 { margin: 0 0 8px; font-size: 20px; }
+.hcm-message p { margin: 0 0 20px; color: #475569; }
+.hcm-message-actions { display: flex; justify-content: center; flex-wrap: wrap; gap: 8px; }
+.hcm-loading { color: #64748b; padding: 24px 0; }
+
+/* simple lists of files or documents: <ul class="hcm-list"><li class="hcm-row"> */
+.hcm-list { list-style: none; margin: 0 0 16px; padding: 0; background: #fff; border: 1px solid #dbe2ec; border-radius: 12px; overflow: hidden; }
+.hcm-row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 16px; padding: 14px 18px; border-bottom: 1px solid #eef2f7; }
+.hcm-row:last-child { border-bottom: none; }
+.hcm-row-icon { width: 36px; height: 36px; border-radius: 8px; background: #eff6ff; color: #1d4ed8; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.hcm-row-icon svg { width: 20px; height: 20px; }
+.hcm-row-main { flex: 1 1 260px; min-width: 0; }
+.hcm-row-title { font-weight: 600; word-break: break-word; }
+.hcm-row-meta { font-size: 13px; color: #64748b; }
+.hcm-row-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+
+/* upload control: a labelled file input next to its button */
+.hcm-upload { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 12px; }
+.hcm-upload .sy-field { flex: 1 1 280px; }
+
+@media (max-width: 900px) {
+  .hcm-header, .hcm-context, .hcm-viewing { padding-left: 16px; padding-right: 16px; }
+  .hcm-main { padding: 20px 16px 40px; }
+  .hcm-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .hcm-tiles-small { grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+}
+@media (max-width: 520px) {
+  .hcm-tiles { grid-template-columns: minmax(0, 1fr); }
+  .hcm-tile { min-height: 0; }
+  .hcm-user { margin-left: 0; }
+}

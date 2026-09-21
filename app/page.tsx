@@ -9,6 +9,7 @@ import config from '../amplify_outputs.json';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { isAdminUser, getUserRole, UserRole, syncCurrentUserPermissions } from './admin/types';
+import { useSymphonySession, usePortalGuard } from './lib/symphony';
 
 // Components
 import { CustomFileBrowser, FileItem } from './components/CustomFileBrowser';
@@ -132,6 +133,9 @@ const defaultQuickLinks: QuickLink[] = [
 ];
 
 function FileBrowser() {
+  // Users who work only in the HCM portal are sent there; nothing renders for them here.
+  const session = useSymphonySession();
+  const toPortal = usePortalGuard(session);
   const [userEmail, setUserEmail] = useState<string>('');
   const [isAdmin, setIsAdmin] = useState(false);
   const [userRole, setUserRole] = useState<UserRole>('');
@@ -1047,6 +1051,9 @@ function FileBrowser() {
 
   const breadcrumbs = getBreadcrumbPath();
 
+  // Administrators see the browser at once; everyone else waits until the session says where they belong.
+  if (toPortal || (!session.ready && !isAdmin)) return null;
+
   return (
     <div className="app-container">
       {/* Hidden file input for uploads */}
@@ -1097,17 +1104,10 @@ function FileBrowser() {
               <span className="admin-text">Data Validation</span>
             </Link>
           )}
-          {userRole && (
-            <>
-              <Link href="/data-cleanse-log" className="admin-link" title="Data Cleanse Log">
-                <span className="admin-icon">🧹</span>
-                <span className="admin-text">Cleanse Log</span>
-              </Link>
-              <Link href="/certifications" className="admin-link" title="Certification Status and Status Report">
-                <span className="admin-icon">📜</span>
-                <span className="admin-text">Certifications</span>
-              </Link>
-            </>
+          {(isAdmin || userRole) && (
+            <Link href="/hcm" className="admin-link" title="HCM Data Validation portal">
+              <span>HCM Portal</span>
+            </Link>
           )}
           {userRole === 'super_user' && (
             <Link href="/config" className="admin-link" title="Configuration">

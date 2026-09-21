@@ -1,31 +1,44 @@
 """
-certifications.py — agencies certify their files and the validations reported
-to them.
+certifications.py — agencies certify the files published to them, commit to the
+path forward of the validations reported to them, and sign off the cycle.
 
 What must be certified comes from the validation team's own setup table,
-SETUP_DATA_CLEANSE_FILE_LOCATION_<MOCK> WHERE CertificationRequired = 'Y'.
-The certifying party of a row is its Agency, or its Source when the row has no
-Agency (the same rule the team's view uses).
+SETUP_DATA_CLEANSE_FILE_LOCATION_<MOCK> WHERE CertificationRequired = 'Y'. One
+row is one expected certification: Module + File Type + Entity of a party. The
+party is always Source + Agency, never the agency alone (RHUM serves dozens of
+agencies); a row with no Agency is certified at source level. BU is shown to
+the user and never part of the key.
+
+A certification answers with one of the three comments of the team's form
+(RESPONSES). The "issues" answer needs every issue reported separately, each
+with its own supporting document. When every expected record is certified and
+every reported validation has a commitment, the party signs off once; after
+that its records are locked until a super user revokes the sign-off.
 
 Validations reported to a party come from the Data Cleanse Log
 (LOG_DATA_CLEANSE_DETAIL counted by Validation_Code / Source / BU) for the
-rules the catalog marks AgencyReports = 'Y'. Only counts are read from the log;
+rules the catalog marks AgencyReports = 'Y' (a party with an agency) or
+Sourcereports = 'Y' (a source-level party). Only counts are read from the log;
 no record-level column is ever selected.
 
-Certifications are stored in the application's own tables (history is kept: a
+Everything is stored in the application's own tables (history is kept: a
 re-certification retires the previous row and inserts a new one):
 
-  DATA_CLEANSE_CERT_VALIDATION  Source/Agency, Validation Code, path forward,
+  DATA_CLEANSE_CERT_FILE        one expected record: response, agency resource,
                                 notes, certified by
-  DATA_CLEANSE_CERT_FILE        Source/Agency, entity + file type, notes,
-                                certified by
-  DATA_CLEANSE_CERT_ATTACHMENT  documents attached to either kind
+  DATA_CLEANSE_CERT_ISSUE       issues reported on a record
+  DATA_CLEANSE_CERT_VALIDATION  commitment to a validation's path forward:
+                                reviewed, target date, notes
+  DATA_CLEANSE_CERT_SIGNOFF     the party's final signature for the cycle
+  DATA_CLEANSE_CERT_ATTACHMENT  documents attached to a record, a validation
+                                or an issue
 
-Roles: an agency user certifies only for the sources / agencies / business
-units they are allowed; a certification reviewer sees the status dashboard and
-generates the status report; a super user does everything.
+Roles: an agency user acts only for their own parties; a certification
+reviewer reads everything and generates the status report; a super user does
+everything, including revoking.
 """
 import io
+import json
 import re
 import uuid
 from datetime import datetime
@@ -38,7 +51,8 @@ import validation_seed
 from api_util import ApiError
 
 ACTIONS = {
-    "cert_expected", "cert_validations", "cert_certify_validation", "cert_certify_file",
+    "cert_expected", "cert_validations", "cert_issues", "cert_records", "cert_certify_validation",
+    "cert_certify_file", "cert_issue_save", "cert_issue_delete", "cert_signoff",
     "cert_upload_url", "cert_attachment_add", "cert_attachments", "cert_download_url",
     "cert_attachment_delete", "cert_status", "cert_status_report", "cert_revoke",
 }
@@ -51,6 +65,8 @@ LOG_TABLE = "LOG_DATA_CLEANSE_DETAIL"
 CATALOG_TABLE = "SETUP_ERROR_MESSAGES_SOURCE"
 T_VALIDATION = "DATA_CLEANSE_CERT_VALIDATION"
 T_FILE = "DATA_CLEANSE_CERT_FILE"
+T_ISSUE = "DATA_CLEANSE_CERT_ISSUE"
+T_SIGNOFF = "DATA_CLEANSE_CERT_SIGNOFF"
 T_ATTACHMENT = "DATA_CLEANSE_CERT_ATTACHMENT"
 
 # Private root: not reachable with the browser's storage rights, only through
@@ -59,27 +75,50 @@ ATTACHMENT_PREFIX = f"{api_util.PRIVATE_ROOT}/Certifications"
 REPORT_PREFIX = f"{api_util.PRIVATE_ROOT}/Reports"
 MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 MAX_KEY_LENGTH = 600
-CERT_TYPES = ("FILE", "VALIDATION")
+MAX_ISSUE_LENGTH = 4000
+CERT_TYPES = ("FILE", "VALIDATION", "ISSUE")
+REVOKE_TYPES = ("FILE", "VALIDATION", "SIGNOFF")
+
+# The three comments of the team's certification form, word for word.
+RESPONSES = {
+    "AGREE": ("Estoy de acuerdo con los errores presentados y se estarán corrigiendo los mismos, de lo contrario "
+              "las transacciones asociadas a estos errores se convertirán en error."),
+    "ISSUES": ("Se verificó la data y la misma está parcial o completamente incorrecta. Se incluye un anejo con "
+               "documentación de soporte."),
+    "NO_ERRORS": "Se verificó la data y no contiene errores.",
+}
+SIGNOFF_STATEMENT = ("Certifico que la agencia completó la revisión de todos los archivos y validaciones del ciclo "
+                     "{mock} y que las respuestas registradas representan la posición oficial de la agencia.")
 
 # Cycles outside the usual MOCKnn[HCM][PRE] shape that have a setup table.
 _EXTRA_MOCKS = ("MOCK14DV",)
 _LOCATION = re.compile(r"^SETUP_DATA_CLEANSE_FILE_LOCATION_(MOCK\d{1,2}(HCM)?(PRE\d*)?|MOCK14DV)$", re.I)
 
+_REVOKE_DDL = "[Revoked_By] NVARCHAR(200) NULL, [Revoked_DTTM] DATETIME NULL, [Revoke_Reason] NVARCHAR(MAX) NULL"
 _DDL = {
     T_VALIDATION: (
         "[ID] INT IDENTITY(1,1) PRIMARY KEY, [MOCK] VARCHAR(20) NOT NULL, [Source] VARCHAR(50) NOT NULL, "
         "[Agency] VARCHAR(100) NOT NULL, [BU] VARCHAR(100) NOT NULL, [Validation_Code] NVARCHAR(50) NOT NULL, "
         "[Path_Forward] NVARCHAR(MAX) NULL, [Notes] NVARCHAR(MAX) NULL, [Error_Count] INT NULL, "
         "[Certified_By] NVARCHAR(200) NULL, [Certified_DTTM] DATETIME NULL, "
-        "[Is_Current] BIT NOT NULL DEFAULT 1, "
-        "[Revoked_By] NVARCHAR(200) NULL, [Revoked_DTTM] DATETIME NULL, [Revoke_Reason] NVARCHAR(MAX) NULL"),
+        f"[Is_Current] BIT NOT NULL DEFAULT 1, {_REVOKE_DDL}, [Reviewed] BIT NULL, [Target_Date] DATE NULL"),
     T_FILE: (
         "[ID] INT IDENTITY(1,1) PRIMARY KEY, [MOCK] VARCHAR(20) NOT NULL, [Source] VARCHAR(50) NOT NULL, "
         "[Agency] VARCHAR(100) NOT NULL, [BU] VARCHAR(100) NOT NULL, [Entity] VARCHAR(50) NOT NULL, "
         "[File_Type] VARCHAR(30) NOT NULL, [Notes] NVARCHAR(MAX) NULL, "
         "[Certified_By] NVARCHAR(200) NULL, [Certified_DTTM] DATETIME NULL, "
-        "[Is_Current] BIT NOT NULL DEFAULT 1, "
-        "[Revoked_By] NVARCHAR(200) NULL, [Revoked_DTTM] DATETIME NULL, [Revoke_Reason] NVARCHAR(MAX) NULL"),
+        f"[Is_Current] BIT NOT NULL DEFAULT 1, {_REVOKE_DDL}, [Module] VARCHAR(50) NULL, "
+        "[Response_Code] VARCHAR(20) NULL, [Resource_Name] NVARCHAR(200) NULL"),
+    T_ISSUE: (
+        "[ID] INT IDENTITY(1,1) PRIMARY KEY, [MOCK] VARCHAR(20) NOT NULL, [Source] VARCHAR(50) NOT NULL, "
+        "[Agency] VARCHAR(100) NOT NULL, [Module] VARCHAR(50) NOT NULL, [File_Type] VARCHAR(30) NOT NULL, "
+        "[Entity] VARCHAR(50) NOT NULL, [Description] NVARCHAR(MAX) NOT NULL, "
+        "[Reported_By] NVARCHAR(200) NULL, [Reported_DTTM] DATETIME NULL, [Deleted] BIT NOT NULL DEFAULT 0"),
+    T_SIGNOFF: (
+        "[ID] INT IDENTITY(1,1) PRIMARY KEY, [MOCK] VARCHAR(20) NOT NULL, [Source] VARCHAR(50) NOT NULL, "
+        "[Agency] VARCHAR(100) NOT NULL, [Signer_Name] NVARCHAR(200) NOT NULL, [Signer_Title] NVARCHAR(200) NOT NULL, "
+        "[Signed_By] NVARCHAR(200) NULL, [Signed_DTTM] DATETIME NULL, [Statement] NVARCHAR(MAX) NULL, "
+        f"[Is_Current] BIT NOT NULL DEFAULT 1, {_REVOKE_DDL}"),
     T_ATTACHMENT: (
         "[ID] INT IDENTITY(1,1) PRIMARY KEY, [MOCK] VARCHAR(20) NOT NULL, [Source] VARCHAR(50) NOT NULL, "
         "[Agency] VARCHAR(100) NOT NULL, [BU] VARCHAR(100) NOT NULL, [Cert_Type] VARCHAR(20) NOT NULL, "
@@ -106,8 +145,21 @@ def _mock(value):
 
 
 def party_name(source, agency):
-    """The certifying party: the Agency, or the Source when there is none."""
+    """The certifying party as shown: the Agency, or the Source when there is none."""
     return _s(agency) or _s(source)
+
+
+# A certification stored before the module was part of the record.
+_ANY_MODULE = "*"
+
+
+def record_key(source, agency, module, file_type, entity):
+    """One expected certification of a cycle."""
+    return authz.party_key(source, agency) + _k(module, file_type, entity)
+
+
+def _row_key(r):
+    return record_key(r["source"], r["agency"], r["module"], r["file_type"], r["entity"])
 
 
 def file_cert_key(entity, file_type):
@@ -146,17 +198,20 @@ def sort_mocks(tokens):
     return sorted(set(tokens), key=key)
 
 
-def validations_for(reported, source, bu):
-    """{code: count} of what the log reports to one party: same Source and,
-    when the party has a BU, the same first three BU characters."""
-    by_bu = reported.get(_s(source).upper(), {})
-    bu3 = _s(bu)[:3].upper()
+def validations_for(reported, catalog, source, agency):
+    """{code: count} of what the log reports to one party. A party with an
+    agency gets the rules reported to agencies, counted over the BUs that
+    start with its agency number; a source-level party gets the rules
+    reported to sources, over the whole source."""
+    source, number = authz.party_key(source, agency)
+    flag = "to_agency" if number else "to_source"
     out = {}
-    for log_bu3, codes in by_bu.items():
-        if bu3 and log_bu3 != bu3:
+    for log_bu, codes in reported.get(source, {}).items():
+        if number and log_bu != number:
             continue
         for code, n in codes.items():
-            out[code] = out.get(code, 0) + n
+            if catalog.get(code.upper(), {}).get(flag):
+                out[code] = out.get(code, 0) + n
     return out
 
 
@@ -166,8 +221,37 @@ def status_of(done, total):
     return "In progress" if done else "Not started"
 
 
+def portal_status(signed, done, total):
+    """The party's progress as the portal words it."""
+    if signed:
+        return "Signed off"
+    status = status_of(done, total)
+    return "Ready to sign" if status == "Complete" else status
+
+
 def _pct(done, total):
     return round(100.0 * done / total, 1) if total else 0.0
+
+
+def _flag(value):
+    return value is True or _s(value).lower() in ("true", "1", "y", "yes")
+
+
+def _date(value, label):
+    text = _s(value)
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text[:10], "%Y-%m-%d").date()
+    except ValueError:
+        raise ApiError(f"{label} must be a date (YYYY-MM-DD)")
+
+
+def _id(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise ApiError("id must be a number")
 
 
 # ── database helpers ─────────────────────────────────────────────────────────
@@ -184,12 +268,18 @@ def _columns(cur, table):
 
 
 _REVOKE_COLUMNS = (("Revoked_By", "NVARCHAR(200)"), ("Revoked_DTTM", "DATETIME"), ("Revoke_Reason", "NVARCHAR(MAX)"))
+# Columns added after the tables first went out.
+_ADDED_COLUMNS = {
+    T_VALIDATION: _REVOKE_COLUMNS + (("Reviewed", "BIT"), ("Target_Date", "DATE")),
+    T_FILE: _REVOKE_COLUMNS + (("Module", "VARCHAR(50)"), ("Response_Code", "VARCHAR(20)"),
+                               ("Resource_Name", "NVARCHAR(200)")),
+}
 _TABLES_READY = False
 
 
 def _ensure_tables(cur, conn):
     """Create the certification tables on first use (once per container) and
-    add the revoke columns to tables created before they existed."""
+    add the newer columns to tables created before they existed."""
     global _TABLES_READY
     if _TABLES_READY:
         return
@@ -197,9 +287,9 @@ def _ensure_tables(cur, conn):
     for name, ddl in _DDL.items():
         if name.upper() not in have:
             cur.execute(f"CREATE TABLE [{DB}].dbo.[{name}] ({ddl})")
-    for table in (T_VALIDATION, T_FILE):
+    for table, added in _ADDED_COLUMNS.items():
         cols = _columns(cur, table)
-        for col, sql_type in _REVOKE_COLUMNS:
+        for col, sql_type in added:
             if col.upper() not in cols:
                 cur.execute(f"ALTER TABLE [{DB}].dbo.[{table}] ADD [{col}] {sql_type} NULL")
     conn.commit()
@@ -248,65 +338,145 @@ def _location_table(conn, cur, mock, warnings):
                   "mocks_with_table": cycles, "warnings": warnings}
 
 
-_LOCATION_COLUMNS = ["Pillar", "Source", "Agency", "BU", "File_Type", "Entity", "MODULE", "Response",
-                     "Comments", "CertificationApplicable"]
+_LOCATION_COLUMNS = ["Pillar", "Source", "Agency", "BU", "File_Type", "Entity", "MODULE", "File_Path", "Response",
+                     "CertificationApplicable"]
 
 
 def _required_rows(cur, location):
-    """Rows of the setup table that require a certification."""
+    """Rows of the setup table that require a certification, one per record."""
     table, have = location
     select = ", ".join(f"[{c}]" if c.upper() in have else f"NULL AS [{c}]" for c in _LOCATION_COLUMNS)
     cur.execute(
         f"SELECT {select} FROM [{DB}].dbo.[{table}] "
         "WHERE UPPER(LTRIM(RTRIM(ISNULL([CertificationRequired], '')))) = 'Y'")
-    rows = []
+    rows, seen = [], set()
     for r in cur.fetchall():
-        rows.append({
-            "pillar": _s(r[0]), "source": _s(r[1]), "agency": _s(r[2]), "bu": _s(r[3]),
-            "file_type": _s(r[4]), "entity": _s(r[5]), "module": _s(r[6]), "response": _s(r[7]),
-            "comments": _s(r[8]), "certification_applicable": _s(r[9]),
-        })
-    rows.sort(key=lambda r: _k(party_name(r["source"], r["agency"]), r["source"], r["bu"], r["entity"], r["file_type"]))
+        row = {"pillar": _s(r[0]), "source": _s(r[1]), "agency": _s(r[2]), "bu": _s(r[3]),
+               "file_type": _s(r[4]), "entity": _s(r[5]), "module": _s(r[6]), "file_path": _s(r[7]),
+               "response": _s(r[8]), "certification_applicable": _s(r[9])}
+        if _row_key(row) not in seen:
+            seen.add(_row_key(row))
+            rows.append(row)
+    rows.sort(key=lambda r: _k(party_name(r["source"], r["agency"]), r["source"], r["module"], r["file_type"],
+                               r["entity"]))
     return rows
 
 
 def _parties(rows):
-    seen, out = set(), []
+    """The parties of these rows; BU is the first one the setup table gives."""
+    out = {}
     for r in rows:
-        key = _k(r["source"], r["agency"], r["bu"])
-        if key not in seen:
-            seen.add(key)
-            out.append({"source": r["source"], "agency": r["agency"], "bu": r["bu"],
-                        "party": party_name(r["source"], r["agency"])})
-    return sorted(out, key=lambda p: (p["party"].upper(), p["source"].upper(), p["bu"]))
+        p = out.setdefault(authz.party_key(r["source"], r["agency"]), {
+            "source": r["source"], "agency": r["agency"], "bu": r["bu"],
+            "party": party_name(r["source"], r["agency"])})
+        p["bu"] = p["bu"] or r["bu"]
+    return sorted(out.values(), key=lambda p: (p["party"].upper(), p["source"].upper()))
 
 
 def _file_certs(cur, mock):
+    """Current file certifications by record key. A row stored without a
+    module answers for any module of its file type + entity."""
     cur.execute(
-        f"SELECT [Source], [Agency], [BU], [Entity], [File_Type], [Notes], [Certified_By], [Certified_DTTM] "
-        f"FROM [{DB}].dbo.[{T_FILE}] WHERE [MOCK] = ? AND [Is_Current] = 1", (mock,))
-    return {_k(*r[:5]): {"notes": r[5], "certified_by": r[6], "certified_at": r[7]} for r in cur.fetchall()}
+        f"SELECT [Source], [Agency], [Module], [File_Type], [Entity], [Response_Code], [Resource_Name], [Notes], "
+        f"[Certified_By], [Certified_DTTM] FROM [{DB}].dbo.[{T_FILE}] WHERE [MOCK] = ? AND [Is_Current] = 1 "
+        "ORDER BY [ID]", (mock,))
+    return {record_key(r[0], r[1], _ANY_MODULE if r[2] is None else r[2], r[3], r[4]): {
+        "response_code": r[5], "resource_name": r[6], "notes": r[7], "certified_by": r[8], "certified_at": r[9]}
+        for r in cur.fetchall()}
+
+
+def _cert_of(certs, r):
+    return certs.get(_row_key(r)) or certs.get(
+        record_key(r["source"], r["agency"], _ANY_MODULE, r["file_type"], r["entity"]))
 
 
 def _validation_certs(cur, mock):
     cur.execute(
-        f"SELECT [Source], [Agency], [BU], [Validation_Code], [Path_Forward], [Notes], [Error_Count], "
-        f"[Certified_By], [Certified_DTTM] FROM [{DB}].dbo.[{T_VALIDATION}] WHERE [MOCK] = ? AND [Is_Current] = 1",
-        (mock,))
-    return {_k(*r[:4]): {"path_forward": r[4], "notes": r[5], "certified_count": r[6],
-                         "certified_by": r[7], "certified_at": r[8]} for r in cur.fetchall()}
+        f"SELECT [Source], [Agency], [Validation_Code], [Path_Forward], [Notes], [Error_Count], [Reviewed], "
+        f"[Target_Date], [Certified_By], [Certified_DTTM] FROM [{DB}].dbo.[{T_VALIDATION}] "
+        "WHERE [MOCK] = ? AND [Is_Current] = 1 ORDER BY [ID]", (mock,))
+    return {authz.party_key(r[0], r[1]) + _k(r[2]): {
+        "committed_path_forward": r[3], "notes": r[4], "committed_count": r[5], "reviewed": bool(r[6]),
+        "target_date": r[7], "committed_by": r[8], "committed_at": r[9]} for r in cur.fetchall()}
 
 
 def _attachment_counts(cur, mock):
     cur.execute(
-        f"SELECT [Source], [Agency], [BU], [Cert_Type], [Cert_Key], COUNT(*) FROM [{DB}].dbo.[{T_ATTACHMENT}] "
-        "WHERE [MOCK] = ? AND [Deleted] = 0 GROUP BY [Source], [Agency], [BU], [Cert_Type], [Cert_Key]", (mock,))
-    return {_k(*r[:5]): r[5] for r in cur.fetchall()}
+        f"SELECT [Source], [Agency], [Cert_Type], [Cert_Key], COUNT(*) FROM [{DB}].dbo.[{T_ATTACHMENT}] "
+        "WHERE [MOCK] = ? AND [Deleted] = 0 GROUP BY [Source], [Agency], [Cert_Type], [Cert_Key]", (mock,))
+    counts = {}
+    for r in cur.fetchall():
+        key = authz.party_key(r[0], r[1]) + _k(r[2], r[3])
+        counts[key] = counts.get(key, 0) + r[4]
+    return counts
+
+
+def _issues(cur, mock):
+    cur.execute(
+        f"SELECT [ID], [Source], [Agency], [Module], [File_Type], [Entity], [Description], [Reported_By], "
+        f"[Reported_DTTM] FROM [{DB}].dbo.[{T_ISSUE}] WHERE [MOCK] = ? AND [Deleted] = 0 ORDER BY [ID]", (mock,))
+    return [{"id": r[0], "source": _s(r[1]), "agency": _s(r[2]), "module": _s(r[3]), "file_type": _s(r[4]),
+             "entity": _s(r[5]), "description": r[6], "reported_by": r[7], "reported_at": r[8]}
+            for r in cur.fetchall()]
+
+
+def _issue_row(cur, raw_id):
+    cur.execute(
+        f"SELECT [ID], [MOCK], [Source], [Agency], [Module], [File_Type], [Entity], [Reported_By] "
+        f"FROM [{DB}].dbo.[{T_ISSUE}] WHERE [ID] = ? AND [Deleted] = 0", (_id(raw_id),))
+    r = cur.fetchone()
+    if not r:
+        raise ApiError("Issue not found", 404)
+    return {"id": r[0], "mock": _s(r[1]), "source": _s(r[2]), "agency": _s(r[3]), "module": _s(r[4]),
+            "file_type": _s(r[5]), "entity": _s(r[6]), "reported_by": _s(r[7])}
+
+
+def _issue_attachments(cur, mock):
+    """{issue id as text: its documents}."""
+    cur.execute(
+        f"SELECT [Cert_Key], [ID], [File_Name], [Size_Bytes], [Uploaded_By], [Uploaded_DTTM] "
+        f"FROM [{DB}].dbo.[{T_ATTACHMENT}] WHERE [MOCK] = ? AND [Cert_Type] = 'ISSUE' AND [Deleted] = 0 "
+        "ORDER BY [ID]", (mock,))
+    out = {}
+    for r in cur.fetchall():
+        out.setdefault(_s(r[0]), []).append(
+            {"id": r[1], "file_name": r[2], "size": r[3], "uploaded_by": r[4], "uploaded_at": r[5]})
+    return out
+
+
+def _signoffs(cur, mock):
+    cur.execute(
+        f"SELECT [Source], [Agency], [Signer_Name], [Signer_Title], [Signed_By], [Signed_DTTM] "
+        f"FROM [{DB}].dbo.[{T_SIGNOFF}] WHERE [MOCK] = ? AND [Is_Current] = 1 ORDER BY [ID]", (mock,))
+    return {authz.party_key(r[0], r[1]): {"name": r[2], "title": r[3], "by": r[4], "at": r[5]}
+            for r in cur.fetchall()}
+
+
+def _check_open(cur, mock, source, agency):
+    """409 while the party's sign-off stands: what was signed must not change."""
+    if authz.party_key(source, agency) in _signoffs(cur, mock):
+        raise ApiError(f"{party_name(source, agency)} has signed off {mock}. A super user must revoke the "
+                       "sign-off before anything can change.", 409)
+
+
+def _log_counts(cur, db, mock, flags, source):
+    where, args = "d.[MOCK] = ?", [mock]
+    if source:
+        where += " AND d.[Source] = ?"
+        args.append(source)
+    cur.execute(
+        f"SELECT d.[Source], LEFT(LTRIM(ISNULL(d.[BU], '')), 3), d.[Validation_Code], COUNT(*) "
+        f"FROM [{db}].dbo.[{LOG_TABLE}] d WHERE {where} "
+        f"AND EXISTS (SELECT 1 FROM [{db}].dbo.[{CATALOG_TABLE}] e "
+        f"WHERE e.[VALIDATION_CODE] = d.[Validation_Code] AND ({flags})) "
+        "GROUP BY d.[Source], LEFT(LTRIM(ISNULL(d.[BU], '')), 3), d.[Validation_Code]", tuple(args))
+    return cur.fetchall()
 
 
 def _reported(conn, cur, mock, warnings, source=None):
     """({SOURCE: {BU3: {code: count}}}, {CODE: catalog entry}) for the rules the
-    catalog reports to agencies. Counts only — one aggregate over the log."""
+    catalog reports to agencies or to sources. Counts only — one aggregate
+    over the log."""
     have = _ensure_team_objects(conn, cur, [LOG_TABLE, CATALOG_TABLE], warnings)
     if CATALOG_TABLE not in have:
         warnings.append(f"{CATALOG_TABLE} does not exist in {DB}; no validations can be listed.")
@@ -315,31 +485,41 @@ def _reported(conn, cur, mock, warnings, source=None):
     if "AGENCYREPORTS" not in cat_cols:
         warnings.append(f"{CATALOG_TABLE} in {DB} has no AgencyReports column; no validations can be listed.")
         return {}, {}
-    guidance = "[PATH_FORWARD]" if "PATH_FORWARD" in cat_cols else "NULL AS PATH_FORWARD"
+    to_source = "SOURCEREPORTS" in cat_cols
+    flags = "e.[AgencyReports] = 'Y'" + (" OR e.[Sourcereports] = 'Y'" if to_source else "")
     cur.execute(
-        f"SELECT [VALIDATION_CODE], [ERROR_MESSAGE], [ERROR_MESSAGE_SPA], [ENTITY], [VALIDATION_TYPE], [Severity], "
-        f"{guidance} FROM [{DB}].dbo.[{CATALOG_TABLE}] WHERE [AgencyReports] = 'Y'")
+        f"SELECT e.[VALIDATION_CODE], e.[ERROR_MESSAGE], e.[ERROR_MESSAGE_SPA], e.[ENTITY], e.[VALIDATION_TYPE], "
+        f"e.[Severity], {'e.[PATH_FORWARD]' if 'PATH_FORWARD' in cat_cols else 'NULL'}, e.[AgencyReports], "
+        f"{'e.[Sourcereports]' if to_source else 'NULL'} FROM [{DB}].dbo.[{CATALOG_TABLE}] e WHERE {flags}")
     catalog = {}
     for r in cur.fetchall():
-        catalog.setdefault(_s(r[0]).upper(), {
-            "message": r[1], "message_spa": r[2], "entity": r[3], "type": r[4],
-            "severity": r[5], "guidance": r[6]})
-    if LOG_TABLE not in have:
+        entry = catalog.setdefault(_s(r[0]).upper(), {
+            "message": r[1], "message_spa": r[2], "entity": r[3], "type": r[4], "severity": r[5],
+            "path_forward": r[6], "to_agency": False, "to_source": False})
+        # A code can be listed more than once; one of its rows may carry the text.
+        if not _s(entry["path_forward"]):
+            entry["path_forward"] = r[6]
+        entry["to_agency"] |= _s(r[7]).upper() == "Y"
+        entry["to_source"] |= _s(r[8]).upper() == "Y"
+
+    read_db = DB
+    if validation_seed.is_test_target():
+        empty = LOG_TABLE not in have
+        if not empty:
+            cur.execute(f"SELECT TOP 1 1 FROM [{DB}].dbo.[{LOG_TABLE}] WHERE [MOCK] = ?", (mock,))
+            empty = cur.fetchone() is None
+        if empty:
+            # A test database starts with an empty log: the agencies' counts
+            # (never their records) come from the main database instead.
+            read_db = SOURCE
+            warnings.append(f"The Data Cleanse Log in {DB} has no rows for {mock}; the validation counts "
+                            f"were read from {SOURCE}.")
+    elif LOG_TABLE not in have:
         warnings.append(f"{LOG_TABLE} does not exist in {DB}; no validations are reported.")
         return {}, catalog
 
-    where, args = "d.[MOCK] = ?", [mock]
-    if source:
-        where += " AND d.[Source] = ?"
-        args.append(source)
-    cur.execute(
-        f"SELECT d.[Source], LEFT(LTRIM(ISNULL(d.[BU], '')), 3), d.[Validation_Code], COUNT(*) "
-        f"FROM [{DB}].dbo.[{LOG_TABLE}] d WHERE {where} "
-        f"AND EXISTS (SELECT 1 FROM [{DB}].dbo.[{CATALOG_TABLE}] e "
-        "WHERE e.[VALIDATION_CODE] = d.[Validation_Code] AND e.[AgencyReports] = 'Y') "
-        "GROUP BY d.[Source], LEFT(LTRIM(ISNULL(d.[BU], '')), 3), d.[Validation_Code]", tuple(args))
     reported = {}
-    for src, bu3, code, n in cur.fetchall():
+    for src, bu3, code, n in _log_counts(cur, read_db, mock, flags, source):
         codes = reported.setdefault(_s(src).upper(), {}).setdefault(_s(bu3).upper(), {})
         codes[_s(code)] = codes.get(_s(code), 0) + n
     return reported, catalog
@@ -360,12 +540,18 @@ class _Access:
             return True
         key = _k(source, agency, bu)
         if key not in self._memo:
-            self._memo[key] = authz.can_act_on(self.email, source, agency, bu, _s(bu)[:3])
+            # A source-level party is matched on the party alone: a BU on its
+            # rows must not open it to that agency's users.
+            self._memo[key] = authz.can_act_on_party(self.email, source, agency, bu if _s(agency) else "")
         return self._memo[key]
 
     def check(self, source, agency, bu):
         if not self.party(source, agency, bu):
             raise ApiError(f"{self.email} is not allowed to act for {party_name(source, agency)}", 403)
+
+    def owns(self, author):
+        """Only the author of an issue or a document, or a super user, changes it."""
+        return self.role == authz.SUPER_USER or _s(author).lower() == self.email.lower()
 
 
 def _reader(email, what="viewing certifications"):
@@ -376,14 +562,38 @@ def _certifier(email, what="certifying"):
     return _Access(email, authz.AGENCY_USER, what=what)
 
 
-def _required_party(rows, source, agency, bu):
-    """The party exactly as the setup table spells it (404 when nothing is
-    required from it)."""
-    wanted = _k(source, agency, bu)
+def _required_party(rows, source, agency):
+    """(source, agency, bu) of the party as the setup table spells it (404
+    when nothing is required from it)."""
+    wanted = authz.party_key(source, agency)
+    for p in _parties(rows):
+        if authz.party_key(p["source"], p["agency"]) == wanted:
+            return p["source"], p["agency"], p["bu"]
+    raise ApiError(f"No certification is required from {party_name(source, agency)}", 404)
+
+
+def _resolve_party(conn, cur, access, mock, source, agency, warnings):
+    """(setup rows, source, agency, bu) of a request's party. The caller is
+    authorised on a party that really exists in the cycle's certification
+    list, never on the free-text values of the request."""
+    location, unavailable = _location_table(conn, cur, mock, warnings)
+    if not location:
+        raise ApiError(unavailable["message"], 404)
+    rows = _required_rows(cur, location)
+    source, agency, bu = _required_party(rows, source, agency)
+    access.check(source, agency, bu)
+    return rows, source, agency, bu
+
+
+def _required_record(rows, mock, source, agency, data):
+    """The expected record a request names, as the setup table spells it."""
+    file_type, entity = _need(data, "file_type", "File type", 30), _need(data, "entity", "Entity", 50)
+    wanted = record_key(source, agency, data.get("module"), file_type, entity)
     for r in rows:
-        if _k(r["source"], r["agency"], r["bu"]) == wanted:
-            return r["source"], r["agency"], r["bu"]
-    raise ApiError(f"No certification is required from {party_name(source, agency)} (BU {_s(bu) or 'n/a'})", 404)
+        if _row_key(r) == wanted:
+            return r
+    raise ApiError(f"{entity} ({file_type}) does not require a certification from "
+                   f"{party_name(source, agency)} for {mock}", 404)
 
 
 def _need(data, field, label=None, limit=None):
@@ -395,57 +605,98 @@ def _need(data, field, label=None, limit=None):
     return value
 
 
-def _cert_target(data):
+def _cert_target(data, types=CERT_TYPES):
     cert_type = _s(data.get("cert_type")).upper()
-    if cert_type not in CERT_TYPES:
-        raise ApiError("cert_type must be FILE or VALIDATION")
+    if cert_type not in types:
+        raise ApiError(f"cert_type must be one of {', '.join(types)}")
     return cert_type, _need(data, "cert_key", limit=200)
 
 
-# ── status snapshot (dashboard + report) ─────────────────────────────────────
+def _attach_target(cur, data, mock, source, agency):
+    """(cert_type, cert_key) a document is attached to. A document for an
+    issue goes to an issue of this same party."""
+    cert_type, cert_key = _cert_target(data)
+    if cert_type == "ISSUE":
+        issue = _issue_row(cur, cert_key)
+        party = authz.party_key(issue["source"], issue["agency"])
+        if issue["mock"] != mock or party != authz.party_key(source, agency):
+            raise ApiError("Issue not found", 404)
+        cert_key = str(issue["id"])
+    return cert_type, cert_key
+
+
+def _conflict(headers, message, **extra):
+    """A 409 that also tells the page what is missing."""
+    return {"statusCode": 409, "headers": headers,
+            "body": json.dumps({"ok": False, "error": message, **extra}, default=str)}
+
+
+# ── status snapshot (pages, dashboard and report) ────────────────────────────
+
+def _file_rows(cur, mock, rows):
+    """The expected records with their certification, issues and documents."""
+    certs, attachments = _file_certs(cur, mock), _attachment_counts(cur, mock)
+    issues = {}
+    for i in _issues(cur, mock):
+        issues[_row_key(i)] = issues.get(_row_key(i), 0) + 1
+    out = []
+    for r in rows:
+        cert = _cert_of(certs, r) or {}
+        documents = authz.party_key(r["source"], r["agency"]) + _k("FILE", file_cert_key(r["entity"], r["file_type"]))
+        out.append({**r, "party": party_name(r["source"], r["agency"]), "certified": bool(cert),
+                    "response_code": cert.get("response_code"), "resource_name": cert.get("resource_name"),
+                    "notes": cert.get("notes"), "certified_by": cert.get("certified_by"),
+                    "certified_at": cert.get("certified_at"), "issues": issues.get(_row_key(r), 0),
+                    "attachments": attachments.get(documents, 0)})
+    return out
+
+
+def _validation_rows(codes, catalog, certs, party):
+    """What the log reports to one party, with the party's commitments."""
+    out = []
+    for code in sorted(codes):
+        info = catalog.get(code.upper(), {})
+        cert = certs.get(party + _k(code)) or {}
+        out.append({"validation_code": code, "count": codes[code], "message": info.get("message"),
+                    "message_spa": info.get("message_spa"), "entity": info.get("entity"), "type": info.get("type"),
+                    "severity": info.get("severity"), "path_forward": info.get("path_forward"),
+                    "committed": bool(cert), "reviewed": bool(cert.get("reviewed")),
+                    "target_date": cert.get("target_date"), "notes": cert.get("notes"),
+                    "committed_by": cert.get("committed_by"), "committed_at": cert.get("committed_at"),
+                    "committed_path_forward": cert.get("committed_path_forward"),
+                    "committed_count": cert.get("committed_count")})
+    return out
+
 
 def _snapshot(conn, cur, mock, location, access, warnings):
     rows = [r for r in _required_rows(cur, location) if access.party(r["source"], r["agency"], r["bu"])]
-    file_certs = _file_certs(cur, mock)
-    validation_certs = _validation_certs(cur, mock)
-    attachments = _attachment_counts(cur, mock)
+    files = _file_rows(cur, mock, rows)
+    validation_certs, signoffs = _validation_certs(cur, mock), _signoffs(cur, mock)
     reported, catalog = _reported(conn, cur, mock, warnings)
     by_party = {}
-    for r in rows:
-        by_party.setdefault(_k(r["source"], r["agency"], r["bu"]), []).append(r)
+    for f in files:
+        by_party.setdefault(authz.party_key(f["source"], f["agency"]), []).append(f)
 
-    files, validations, parties = [], [], []
+    validations, parties = [], []
     for p in _parties(rows):
-        src, agency, bu = p["source"], p["agency"], p["bu"]
-        stamps, required, certified_files = [], set(), set()
-        for r in by_party[_k(src, agency, bu)]:
-            cert = file_certs.get(_k(src, agency, bu, r["entity"], r["file_type"]))
-            files.append({**r, "party": p["party"], "certified": bool(cert), **(cert or {}),
-                          "attachments": attachments.get(
-                              _k(src, agency, bu, "FILE", file_cert_key(r["entity"], r["file_type"])), 0)})
-            required.add(_k(r["entity"], r["file_type"]))
-            if cert:
-                certified_files.add(_k(r["entity"], r["file_type"]))
-                stamps.append(cert["certified_at"])
-        codes = validations_for(reported, src, bu)
-        certified_validations = 0
-        for code in sorted(codes):
-            cert = validation_certs.get(_k(src, agency, bu, code))
-            validations.append({**p, "validation_code": code, "count": codes[code],
-                                **catalog.get(code.upper(), {}), "certified": bool(cert), **(cert or {}),
-                                "attachments": attachments.get(_k(src, agency, bu, "VALIDATION", code), 0)})
-            if cert:
-                certified_validations += 1
-                stamps.append(cert["certified_at"])
-        done, total = len(certified_files) + certified_validations, len(required) + len(codes)
-        parties.append({**p, "files_required": len(required), "files_certified": len(certified_files),
-                        "validations_reported": len(codes), "validations_certified": certified_validations,
+        key = authz.party_key(p["source"], p["agency"])
+        mine = by_party[key]
+        certified = [f for f in mine if f["certified"]]
+        reported_here = _validation_rows(validations_for(reported, catalog, p["source"], p["agency"]),
+                                         catalog, validation_certs, key)
+        committed = [v for v in reported_here if v["committed"]]
+        validations.extend({**p, **v} for v in reported_here)
+        stamps = [f["certified_at"] for f in certified] + [v["committed_at"] for v in committed]
+        done, total = len(certified) + len(committed), len(mine) + len(reported_here)
+        parties.append({**p, "files_required": len(mine), "files_certified": len(certified),
+                        "with_issues": sum(1 for f in certified if f["response_code"] == "ISSUES"),
+                        "validations_reported": len(reported_here), "validations_certified": len(committed),
                         "pct": _pct(done, total), "last_activity": max(filter(None, stamps), default=None),
-                        "status": status_of(done, total)})
+                        "status": status_of(done, total), "signoff": signoffs.get(key)})
 
     sums = {f: sum(p[f] for p in parties) for f in
-            ("files_required", "files_certified", "validations_reported", "validations_certified")}
-    totals = {"parties": len(parties), **sums,
+            ("files_required", "files_certified", "with_issues", "validations_reported", "validations_certified")}
+    totals = {"parties": len(parties), **sums, "signed_off": sum(1 for p in parties if p["signoff"]),
               "pct_complete": _pct(sums["files_certified"] + sums["validations_certified"],
                                    sums["files_required"] + sums["validations_reported"])}
     return {"totals": totals, "parties": parties, "files": files, "validations": validations}
@@ -453,15 +704,12 @@ def _snapshot(conn, cur, mock, location, access, warnings):
 
 # ── status report workbook ───────────────────────────────────────────────────
 
-def _xl(value):
+def _xl(ws, value):
     if value is None:
         return ""
     if isinstance(value, datetime):
-        return value.strftime("%Y-%m-%d %H:%M:%S")
-    if isinstance(value, str):
-        from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
-        return ILLEGAL_CHARACTERS_RE.sub("", value)
-    return value
+        value = value.strftime("%Y-%m-%d %H:%M:%S")
+    return api_util.xlsx_value(ws, value)
 
 
 def _sheet(ws, header, records, widths):
@@ -474,11 +722,7 @@ def _sheet(ws, header, records, widths):
         cell.font = Font(bold=True, color="FFFFFF")
         cell.alignment = Alignment(vertical="center", wrap_text=True)
     for rec in records:
-        ws.append([_xl(v) for v in rec])
-        for cell in ws[ws.max_row]:
-            # Text typed by a user is never a formula.
-            if isinstance(cell.value, str) and cell.value.startswith("="):
-                cell.data_type = "s"
+        ws.append([_xl(ws, v) for v in rec])
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = f"A1:{get_column_letter(len(header))}{max(2, len(records) + 1)}"
     for i, w in enumerate(widths, start=1):
@@ -494,37 +738,47 @@ def build_status_workbook(mock, snapshot, generated_by, when=None):
 
     ws = wb.active
     ws.title = "Summary"
-    header = ["Party", "Source", "Agency", "BU", "Files Required", "Files Certified", "Validations Reported",
-              "Validations Certified", "% Complete", "Status", "Last Activity"]
-    parties = snapshot["parties"]
-    _sheet(ws, header, [[p["party"], p["source"], p["agency"], p["bu"], p["files_required"], p["files_certified"],
-                         p["validations_reported"], p["validations_certified"], p["pct"], p["status"],
-                         p["last_activity"]] for p in parties], [34, 14, 34, 10, 14, 14, 18, 18, 12, 14, 20])
+    header = ["Party", "Source", "Agency", "BU", "Files Required", "Files Certified", "With Issues",
+              "Validations Reported", "Validations Certified", "% Complete", "Status", "Signed Off", "Signer",
+              "Signer Title", "Signed By", "Signed At", "Last Activity"]
+    records = []
+    for p in snapshot["parties"]:
+        signed = p["signoff"] or {}
+        records.append([p["party"], p["source"], p["agency"], p["bu"], p["files_required"], p["files_certified"],
+                        p["with_issues"], p["validations_reported"], p["validations_certified"], p["pct"],
+                        p["status"], "Yes" if signed else "No", signed.get("name"), signed.get("title"),
+                        signed.get("by"), signed.get("at"), p["last_activity"]])
+    _sheet(ws, header, records, [34, 14, 34, 10, 14, 14, 12, 18, 18, 12, 14, 12, 30, 30, 30, 20, 20])
     t = snapshot["totals"]
     ws.append([])
-    ws.append([f"Total ({t['parties']} parties)", "", "", "", t["files_required"], t["files_certified"],
-               t["validations_reported"], t["validations_certified"], t["pct_complete"]])
+    ws.append([_xl(ws, v) for v in (
+        f"Total ({t['parties']} parties)", "", "", "", t["files_required"], t["files_certified"], t["with_issues"],
+        t["validations_reported"], t["validations_certified"], t["pct_complete"], "", t["signed_off"])])
     for cell in ws[ws.max_row]:
         cell.font = Font(bold=True)
-    ws.append([f"Certification status for {mock} generated {when.strftime('%Y-%m-%d %H:%M:%S')} by {generated_by}"])
+    ws.append([_xl(ws, f"Certification status for {mock} generated {when.strftime('%Y-%m-%d %H:%M:%S')} "
+                       f"by {generated_by}")])
 
     header = ["Party", "Source", "Agency", "BU", "Pillar", "Module", "Entity", "File Type", "Response",
-              "Certification Applicable", "Status", "Certified By", "Certified At", "Notes", "Attachments"]
+              "Certification Applicable", "Status", "Certification Response", "Agency Resource", "Issues",
+              "Certified By", "Certified At", "Notes", "Attachments"]
     _sheet(wb.create_sheet("File Certifications"), header,
            [[f["party"], f["source"], f["agency"], f["bu"], f["pillar"], f["module"], f["entity"], f["file_type"],
              f["response"], f["certification_applicable"], "Certified" if f["certified"] else "Pending",
-             f.get("certified_by"), f.get("certified_at"), f.get("notes"), f["attachments"]]
-            for f in snapshot["files"]], [34, 14, 34, 10, 12, 16, 26, 14, 18, 14, 12, 30, 20, 60, 12])
+             f["response_code"], f["resource_name"], f["issues"], f["certified_by"], f["certified_at"], f["notes"],
+             f["attachments"]]
+            for f in snapshot["files"]], [34, 14, 34, 10, 12, 24, 26, 26, 18, 14, 12, 18, 30, 10, 30, 20, 60, 12])
 
     header = ["Party", "Source", "Agency", "BU", "Validation Code", "Error Message", "Entity", "Validation Type",
-              "Severity", "Error Count", "Status", "Path Forward", "Notes", "Certified By", "Certified At",
-              "Error Count When Certified", "Attachments"]
+              "Severity", "Error Count", "Status", "Path Forward", "Reviewed", "Target Date", "Notes",
+              "Committed By", "Committed At", "Path Forward When Committed", "Error Count When Committed"]
     _sheet(wb.create_sheet("Validation Certifications"), header,
-           [[v["party"], v["source"], v["agency"], v["bu"], v["validation_code"], v.get("message"), v.get("entity"),
-             v.get("type"), v.get("severity"), v["count"], "Certified" if v["certified"] else "Pending",
-             v.get("path_forward"), v.get("notes"), v.get("certified_by"), v.get("certified_at"),
-             v.get("certified_count"), v["attachments"]]
-            for v in snapshot["validations"]], [34, 14, 34, 10, 18, 60, 20, 16, 12, 12, 12, 50, 50, 30, 20, 14, 12])
+           [[v["party"], v["source"], v["agency"], v["bu"], v["validation_code"], v["message"], v["entity"],
+             v["type"], v["severity"], v["count"], "Committed" if v["committed"] else "Pending", v["path_forward"],
+             "Yes" if v["reviewed"] else "", v["target_date"], v["notes"], v["committed_by"], v["committed_at"],
+             v["committed_path_forward"], v["committed_count"]]
+            for v in snapshot["validations"]],
+           [34, 14, 34, 10, 18, 60, 20, 16, 12, 12, 12, 50, 10, 14, 50, 30, 20, 50, 14])
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -533,6 +787,19 @@ def build_status_workbook(mock, snapshot, generated_by, when=None):
 
 # ── actions ──────────────────────────────────────────────────────────────────
 
+_ROW_FIELDS = ("source", "agency", "bu", "party", "module", "file_type", "entity", "file_path", "certified",
+               "response_code", "resource_name", "notes", "certified_by", "certified_at", "issues", "attachments")
+_RECORD_FIELDS = ("source", "agency", "party", "module", "file_type", "entity", "response_code", "resource_name",
+                  "certified_by", "certified_at", "issues")
+_VALIDATION_FIELDS = ("validation_code", "count", "message", "message_spa", "entity", "type", "severity",
+                      "path_forward", "committed", "reviewed", "target_date", "notes", "committed_by", "committed_at")
+_RECORD_STATES = {
+    "pending": lambda f: not f["certified"],
+    "completed": lambda f: f["certified"],
+    "issues": lambda f: f["certified"] and f["response_code"] == "ISSUES",
+}
+
+
 def _expected(conn, cur, p, headers):
     mock = _mock(p.get("mock"))
     access = _reader(p.get("email"))
@@ -540,141 +807,252 @@ def _expected(conn, cur, p, headers):
     location, unavailable = _location_table(conn, cur, mock, warnings)
     if not location:
         return api_util.ok(headers, unavailable)
-    rows = [r for r in _required_rows(cur, location) if access.party(r["source"], r["agency"], r["bu"])]
-    certs, attachments = _file_certs(cur, mock), _attachment_counts(cur, mock)
-    out = []
-    for r in rows:
-        cert = certs.get(_k(r["source"], r["agency"], r["bu"], r["entity"], r["file_type"])) or {}
-        out.append({**r, "certified": bool(cert), "certified_by": cert.get("certified_by"),
-                    "certified_at": cert.get("certified_at"), "notes": cert.get("notes"),
-                    "attachments": attachments.get(_k(r["source"], r["agency"], r["bu"], "FILE",
-                                                      file_cert_key(r["entity"], r["file_type"])), 0)})
-    return api_util.ok(headers, {"available": True, "mock": mock, "db": DB, "parties": _parties(rows),
-                                 "rows": out, "warnings": warnings})
+    snap = _snapshot(conn, cur, mock, location, access, warnings)
+    parties = [{"source": s["source"], "agency": s["agency"], "bu": s["bu"], "party": s["party"],
+                "required": s["files_required"], "certified": s["files_certified"], "with_issues": s["with_issues"],
+                "validations_reported": s["validations_reported"],
+                "validations_committed": s["validations_certified"], "signed_off": s["signoff"],
+                "status": portal_status(s["signoff"], s["files_certified"] + s["validations_certified"],
+                                        s["files_required"] + s["validations_reported"])}
+               for s in snap["parties"]]
+    return api_util.ok(headers, {
+        "available": True, "mock": mock, "responses": [{"code": c, "label": t} for c, t in RESPONSES.items()],
+        "parties": parties, "rows": [{f: r[f] for f in _ROW_FIELDS} for r in snap["files"]], "warnings": warnings})
 
 
 def _validations(conn, cur, p, headers):
     mock = _mock(p.get("mock"))
     access = _reader(p.get("email"))
-    source, agency, bu = _need(p, "source"), _s(p.get("agency")), _s(p.get("bu"))
     warnings = []
-    # Authorise on a party that really exists in the cycle's certification
-    # list, never on the free-text values of the request.
-    location, unavailable = _location_table(conn, cur, mock, warnings)
-    if not location:
-        raise ApiError(unavailable["message"], 404)
-    source, agency, bu = _required_party(_required_rows(cur, location), source, agency, bu)
-    access.check(source, agency, bu)
+    _, source, agency, bu = _resolve_party(conn, cur, access, mock, _need(p, "source"), _s(p.get("agency")), warnings)
     reported, catalog = _reported(conn, cur, mock, warnings, source=source)
-    codes = validations_for(reported, source, bu)
-    certs, attachments = _validation_certs(cur, mock), _attachment_counts(cur, mock)
-    out = []
-    for code in sorted(codes):
-        info = catalog.get(code.upper(), {})
-        cert = certs.get(_k(source, agency, bu, code)) or {}
-        out.append({"validation_code": code, "count": codes[code], "message": info.get("message"),
-                    "message_spa": info.get("message_spa"), "entity": info.get("entity"), "type": info.get("type"),
-                    "severity": info.get("severity"), "guidance": info.get("guidance"),
-                    "certified": bool(cert), "path_forward": cert.get("path_forward"), "notes": cert.get("notes"),
-                    "certified_by": cert.get("certified_by"), "certified_at": cert.get("certified_at"),
-                    "certified_count": cert.get("certified_count"),
-                    "attachments": attachments.get(_k(source, agency, bu, "VALIDATION", code), 0)})
-    return api_util.ok(headers, {"mock": mock, "db": DB, "source": source, "agency": agency, "bu": bu,
-                                 "party": party_name(source, agency), "validations": out, "warnings": warnings})
+    rows = _validation_rows(validations_for(reported, catalog, source, agency), catalog,
+                            _validation_certs(cur, mock), authz.party_key(source, agency))
+    return api_util.ok(headers, {"mock": mock, "source": source, "agency": agency, "bu": bu,
+                                 "party": party_name(source, agency),
+                                 "validations": [{f: v[f] for f in _VALIDATION_FIELDS} for v in rows],
+                                 "warnings": warnings})
 
 
-def _writable_party(conn, cur, data, what):
-    """(access, mock, table rows, source, agency, bu) for a change: the caller
-    may certify, the cycle is set up and the party is one that must certify."""
-    access = _certifier(data.get("actor"), what)
-    mock = _mock(data.get("mock"))
-    source, agency, bu = _need(data, "source"), _s(data.get("agency")), _s(data.get("bu"))
-    access.check(source, agency, bu)
+def _issues_list(conn, cur, p, headers):
+    mock = _mock(p.get("mock"))
+    access = _reader(p.get("email"), "viewing reported issues")
+    issues = _issues(cur, mock)
+    if _s(p.get("source")):
+        _, source, agency, _ = _resolve_party(conn, cur, access, mock, _s(p.get("source")), _s(p.get("agency")), [])
+        party = authz.party_key(source, agency)
+        issues = [i for i in issues if authz.party_key(i["source"], i["agency"]) == party]
+    elif access.role == authz.AGENCY_USER:
+        raise ApiError("source is required")
+    for field in ("module", "file_type", "entity"):
+        if _s(p.get(field)):
+            issues = [i for i in issues if _k(i[field]) == _k(p.get(field))]
+    certs, attachments = _file_certs(cur, mock), _issue_attachments(cur, mock)
+    return api_util.ok(headers, {"issues": [
+        {**i, "party": party_name(i["source"], i["agency"]), "certified": bool(_cert_of(certs, i)),
+         "attachments": attachments.get(str(i["id"]), [])} for i in issues]})
+
+
+def _records(conn, cur, p, headers):
+    mock = _mock(p.get("mock"))
+    access = _reader(p.get("email"))
+    state = _s(p.get("state")).lower()
+    if state not in _RECORD_STATES:
+        raise ApiError(f"state must be one of {', '.join(_RECORD_STATES)}")
     location, unavailable = _location_table(conn, cur, mock, [])
     if not location:
-        raise ApiError(unavailable["message"], 404)
-    rows = _required_rows(cur, location)
-    source, agency, bu = _required_party(rows, source, agency, bu)
+        return api_util.ok(headers, {**unavailable, "records": []})
+    rows = [r for r in _required_rows(cur, location) if access.party(r["source"], r["agency"], r["bu"])]
+    return api_util.ok(headers, {"mock": mock, "state": state, "records": [
+        {f: r[f] for f in _RECORD_FIELDS} for r in _file_rows(cur, mock, rows) if _RECORD_STATES[state](r)]})
+
+
+def _writable_party(conn, cur, data, what, locked=True):
+    """(access, mock, table rows, source, agency, bu) for a change: the caller
+    may certify, the cycle is set up, the party is one that must certify and
+    (for anything but a new document) it has not signed off."""
+    access = _certifier(data.get("actor"), what)
+    mock = _mock(data.get("mock"))
+    rows, source, agency, bu = _resolve_party(conn, cur, access, mock, _need(data, "source"),
+                                              _s(data.get("agency")), [])
+    if locked:
+        _check_open(cur, mock, source, agency)
     return access, mock, rows, source, agency, bu
 
 
 def _certify_validation(conn, cur, data, headers):
-    access, mock, _, source, agency, bu = _writable_party(conn, cur, data, "certifying a validation")
+    access, mock, _, source, agency, bu = _writable_party(conn, cur, data, "committing to a path forward")
     code = _need(data, "validation_code", "Validation code", 50)
-    path_forward = _need(data, "path_forward", "Path forward")
-    notes = _need(data, "notes", "Note")
+    reviewed = _flag(data.get("reviewed"))
+    target_date = _date(data.get("target_date"), "Target date")
+    notes = _s(data.get("notes")) or None
+    if not (reviewed or target_date or notes):
+        raise ApiError("Confirm the path forward was reviewed, or give a target date or a note")
     warnings = []
-    reported, _ = _reported(conn, cur, mock, warnings, source=source)
-    counts = {c.upper(): (c, n) for c, n in validations_for(reported, source, bu).items()}
+    reported, catalog = _reported(conn, cur, mock, warnings, source=source)
+    counts = {c.upper(): (c, n) for c, n in validations_for(reported, catalog, source, agency).items()}
     if code.upper() not in counts:
         raise ApiError(f"{code} is not reported to {party_name(source, agency)} for {mock}", 404)
     code, count = counts[code.upper()]
+    # The path forward is kept as the rule worded it on the day of the commitment.
+    path_forward = catalog.get(code.upper(), {}).get("path_forward")
     cur.execute(
         f"UPDATE [{DB}].dbo.[{T_VALIDATION}] SET [Is_Current] = 0 WHERE [MOCK] = ? AND [Source] = ? "
-        "AND [Agency] = ? AND [BU] = ? AND [Validation_Code] = ? AND [Is_Current] = 1",
-        (mock, source, agency, bu, code))
+        "AND [Agency] = ? AND [Validation_Code] = ? AND [Is_Current] = 1", (mock, source, agency, code))
     cur.execute(
         f"INSERT INTO [{DB}].dbo.[{T_VALIDATION}] ([MOCK], [Source], [Agency], [BU], [Validation_Code], "
-        "[Path_Forward], [Notes], [Error_Count], [Certified_By], [Certified_DTTM], [Is_Current]) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, GETDATE(), 1)",
-        (mock, source, agency, bu, code, path_forward, notes, count, access.email))
+        "[Path_Forward], [Notes], [Error_Count], [Reviewed], [Target_Date], [Certified_By], [Certified_DTTM], "
+        "[Is_Current]) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, GETDATE(), 1)",
+        (mock, source, agency, bu, code, path_forward, notes, count, reviewed, target_date, access.email))
     conn.commit()
     return api_util.ok(headers, {"mock": mock, "source": source, "agency": agency, "bu": bu,
-                                 "validation_code": code, "error_count": count, "certified_by": access.email})
+                                 "validation_code": code, "error_count": count, "reviewed": reviewed,
+                                 "target_date": target_date, "committed_by": access.email})
 
 
 def _certify_file(conn, cur, data, headers):
     access, mock, rows, source, agency, bu = _writable_party(conn, cur, data, "certifying a file")
-    entity, file_type = _need(data, "entity", "Entity", 50), _need(data, "file_type", "File type", 30)
-    notes = _need(data, "notes", "Notes")
-    wanted = _k(source, agency, bu, entity, file_type)
-    match = next((r for r in rows if _k(r["source"], r["agency"], r["bu"], r["entity"], r["file_type"]) == wanted), None)
-    if not match:
-        raise ApiError(f"{entity} ({file_type}) does not require a certification from "
-                       f"{party_name(source, agency)} for {mock}", 404)
-    entity, file_type = match["entity"], match["file_type"]
+    record = _required_record(rows, mock, source, agency, data)
+    module, file_type, entity = record["module"], record["file_type"], record["entity"]
+    response_code = _s(data.get("response_code")).upper()
+    if response_code not in RESPONSES:
+        raise ApiError(f"response_code must be one of {', '.join(RESPONSES)}")
+    resource_name = _need(data, "resource_name", "Agency resource", 200)
+    notes = _s(data.get("notes")) or None
+    if response_code == "ISSUES":
+        issues = [i for i in _issues(cur, mock) if _row_key(i) == _row_key(record)]
+        if not issues:
+            raise ApiError("Report at least one issue on this record before certifying it with issues")
+        documents = _issue_attachments(cur, mock)
+        bare = [_s(i["description"])[:60] for i in issues if not documents.get(str(i["id"]))]
+        if bare:
+            raise ApiError("Every issue needs a supporting document. Missing on: " + "; ".join(bare))
     cur.execute(
         f"UPDATE [{DB}].dbo.[{T_FILE}] SET [Is_Current] = 0 WHERE [MOCK] = ? AND [Source] = ? AND [Agency] = ? "
-        "AND [BU] = ? AND [Entity] = ? AND [File_Type] = ? AND [Is_Current] = 1",
-        (mock, source, agency, bu, entity, file_type))
+        "AND [Entity] = ? AND [File_Type] = ? AND ([Module] = ? OR [Module] IS NULL) AND [Is_Current] = 1",
+        (mock, source, agency, entity, file_type, module))
     cur.execute(
-        f"INSERT INTO [{DB}].dbo.[{T_FILE}] ([MOCK], [Source], [Agency], [BU], [Entity], [File_Type], [Notes], "
-        "[Certified_By], [Certified_DTTM], [Is_Current]) VALUES (?, ?, ?, ?, ?, ?, ?, ?, GETDATE(), 1)",
-        (mock, source, agency, bu, entity, file_type, notes, access.email))
+        f"INSERT INTO [{DB}].dbo.[{T_FILE}] ([MOCK], [Source], [Agency], [BU], [Module], [Entity], [File_Type], "
+        "[Response_Code], [Resource_Name], [Notes], [Certified_By], [Certified_DTTM], [Is_Current]) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, GETDATE(), 1)",
+        (mock, source, agency, bu, module, entity, file_type, response_code, resource_name, notes, access.email))
     conn.commit()
-    return api_util.ok(headers, {"mock": mock, "source": source, "agency": agency, "bu": bu, "entity": entity,
-                                 "file_type": file_type, "certified_by": access.email})
+    return api_util.ok(headers, {"mock": mock, "source": source, "agency": agency, "bu": bu, "module": module,
+                                 "file_type": file_type, "entity": entity, "response_code": response_code,
+                                 "resource_name": resource_name, "certified_by": access.email})
+
+
+def _issue_save(conn, cur, data, headers):
+    access, mock, rows, source, agency, _ = _writable_party(conn, cur, data, "reporting an issue")
+    record = _required_record(rows, mock, source, agency, data)
+    description = _need(data, "description", "Description", MAX_ISSUE_LENGTH)
+    if _s(data.get("id")):
+        issue = _issue_row(cur, data.get("id"))
+        if issue["mock"] != mock or _row_key(issue) != _row_key(record):
+            raise ApiError("Issue not found", 404)
+        if not access.owns(issue["reported_by"]):
+            raise ApiError("Only the person who reported an issue, or a super user, can change it", 403)
+        cur.execute(f"UPDATE [{DB}].dbo.[{T_ISSUE}] SET [Description] = ? WHERE [ID] = ?",
+                    (description, issue["id"]))
+        issue_id = issue["id"]
+    else:
+        cur.execute(
+            f"INSERT INTO [{DB}].dbo.[{T_ISSUE}] ([MOCK], [Source], [Agency], [Module], [File_Type], [Entity], "
+            "[Description], [Reported_By], [Reported_DTTM], [Deleted]) OUTPUT INSERTED.[ID] "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, GETDATE(), 0)",
+            (mock, source, agency, record["module"], record["file_type"], record["entity"], description,
+             access.email))
+        issue_id = cur.fetchone()[0]
+    conn.commit()
+    return api_util.ok(headers, {"id": issue_id})
+
+
+def _issue_delete(conn, cur, data, headers):
+    access = _certifier(data.get("actor"), "removing an issue")
+    issue = _issue_row(cur, data.get("id"))
+    if not access.owns(issue["reported_by"]):
+        raise ApiError("Only the person who reported an issue, or a super user, can remove it", 403)
+    _check_open(cur, issue["mock"], issue["source"], issue["agency"])
+    cur.execute(f"UPDATE [{DB}].dbo.[{T_ISSUE}] SET [Deleted] = 1 WHERE [ID] = ?", (issue["id"],))
+    conn.commit()
+    return api_util.ok(headers, {"id": issue["id"], "deleted": True})
+
+
+def _signoff(conn, cur, data, headers):
+    access, mock, rows, source, agency, bu = _writable_party(conn, cur, data, "signing off the certification")
+    signer_name = _need(data, "signer_name", "Name", 200)
+    signer_title = _need(data, "signer_title", "Title", 200)
+    party = authz.party_key(source, agency)
+    mine = [r for r in rows if authz.party_key(r["source"], r["agency"]) == party]
+    # An "issues" response whose issues or documents were removed afterwards
+    # no longer stands, so it counts as not certified.
+    documents = _issue_attachments(cur, mock)
+    issues = _issues(cur, mock)
+    backed = ({_row_key(i) for i in issues}
+              - {_row_key(i) for i in issues if not documents.get(str(i["id"]))})
+    missing_records = [{"module": f["module"], "file_type": f["file_type"], "entity": f["entity"]}
+                       for f in _file_rows(cur, mock, mine)
+                       if not f["certified"] or (f["response_code"] == "ISSUES" and _row_key(f) not in backed)]
+    warnings = []
+    reported, catalog = _reported(conn, cur, mock, warnings, source=source)
+    committed = _validation_certs(cur, mock)
+    missing_validations = sorted(code for code in validations_for(reported, catalog, source, agency)
+                                 if party + _k(code) not in committed)
+    if missing_records or missing_validations:
+        return _conflict(headers, f"{party_name(source, agency)} cannot sign off {mock} yet: "
+                                  f"{len(missing_records)} record(s) are not certified and "
+                                  f"{len(missing_validations)} validation(s) have no commitment.",
+                         missing_records=missing_records, missing_validations=missing_validations)
+    statement = SIGNOFF_STATEMENT.format(mock=mock)
+    cur.execute(
+        f"INSERT INTO [{DB}].dbo.[{T_SIGNOFF}] ([MOCK], [Source], [Agency], [Signer_Name], [Signer_Title], "
+        "[Signed_By], [Signed_DTTM], [Statement], [Is_Current]) OUTPUT INSERTED.[ID], INSERTED.[Signed_DTTM] "
+        "VALUES (?, ?, ?, ?, ?, ?, GETDATE(), ?, 1)",
+        (mock, source, agency, signer_name, signer_title, access.email, statement))
+    new_id, signed_at = cur.fetchone()
+    conn.commit()
+    return api_util.ok(headers, {"id": new_id, "mock": mock, "source": source, "agency": agency, "bu": bu,
+                                 "signer_name": signer_name, "signer_title": signer_title,
+                                 "signed_by": access.email, "signed_at": signed_at, "statement": statement,
+                                 "warnings": warnings})
 
 
 def _revoke(conn, cur, data, headers):
-    """Withdraw the current certification of a file or a validation (super
-    users only). The row stays as history, stamped with who revoked it and why."""
+    """Withdraw the current certification of a file or a validation, or a
+    party's sign-off (super users only). The row stays as history, stamped
+    with who revoked it and why."""
     actor = _s(data.get("actor"))
     authz.require(actor, what="revoking a certification")
     mock = _mock(data.get("mock"))
-    source, agency, bu = _need(data, "source"), _s(data.get("agency")), _s(data.get("bu"))
-    cert_type, cert_key = _cert_target(data)
+    source, agency = _need(data, "source"), _s(data.get("agency"))
+    cert_type = _s(data.get("cert_type")).upper()
     reason = _need(data, "reason", "Reason")
-    if cert_type == "VALIDATION":
-        table, where, params = T_VALIDATION, "[Validation_Code] = ?", (cert_key,)
+    if cert_type == "SIGNOFF":
+        table, cert_key, where, params = T_SIGNOFF, "", "1 = 1", ()
     else:
-        entity, _, file_type = cert_key.partition("|")
-        table, where, params = T_FILE, "[Entity] = ? AND [File_Type] = ?", (entity, file_type)
+        cert_type, cert_key = _cert_target(data, REVOKE_TYPES)
+        _check_open(cur, mock, source, agency)
+        if cert_type == "VALIDATION":
+            table, where, params = T_VALIDATION, "[Validation_Code] = ?", (cert_key,)
+        else:
+            entity, _, file_type = cert_key.partition("|")
+            table, where, params = T_FILE, "[Entity] = ? AND [File_Type] = ?", (entity, file_type)
+    cur.execute(f"SELECT [ID], [Source], [Agency] FROM [{DB}].dbo.[{table}] "
+                f"WHERE [MOCK] = ? AND [Is_Current] = 1 AND {where}", (mock,) + params)
+    party = authz.party_key(source, agency)
+    ids = [r[0] for r in cur.fetchall() if authz.party_key(r[1], r[2]) == party]
+    if not ids:
+        raise ApiError("There is no current certification to revoke", 404)
     cur.execute(
         f"UPDATE [{DB}].dbo.[{table}] SET [Is_Current] = 0, [Revoked_By] = ?, [Revoked_DTTM] = GETDATE(), "
-        f"[Revoke_Reason] = ? WHERE [MOCK] = ? AND [Source] = ? AND [Agency] = ? AND [BU] = ? AND {where} "
-        "AND [Is_Current] = 1",
-        (actor, reason, mock, source, agency, bu) + params)
-    revoked = cur.rowcount
+        f"[Revoke_Reason] = ? WHERE [ID] IN ({', '.join('?' for _ in ids)})", (actor, reason) + tuple(ids))
     conn.commit()
-    if not revoked:
-        raise ApiError("There is no current certification to revoke", 404)
-    return api_util.ok(headers, {"revoked": revoked, "cert_type": cert_type, "cert_key": cert_key})
+    return api_util.ok(headers, {"revoked": len(ids), "cert_type": cert_type, "cert_key": cert_key})
 
 
 def _upload_url(conn, cur, data, bucket, headers):
-    _, mock, _, source, agency, bu = _writable_party(conn, cur, data, "attaching a document")
-    cert_type, cert_key = _cert_target(data)
+    _, mock, _, source, agency, bu = _writable_party(conn, cur, data, "attaching a document", locked=False)
+    cert_type, cert_key = _attach_target(cur, data, mock, source, agency)
     file_name = _need(data, "file_name", "File name", 300)
     content_type = _s(data.get("content_type")) or "application/octet-stream"
     try:
@@ -693,8 +1071,8 @@ def _upload_url(conn, cur, data, bucket, headers):
 
 
 def _attachment_add(conn, cur, data, bucket, headers):
-    access, mock, _, source, agency, bu = _writable_party(conn, cur, data, "attaching a document")
-    cert_type, cert_key = _cert_target(data)
+    access, mock, _, source, agency, bu = _writable_party(conn, cur, data, "attaching a document", locked=False)
+    cert_type, cert_key = _attach_target(cur, data, mock, source, agency)
     key = _need(data, "key", limit=MAX_KEY_LENGTH)
     file_name = _need(data, "file_name", "File name", 300)
     prefix = cert_prefix(mock, source, agency, bu, cert_type, cert_key)
@@ -718,29 +1096,24 @@ def _attachment_add(conn, cur, data, bucket, headers):
     return api_util.ok(headers, {"id": new_id, "file_name": file_name, "size": size})
 
 
-def _attachments(cur, p, headers):
+def _attachments(conn, cur, p, headers):
     mock = _mock(p.get("mock"))
     access = _reader(p.get("email"))
-    source, agency, bu = _need(p, "source"), _s(p.get("agency")), _s(p.get("bu"))
-    access.check(source, agency, bu)
+    _, source, agency, _ = _resolve_party(conn, cur, access, mock, _need(p, "source"), _s(p.get("agency")), [])
     cert_type, cert_key = _cert_target(p)
     cur.execute(
         f"SELECT [ID], [File_Name], [Size_Bytes], [Uploaded_By], [Uploaded_DTTM] FROM [{DB}].dbo.[{T_ATTACHMENT}] "
-        "WHERE [MOCK] = ? AND [Source] = ? AND [Agency] = ? AND [BU] = ? AND [Cert_Type] = ? AND [Cert_Key] = ? "
-        "AND [Deleted] = 0 ORDER BY [ID]", (mock, source, agency, bu, cert_type, cert_key))
+        "WHERE [MOCK] = ? AND [Source] = ? AND [Agency] = ? AND [Cert_Type] = ? AND [Cert_Key] = ? "
+        "AND [Deleted] = 0 ORDER BY [ID]", (mock, source, agency, cert_type, cert_key))
     items = [{"id": r[0], "file_name": r[1], "size": r[2], "uploaded_by": r[3], "uploaded_at": r[4]}
              for r in cur.fetchall()]
     return api_util.ok(headers, {"attachments": items})
 
 
 def _attachment_row(cur, raw_id):
-    try:
-        att_id = int(raw_id)
-    except (TypeError, ValueError):
-        raise ApiError("id must be a number")
     cur.execute(
-        f"SELECT [ID], [Source], [Agency], [BU], [File_Name], [S3_Key], [Uploaded_By] "
-        f"FROM [{DB}].dbo.[{T_ATTACHMENT}] WHERE [ID] = ? AND [Deleted] = 0", (att_id,))
+        f"SELECT [ID], [Source], [Agency], [BU], [File_Name], [S3_Key], [Uploaded_By], [MOCK] "
+        f"FROM [{DB}].dbo.[{T_ATTACHMENT}] WHERE [ID] = ? AND [Deleted] = 0", (_id(raw_id),))
     row = cur.fetchone()
     if not row:
         raise ApiError("Attachment not found", 404)
@@ -758,11 +1131,18 @@ def _download_url(cur, p, bucket, headers):
 def _attachment_delete(conn, cur, data, headers):
     access = _certifier(data.get("actor"), "removing a certification document")
     row = _attachment_row(cur, data.get("id"))
-    if access.role != authz.SUPER_USER and _s(row[6]).lower() != access.email.lower():
+    if not access.owns(row[6]):
         raise ApiError("Only the person who uploaded a document, or a super user, can remove it", 403)
+    _check_open(cur, _s(row[7]), row[1], row[2])
     cur.execute(f"UPDATE [{DB}].dbo.[{T_ATTACHMENT}] SET [Deleted] = 1 WHERE [ID] = ?", (row[0],))
     conn.commit()
     return api_util.ok(headers, {"id": row[0], "deleted": True})
+
+
+def _status_party(p):
+    signed = p["signoff"] or {}
+    return {**{k: v for k, v in p.items() if k != "signoff"}, "signed_off": bool(signed),
+            "signed_by": signed.get("by"), "signed_at": signed.get("at")}
 
 
 def _status(conn, cur, p, headers):
@@ -774,7 +1154,7 @@ def _status(conn, cur, p, headers):
         return api_util.ok(headers, unavailable)
     snap = _snapshot(conn, cur, mock, location, access, warnings)
     return api_util.ok(headers, {"available": True, "mock": mock, "db": DB, "totals": snap["totals"],
-                                 "parties": snap["parties"], "warnings": warnings})
+                                 "parties": [_status_party(s) for s in snap["parties"]], "warnings": warnings})
 
 
 def _status_report(conn, cur, data, bucket, headers):
@@ -802,8 +1182,12 @@ def handle(action, event, bucket, headers, conn_str):
                 return _expected(conn, cur, api_util.params(event), headers)
             if action == "cert_validations":
                 return _validations(conn, cur, api_util.params(event), headers)
+            if action == "cert_issues":
+                return _issues_list(conn, cur, api_util.params(event), headers)
+            if action == "cert_records":
+                return _records(conn, cur, api_util.params(event), headers)
             if action == "cert_attachments":
-                return _attachments(cur, api_util.params(event), headers)
+                return _attachments(conn, cur, api_util.params(event), headers)
             if action == "cert_download_url":
                 return _download_url(cur, api_util.params(event), bucket, headers)
             if action == "cert_status":
@@ -814,6 +1198,12 @@ def handle(action, event, bucket, headers, conn_str):
                 return _certify_validation(conn, cur, data, headers)
             if action == "cert_certify_file":
                 return _certify_file(conn, cur, data, headers)
+            if action == "cert_issue_save":
+                return _issue_save(conn, cur, data, headers)
+            if action == "cert_issue_delete":
+                return _issue_delete(conn, cur, data, headers)
+            if action == "cert_signoff":
+                return _signoff(conn, cur, data, headers)
             if action == "cert_upload_url":
                 return _upload_url(conn, cur, data, bucket, headers)
             if action == "cert_attachment_add":

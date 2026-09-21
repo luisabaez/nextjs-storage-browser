@@ -13,6 +13,10 @@ the screen and the server cannot disagree:
 Every saved change is written, field by field, to
 SETUP_ERROR_MESSAGES_SOURCE_AUDIT (created on first use) in the same
 transaction as the update.
+
+The team loads the path forward into the main rule table. A test target works
+on its own copy of that table, so rules_sync brings the path forward across
+for the rules whose copy has none, and never overwrites one edited here.
 """
 import pyodbc
 
@@ -21,7 +25,7 @@ import authz
 import validation_seed
 from api_util import ApiError
 
-ACTIONS = {"rules_list", "rules_update", "rules_audit"}
+ACTIONS = {"rules_list", "rules_update", "rules_audit", "rules_sync"}
 
 DB = validation_seed.TARGET_DB
 SOURCE = validation_seed.SOURCE_DB
@@ -321,6 +325,45 @@ def _audit(event, headers, conn, cur):
     return api_util.ok(headers, {"rows": rows, "total": len(rows)})
 
 
+def _has_text(alias):
+    return f"NULLIF(LTRIM(RTRIM({alias}.[PATH_FORWARD])), '') IS NOT NULL"
+
+
+def _sync(event, headers, conn, cur):
+    body = api_util.body(event)
+    actor = (body.get("actor") or "").strip()
+    authz.require(actor, what="copying the path forward from the main rules")
+    if not validation_seed.is_test_target():
+        raise ApiError(f"{DB} holds the main rules; there is no test copy to fill")
+    # Before the view is prepared: that step brings missing columns across as
+    # well, and a path forward that arrived that way would go uncounted.
+    added = [col.upper() for col in _sync_table_columns(conn, cur)]
+    _ensure_view(conn, cur)
+    _ensure_audit(conn, cur)
+    audit = (f"INSERT INTO [{DB}].dbo.[{AUDIT}] ([Validation_Code], [Field_Name], [Old_Value], [New_Value], "
+             f"[Changed_By], [Changed_DTTM]) SELECT t.[VALIDATION_CODE], 'PATH_FORWARD', NULL, ")
+    if "PATH_FORWARD" in added:
+        # The copy had no such column: the helper created it and brought every
+        # value across, so what arrived is what gets recorded.
+        cur.execute(
+            audit + f"MAX(t.[PATH_FORWARD]), ?, GETDATE() FROM [{DB}].dbo.[{TABLE}] t "
+            f"WHERE {_has_text('t')} GROUP BY t.[VALIDATION_CODE]", (actor,))
+        updated = cur.rowcount
+    else:
+        # One value per code on the source side, so the audit row and the
+        # update agree when a code is duplicated there.
+        pending = (
+            f"FROM [{DB}].dbo.[{TABLE}] t JOIN (SELECT [VALIDATION_CODE], MAX([PATH_FORWARD]) AS [PATH_FORWARD] "
+            f"FROM [{SOURCE}].dbo.[{TABLE}] m WHERE {_has_text('m')} GROUP BY [VALIDATION_CODE]) s "
+            f"ON s.[VALIDATION_CODE] COLLATE DATABASE_DEFAULT = t.[VALIDATION_CODE] COLLATE DATABASE_DEFAULT "
+            f"WHERE NOT ({_has_text('t')})")
+        cur.execute(audit + f"MAX(s.[PATH_FORWARD]), ?, GETDATE() {pending} GROUP BY t.[VALIDATION_CODE]", (actor,))
+        updated = cur.rowcount
+        cur.execute(f"UPDATE t SET t.[PATH_FORWARD] = s.[PATH_FORWARD] {pending}")
+    conn.commit()
+    return api_util.ok(headers, {"updated": max(updated or 0, 0)})
+
+
 def handle(action, event, bucket, headers, conn_str):
     def run():
         with pyodbc.connect(conn_str, autocommit=False) as conn:
@@ -329,6 +372,8 @@ def handle(action, event, bucket, headers, conn_str):
                 return _list(event, headers, conn, cur)
             if action == "rules_update":
                 return _update(event, headers, conn, cur)
+            if action == "rules_sync":
+                return _sync(event, headers, conn, cur)
             return _audit(event, headers, conn, cur)
 
     return api_util.guarded(run, headers)

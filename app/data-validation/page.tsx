@@ -9,7 +9,7 @@ import '../lib/symphony.css';
 import './data-validation.css';
 import config from '../../amplify_outputs.json';
 import Link from 'next/link';
-import { ApiResult, apiGet, apiPost, fmtDateTime as fmtDate, ROLE_LABEL, useSymphonySession } from '../lib/symphony';
+import { ApiResult, apiGet, apiPost, fmtDateTime as fmtDate, ROLE_LABEL, usePortalGuard, useSymphonySession } from '../lib/symphony';
 
 Amplify.configure(config);
 
@@ -48,6 +48,7 @@ interface AgencyReport extends ApiResult { key: string; name: string; rows: numb
 
 function DataValidationPage() {
   const session = useSymphonySession();
+  const toPortal = usePortalGuard(session);   // portal-only users are sent to the HCM portal
   const { email, mock, isSuperUser } = session;
   const [programs, setPrograms] = useState<ProgramEntry[]>([]);
   const [db, setDb] = useState<{ name: string; isTest: boolean } | null>(null);
@@ -197,6 +198,7 @@ function DataValidationPage() {
   const sevClass = (s: string | null) => `sy-sev sy-sev-${(s || 'none').toLowerCase().replace(/[^a-z]/g, '')}`;
 
   if (!session.ready) return <div className="sy-page"><p className="sy-muted">Loading…</p></div>;
+  if (toPortal) return null;
   if (!isSuperUser) {
     return (
       <div className="sy-denied">

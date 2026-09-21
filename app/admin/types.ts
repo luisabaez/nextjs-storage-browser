@@ -190,10 +190,22 @@ export interface AdminUser {
 export type UserRole = 'super_user' | 'agency_user' | 'certification_reviewer' | '';
 
 export const USER_ROLE_LABELS: Record<Exclude<UserRole, ''>, string> = {
-  super_user: 'Super User',
+  super_user: 'Super User (HCM portal)',
   agency_user: 'Agency User',
   certification_reviewer: 'Certification Review',
 };
+
+// Source / agency assignments are stored as "SOURCE|AGENCY", upper-cased. The
+// agency is empty for a source-level certifier ("RHUM|").
+export function parseParty(p: string): { source: string; agency: string } {
+  const [source = '', agency = ''] = String(p || '').toUpperCase().split('|').map(s => s.trim());
+  return { source, agency };
+}
+
+export function formatParty(p: string): string {
+  const { source, agency } = parseParty(p);
+  return `${source} · ${agency || 'source level'}`;
+}
 
 // Extended permissions interface with all permission types
 export interface UserPermissions {
@@ -204,6 +216,7 @@ export interface UserPermissions {
   allowedEntities: string[];  // Dynamic, so string[] instead of type
   allowedMocks: string[];
   allowedBusinessUnits: string[];
+  parties?: string[];         // "SOURCE|AGENCY" pairs an agency user works for (HCM portal)
   updatedAt: string;
   updatedBy: string;
 }
@@ -385,6 +398,7 @@ export function saveUserFullPermissions(
     allowedEntities: string[];
     allowedMocks: string[];
     allowedBusinessUnits: string[];
+    parties?: string[];
   },
   updatedBy: string
 ): void {
@@ -397,6 +411,7 @@ export function saveUserFullPermissions(
     allowedEntities: permissions.allowedEntities,
     allowedMocks: permissions.allowedMocks,
     allowedBusinessUnits: permissions.allowedBusinessUnits,
+    parties: permissions.parties || [],
     updatedAt: new Date().toISOString(),
     updatedBy,
   };
@@ -417,6 +432,7 @@ export function saveUserPermissions(
       allowedEntities: existing?.allowedEntities || [],
       allowedMocks: existing?.allowedMocks || [],
       allowedBusinessUnits: existing?.allowedBusinessUnits || [],
+      parties: existing?.parties || [],
     },
     updatedBy
   );
@@ -458,6 +474,7 @@ export async function pushPermissionsToBackend(
     allowedEntities: string[];
     allowedMocks: string[];
     allowedBusinessUnits: string[];
+    parties?: string[];
   },
   actor: string
 ): Promise<boolean> {

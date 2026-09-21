@@ -49,11 +49,12 @@ import app_settings
 import rules_admin
 import cleanse_log
 import certifications
+import portal_files
 
 import api_util
 import authz
 
-FEATURE_MODULES = (app_settings, rules_admin, cleanse_log, certifications, validation_report)
+FEATURE_MODULES = (app_settings, rules_admin, cleanse_log, certifications, validation_report, portal_files)
 
 # Actions only a super user may call: action -> (where the caller's e-mail
 # travels, its field name, what is being attempted). The pages hide these

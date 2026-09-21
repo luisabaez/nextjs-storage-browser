@@ -10,6 +10,8 @@ import '../components/enhanced-file-browser.css';
 import './validations.css';
 import config from '../../amplify_outputs.json';
 import Link from 'next/link';
+import { isAdminUser } from '../admin/types';
+import { useSymphonySession, usePortalGuard } from '../lib/symphony';
 import {
   ENTITY_NAMES,
   ENTITY_CLASSIFICATION,
@@ -3671,4 +3673,13 @@ function ValidationsPage() {
   );
 }
 
-export default withAuthenticator(ValidationsPage);
+// Users who work only in the HCM portal are sent there. Known administrators see
+// the page at once; everyone else waits until the session says where they belong.
+function GuardedValidationsPage() {
+  const session = useSymphonySession();
+  const toPortal = usePortalGuard(session);
+  if (toPortal || (!session.ready && !isAdminUser(session.email))) return null;
+  return <ValidationsPage />;
+}
+
+export default withAuthenticator(GuardedValidationsPage);

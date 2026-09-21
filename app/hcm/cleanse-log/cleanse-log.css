@@ -1,0 +1,42 @@
+/* Data Cleanse Log of the HCM portal: extras on top of ../hcm.css and ../../lib/symphony.css */
+.hcl-controls { border-color: #dbe2ec; border-radius: 12px; }
+.sy-controls.hcl-controls label { min-width: 150px; flex: 0 1 170px; }
+.sy-controls.hcl-controls label.hcl-agency { flex: 1 1 240px; max-width: 340px; }
+.sy-controls.hcl-controls label.hcl-search { flex: 1 1 220px; max-width: 320px; }
+.hcl-controls select { min-width: 0; width: 100%; }
+.hcl-controls select:disabled { background: #f8fafc; color: #64748b; }
+
+.hcl-notes { margin: 0; padding-left: 18px; }
+.hcl-hint { margin: 0 0 10px; }
+
+/* the log with the rule of the chosen validation beside it */
+.hcl-split { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; align-items: start; }
+.hcl-split.hcl-open { grid-template-columns: minmax(0, 1fr) 400px; }
+.hcl-log { margin-bottom: 0; }
+
+/* the table scrolls inside its card so the header row stays in view */
+.hcl-scroll { max-height: 70vh; overflow: auto; border: 1px solid #eef2f7; border-radius: 8px; }
+.hcl-loading { opacity: 0.55; }
+.hcl-table thead th { position: sticky; top: 0; z-index: 1; border-bottom: none; box-shadow: inset 0 -1px 0 #e5e7eb; }
+.hcl-table td { white-space: nowrap; }
+.hcl-table td.hcl-long { white-space: normal; min-width: 280px; max-width: 460px; overflow-wrap: anywhere; }
+.hcl-table .sy-link { font-weight: 600; }
+.hcl-table tr.hcl-current { background: #eff6ff; }
+.hcl-table tr.hcl-current .sy-link { text-decoration-thickness: 2px; }
+
+.hcl-panel { position: sticky; top: 16px; max-height: calc(100vh - 32px); overflow-y: auto; margin-bottom: 0; }
+.hcl-panel-code { font-family: ui-monospace, monospace; font-size: 15px; overflow-wrap: anywhere; }
+.hcl-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 16px; margin: 0 0 16px; }
+.hcl-facts > div { min-width: 0; }
+.hcl-fact-wide { grid-column: 1 / -1; }
+.hcl-facts dt { font-size: 12px; font-weight: 600; color: #64748b; }
+.hcl-facts dd { margin: 2px 0 0; overflow-wrap: anywhere; }
+.hcl-forward-title { margin: 0 0 6px; font-size: 15px; }
+.hcl-forward { margin: 0; padding: 12px 14px; background: #eff6ff; border: 1px solid #bfdbfe; border-left: 4px solid #2563eb; border-radius: 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.hcl-forward-empty { background: #f8fafc; border-color: #e2e8f0; border-left-color: #94a3b8; color: #475569; }
+
+/* narrow screens: the rule opens under the filters, above the log */
+@media (max-width: 1100px) {
+  .hcl-split.hcl-open { grid-template-columns: minmax(0, 1fr); }
+  .hcl-panel { position: static; max-height: none; order: -1; }
+}

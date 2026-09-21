@@ -3,9 +3,10 @@
 // Shared client for the pages that talk to the data-file-processor Lambda:
 // one place for the URL, the response contract, the signed-in user's role and
 // the configured Mock Cycle.
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { fetchUserAttributes } from 'aws-amplify/auth';
-import { syncCurrentUserPermissions, UserRole } from '../admin/types';
+import { getUserRole, isAdminUser, syncCurrentUserPermissions, UserRole } from '../admin/types';
 
 export const LAMBDA_URL = 'https://5ahxjcxhrcopng5hjgc2n6utxq0rwcmm.lambda-url.us-east-1.on.aws/';
 
@@ -53,6 +54,10 @@ export interface AppConfig extends ApiResult {
   available_mocks: string[];
   history: { key: string; old: string | null; new: string | null; by: string | null; at: string | null }[];
   role: UserRole;
+  is_admin?: boolean;
+  portal_only?: boolean;       // has a role and is not an administrator: sees the HCM portal only
+  parties?: { source: string; agency: string }[];   // agency users; agency '' = source level
+  recon_tool_url?: string;
 }
 
 export const fetchAppConfig = (email?: string) => apiGet<AppConfig>('app_config_get', { email });
@@ -72,6 +77,9 @@ export interface SymphonySession {
   isSuperUser: boolean;
   canCertify: boolean;       // super_user or agency_user
   canReview: boolean;        // super_user or certification_reviewer
+  isAdmin: boolean;          // developer / administrator: keeps the file browser and the processing screens
+  portalOnly: boolean;       // every other user with a role works in the HCM portal only
+  parties: { source: string; agency: string }[];
   config: AppConfig | null;
   mock: string;              // the mock the page is showing (starts at the configured cycle)
   setMock: (m: string) => void;
@@ -98,6 +106,7 @@ export function useSymphonySession(): SymphonySession {
     if (!cfg.ok) {
       setError(cfg.error || 'Could not load the configuration');
     } else {
+      setError('');
       setConfig(cfg);
       setMock(prev => prev || cfg.current_mock);
     }
@@ -109,23 +118,46 @@ export function useSymphonySession(): SymphonySession {
       try {
         who = ((await fetchUserAttributes()).email || '').toLowerCase();
         setEmail(who);
-        if (who) syncCurrentUserPermissions(who).catch(() => {});
       } catch {
         // not signed in yet — withAuthenticator handles it
       }
-      await load(who);
+      // The cached permissions feed isAdminUser below, so they are in place before `ready`.
+      await Promise.all([load(who), who ? syncCurrentUserPermissions(who).catch(() => null) : null]);
       setReady(true);
     })();
   }, [load]);
 
   const role = (config?.role || '') as UserRole;
-  const mocks = config ? Array.from(new Set([config.current_mock, ...config.available_mocks])) : [];
-  return {
+  const mocks = useMemo(() => (config ? Array.from(new Set([config.current_mock, ...config.available_mocks])) : []), [config]);
+  // Until the server sends is_admin / portal_only, work them out from the cached permissions.
+  const cachedAdmin = useMemo(() => ready && isAdminUser(email), [ready, email]);
+  const isAdmin = config?.is_admin ?? cachedAdmin;
+  // When the configuration could not be read, the cached role still keeps a portal user out of the other screens.
+  const cachedRole = useMemo(() => (ready && !config ? getUserRole(email) : ''), [ready, config, email]);
+  const portalOnly = config?.portal_only ?? (!!(role || cachedRole) && !isAdmin);
+  const parties = useMemo(() => config?.parties ?? [], [config]);
+  const reloadConfig = useCallback(() => load(email), [load, email]);
+  // One object per change, so a page can hand the session to a context or an effect.
+  return useMemo(() => ({
     email, role,
     isSuperUser: role === 'super_user',
     canCertify: role === 'super_user' || role === 'agency_user',
     canReview: role === 'super_user' || role === 'certification_reviewer',
-    config, mock, setMock, mocks, ready, error,
-    reloadConfig: () => load(email),
-  };
+    isAdmin, portalOnly, parties,
+    config, mock, setMock, mocks, ready, error, reloadConfig,
+  }), [email, role, isAdmin, portalOnly, parties, config, mock, mocks, ready, error, reloadConfig]);
+}
+
+/**
+ * Keeps portal-only users out of the file browser and the processing screens:
+ * sends them to the HCM portal and returns true while that is pending, so the
+ * page can render nothing meanwhile.
+ */
+export function usePortalGuard(session: SymphonySession): boolean {
+  const router = useRouter();
+  const redirecting = session.ready && session.portalOnly;
+  useEffect(() => {
+    if (redirecting) router.replace('/hcm');
+  }, [redirecting, router]);
+  return redirecting;
 }
