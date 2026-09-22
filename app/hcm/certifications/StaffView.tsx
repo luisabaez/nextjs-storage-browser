@@ -4,7 +4,7 @@
 // completed certification, the reported issues and the status of each agency.
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiResult, apiGet, apiPost, fmtDateTime } from '../../lib/symphony';
-import { partyLabel, statusBadgeClass, useHcm } from '../HcmShell';
+import { fileTypeLabel, partyLabel, statusBadgeClass, useHcm } from '../HcmShell';
 import {
   CertRecord, Documents, Issue, IssuesResult, ReasonForm, ResponseBadge, count, day, partyId, recordKey, recordName, responseShort,
 } from './shared';
@@ -148,7 +148,7 @@ function RecordsTab({ state }: { state: 'pending' | 'completed' }) {
                 <tr key={`${partyId(r)}|${recordKey(r)}`}>
                   <td>{labelOf(r)}</td>
                   <td>{r.module || '—'}</td>
-                  <td>{r.file_type}</td>
+                  <td>{fileTypeLabel(r.file_type)}</td>
                   <td>{r.entity}</td>
                   {completed && (
                     <>

@@ -189,10 +189,13 @@ def resolver(distribution, locations):
 
 
 def is_certified(certified, record):
-    """Whether a record key (it ends with module, file type, entity) has a
-    current certification. One stored without a module answers for any module
-    of its file type + entity."""
-    return record in certified or record[:-3] + (_ANY_MODULE,) + record[-2:] in certified
+    """The response of a record key's current certification (it ends with
+    module, file type, entity), or None. One stored without a module answers
+    for any module of its file type + entity."""
+    for key in (record, record[:-3] + (_ANY_MODULE,) + record[-2:]):
+        if key in certified:
+            return certified[key] or "CERTIFIED"
+    return None
 
 
 # Setup rows the team keeps for the agency's certification and user guide
@@ -227,8 +230,11 @@ def build_tree(locations, files, certified):
         types = modules[-1]["file_types"]
         if not types or _k(types[-1]["file_type"]) != key[1:2]:
             types.append({"file_type": f["file_type"], "entities": []})
+        response = is_certified(certified, key)
         types[-1]["entities"].append({"entity": f["entity"], "certification_required": f["required"],
-                                      "certified": is_certified(certified, key), "files": f["files"]})
+                                      "certified": response is not None,
+                                      "response_code": None if response == "CERTIFIED" else response,
+                                      "files": f["files"]})
     return modules
 
 
@@ -332,17 +338,20 @@ def _record_key(row):
 
 
 def _certified(cur, mock):
-    """Record keys with a current certification. The table belongs to the
-    certification module; until it exists nothing is certified. A row stored
-    before certifications carried a module has none (see is_certified)."""
+    """{record key: response code} of the current certifications. The table
+    belongs to the certification module; until it exists nothing is certified.
+    A row stored before certifications carried a module has none (see
+    is_certified)."""
     if not _find_table(cur, DB, T_CERT_FILE):
-        return set()
-    module = "[Module]" if "MODULE" in _columns(cur, T_CERT_FILE) else "NULL"
+        return {}
+    cols = _columns(cur, T_CERT_FILE)
+    module = "[Module]" if "MODULE" in cols else "NULL"
+    response = "[Response_Code]" if "RESPONSE_CODE" in cols else "NULL"
     cur.execute(
-        f"SELECT [Source], [Agency], {module}, [File_Type], [Entity] FROM [{DB}].dbo.[{T_CERT_FILE}] "
+        f"SELECT [Source], [Agency], {module}, [File_Type], [Entity], {response} FROM [{DB}].dbo.[{T_CERT_FILE}] "
         "WHERE [MOCK] = ? AND [Is_Current] = 1", (mock,))
     return {_record_key({"source": r[0], "agency": r[1], "module": _ANY_MODULE if r[2] is None else r[2],
-                         "file_type": r[3], "entity": r[4]})
+                         "file_type": r[3], "entity": r[4]}): r[5]
             for r in cur.fetchall()}
 
 
@@ -445,7 +454,7 @@ def _tree(conn, cur, p, bucket):
         raise ApiError(f"No files are set up for {party_name(source, agency)} in {mock}", 404)
     files = [f for f in _published(cur, mock, wanted[0])
              if tuple(authz.party_key(f["source"], f["agency"])) == wanted]
-    certified = {key[2:] for key in _certified(cur, mock) if key[:2] == wanted}
+    certified = {key[2:]: v for key, v in _certified(cur, mock).items() if key[:2] == wanted}
     return {"party": party_name(source, agency), "modules": build_tree(rows, files, certified),
             "total_files": len(files)}
 

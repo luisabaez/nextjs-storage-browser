@@ -80,14 +80,31 @@ MAX_ISSUE_LENGTH = 4000
 CERT_TYPES = ("FILE", "VALIDATION", "ISSUE")
 REVOKE_TYPES = ("FILE", "VALIDATION", "SIGNOFF")
 
-# The three comments of the team's certification form, word for word.
+# The comments of the team's certification form, word for word from the user
+# guide. Which ones a record offers depends on its file type (responses_for).
 RESPONSES = {
+    "NO_ERRORS": "Se verificó la data y no contiene errores.",
     "AGREE": ("Estoy de acuerdo con los errores presentados y se estarán corrigiendo los mismos, de lo contrario "
               "las transacciones asociadas a estos errores se convertirán en error."),
+    "NO_EXCLUSIONS": "Se verificó la data y no contiene exclusiones.",
+    "AGREE_EXCLUSIONS": ("Se confirma que el usuario está de acuerdo con la exclusión de los datos y que se tomará "
+                         "acción para que aquellos récords que deben ser convertidos se realicen las correcciones "
+                         "aplicables a los sistemas de origen."),
     "ISSUES": ("Se verificó la data y la misma está parcial o completamente incorrecta. Se incluye un anejo con "
                "documentación de soporte."),
-    "NO_ERRORS": "Se verificó la data y no contiene errores.",
 }
+
+
+def responses_for(file_type):
+    """The response codes a record's file type offers: recon reports ask about
+    exclusions, converted files only whether the data is right, validations
+    the three comments of the form."""
+    kind = _s(file_type).upper()
+    if "RECON" in kind:
+        return ("NO_EXCLUSIONS", "AGREE_EXCLUSIONS", "ISSUES")
+    if "CONVERTED" in kind:
+        return ("NO_ERRORS", "ISSUES")
+    return ("NO_ERRORS", "AGREE", "ISSUES")
 SIGNOFF_STATEMENT = ("Certifico que la agencia completó la revisión de todos los archivos y validaciones del ciclo "
                      "{mock} y que las respuestas registradas representan la posición oficial de la agencia.")
 
@@ -833,7 +850,10 @@ def _expected(conn, cur, p, headers):
                for s in snap["parties"]]
     return api_util.ok(headers, {
         "available": True, "mock": mock, "responses": [{"code": c, "label": t} for c, t in RESPONSES.items()],
-        "parties": parties, "rows": [{f: r[f] for f in _ROW_FIELDS} for r in snap["files"]], "warnings": warnings})
+        "parties": parties,
+        "rows": [{**{f: r[f] for f in _ROW_FIELDS}, "response_codes": list(responses_for(r["file_type"]))}
+                 for r in snap["files"]],
+        "warnings": warnings})
 
 
 def _validations(conn, cur, p, headers):
@@ -931,8 +951,8 @@ def _certify_file(conn, cur, data, headers):
     record = _required_record(rows, mock, source, agency, data)
     module, file_type, entity = record["module"], record["file_type"], record["entity"]
     response_code = _s(data.get("response_code")).upper()
-    if response_code not in RESPONSES:
-        raise ApiError(f"response_code must be one of {', '.join(RESPONSES)}")
+    if response_code not in responses_for(file_type):
+        raise ApiError(f"For {file_type} the response must be one of {', '.join(responses_for(file_type))}")
     resource_name = _need(data, "resource_name", "Agency resource", 200)
     notes = _s(data.get("notes")) or None
     if response_code == "ISSUES":

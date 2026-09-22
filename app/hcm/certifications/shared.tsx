@@ -4,7 +4,7 @@
 // certifications page.
 import React, { useEffect, useRef, useState } from 'react';
 import { ApiResult, LAMBDA_URL, apiGet, fmtDateTime } from '../../lib/symphony';
-import { formatSize } from '../HcmShell';
+import { fileTypeLabel, formatSize } from '../HcmShell';
 
 export interface ResponseOption { code: string; label: string }
 
@@ -19,6 +19,7 @@ export interface CertRecord {
   entity: string;
   certified?: boolean;
   response_code?: string | null;
+  response_codes?: string[];     // the responses this record's file type offers
   resource_name?: string | null;
   notes?: string | null;
   certified_by?: string | null;
@@ -56,21 +57,26 @@ export const ISSUES = 'ISSUES';
 
 // The responses are shown in the wording the server sends; these go with them.
 const RESPONSE_INFO: Record<string, { short: string; gloss: string; badge: string }> = {
+  NO_ERRORS: { short: 'No errors', gloss: 'I verified the data and it has no errors', badge: 'sy-badge-ok' },
   AGREE: { short: 'Agrees with the errors', gloss: 'I agree with the errors shown and they will be corrected', badge: 'sy-badge-info' },
+  NO_EXCLUSIONS: { short: 'No exclusions', gloss: 'I verified the data and it has no exclusions', badge: 'sy-badge-ok' },
+  AGREE_EXCLUSIONS: {
+    short: 'Agrees with the exclusions', badge: 'sy-badge-info',
+    gloss: 'I agree with the excluded records; the ones that must be converted will be corrected in the source system',
+  },
   ISSUES: {
     short: 'Issues reported', badge: 'sy-badge-warn',
     gloss: 'The data is partly or completely incorrect - I am reporting issues with supporting documents',
   },
-  NO_ERRORS: { short: 'No errors', gloss: 'I verified the data and it has no errors', badge: 'sy-badge-ok' },
 };
 
 export const responseGloss = (code: string) => RESPONSE_INFO[code]?.gloss || '';
 export const responseShort = (code?: string | null) => (code && RESPONSE_INFO[code]?.short) || 'Certified';
+export const responseBadgeClass = (code?: string | null) => `sy-badge ${(code && RESPONSE_INFO[code]?.badge) || 'sy-badge-ok'}`;
 
 export function ResponseBadge({ code, responses }: { code?: string | null; responses?: ResponseOption[] }) {
-  const info = code ? RESPONSE_INFO[code] : undefined;
   const label = responses?.find(r => r.code === code)?.label;
-  return <span className={`sy-badge ${info?.badge || 'sy-badge-ok'}`} title={label}>{responseShort(code)}</span>;
+  return <span className={responseBadgeClass(code)} title={label}>{responseShort(code)}</span>;
 }
 
 /** The server's key of a party: the source and the agency number, or the agency's name when it has no number. */
@@ -86,7 +92,7 @@ export const recordKey = (r: RecordName) =>
   [r.module, r.file_type, r.entity].map(s => (s || '').trim().toUpperCase()).join('|');
 
 export const recordName = (r: RecordName) =>
-  [r.module, r.file_type, r.entity].map(s => (s || '').trim()).filter(Boolean).join(' · ');
+  [r.module, fileTypeLabel(r.file_type), r.entity].map(s => (s || '').trim()).filter(Boolean).join(' · ');
 
 export const filesHref = (r: RecordName) =>
   `/hcm/files?${new URLSearchParams({ module: r.module || '', file_type: r.file_type || '', entity: r.entity || '' }).toString()}`;

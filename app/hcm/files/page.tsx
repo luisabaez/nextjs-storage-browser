@@ -7,13 +7,14 @@ import { withAuthenticator } from '@aws-amplify/ui-react';
 import '@aws-amplify/ui-react/styles.css';
 import config from '../../../amplify_outputs.json';
 import { ApiResult, apiGet, apiPost, fmtDateTime } from '../../lib/symphony';
-import HcmShell, { formatSize, partyKey, partyLabel, useHcm } from '../HcmShell';
+import HcmShell, { fileTypeLabel, formatSize, partyKey, partyLabel, useHcm } from '../HcmShell';
+import { responseBadgeClass, responseShort } from '../certifications/shared';
 import './files.css';
 
 Amplify.configure(config);
 
 interface PubFile { id: number; name: string; size?: number | null; published_by?: string | null; published_at?: string | null }
-interface PubEntity { entity: string; certification_required?: boolean; certified?: boolean; files?: PubFile[] }
+interface PubEntity { entity: string; certification_required?: boolean; certified?: boolean; response_code?: string | null; files?: PubFile[] }
 interface PubFileType { file_type: string; entities?: PubEntity[] }
 interface PubModule { module: string; file_types?: PubFileType[] }
 interface PubTree extends ApiResult { party?: string; modules?: PubModule[]; total_files?: number }
@@ -74,7 +75,7 @@ function FileTypeGroup({ type, open, onToggle, children }: FileTypeGroupProps) {
         <button type="button" className="hf-type-toggle" aria-expanded={open} aria-controls={bodyId} onClick={onToggle}>
           <span className="hf-chevron">{CHEVRON}</span>
           <span className="hf-type-icon">{FOLDER}</span>
-          <span className="hf-type-name">{type.file_type || 'Other'}</span>
+          <span className="hf-type-name">{fileTypeLabel(type.file_type) || 'Other'}</span>
           <span className="hf-type-meta">
             {pending > 0 && <span className="sy-badge sy-badge-warn">{pending} to certify</span>}
             <span>{files > 0 ? plural(files, 'file', 'files') : 'No files yet'}</span>
@@ -202,6 +203,12 @@ function PartyFiles({ party, link, canRemove, onRemoved }: PartyFilesProps) {
         </p>
       </div>
 
+      {view === 'agency' && required > 0 && (
+        <p className="sy-muted hf-how">
+          Download and review the files in each folder. Where a certification is required, choose <strong>Certify</strong> next to the
+          entity to record your response: no errors, agreement with the errors, or issues with supporting documents.
+        </p>
+      )}
       {loadError && <div className="sy-error">{view === 'staff' ? loadError : 'The files could not be refreshed. Please try again in a moment.'}</div>}
       {error && <div className="sy-error" role="alert">{error}</div>}
       {notice && <div className="sy-success" role="status">{notice}</div>}
@@ -250,12 +257,12 @@ function PartyFiles({ party, link, canRemove, onRemoved }: PartyFilesProps) {
                         <div className="hf-entity-head">
                           <h4 className="hf-entity-name">{e.entity || 'Other'}</h4>
                           {e.certification_required && (e.certified
-                            ? <span className="sy-badge sy-badge-ok">Certified</span>
+                            ? <span className={responseBadgeClass(e.response_code)}>Certified · {responseShort(e.response_code)}</span>
                             : <span className="sy-badge sy-badge-warn">Certification required</span>)}
-                          {e.certification_required && !e.certified && canCertify && (
-                            <Link href={certifyHref(m, t, e)} className="btn btn-secondary hf-small"
-                              aria-label={`Certify ${e.entity}, ${t.file_type}, ${m.module}`}>
-                              Certify
+                          {e.certification_required && canCertify && (
+                            <Link href={certifyHref(m, t, e)} className={`btn ${e.certified ? 'btn-secondary' : 'btn-primary'} hf-small`}
+                              aria-label={`${e.certified ? 'Change the response for' : 'Certify'} ${e.entity}, ${fileTypeLabel(t.file_type)}, ${m.module}`}>
+                              {e.certified ? 'Change response' : 'Certify'}
                             </Link>
                           )}
                         </div>

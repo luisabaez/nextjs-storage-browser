@@ -62,6 +62,7 @@ FEATURE_MODULES = (app_settings, rules_admin, cleanse_log, certifications, valid
 SUPER_USER_ACTIONS = {
     "val_run": ("body", "actor", "running validations"),
     "val_seed": ("body", "actor", "preparing the test database"),
+    "val_copy_log": ("body", "actor", "copying validation results into the test database"),
     "val_detail": ("query", "email", "viewing validation detail rows"),
     "val_objects": ("query", "email", "listing database objects"),
     "val_object_def": ("query", "email", "reading database object definitions"),
@@ -2029,6 +2030,20 @@ def lambda_handler(event, context):
             res = validation_seed.object_definition(get_connection_string(), p.get("name") or "")
             return {"statusCode": 200 if res.get("ok") else 400, "headers": headers,
                     "body": json.dumps(res, default=str)}
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
+    if action == "val_copy_log":
+        # POST { mock, dry_run } — copy a cycle's log rows from the source database into the test database
+        try:
+            body = json.loads(event.get("body") or "{}")
+            res = validation_seed.copy_log_rows(get_connection_string(), body.get("mock") or "",
+                                                dry_run=bool(body.get("dry_run")))
+            return {"statusCode": 200, "headers": headers, "body": json.dumps(res, default=str)}
+        except ValueError as e:
+            return {"statusCode": 400, "headers": headers, "body": json.dumps({"ok": False, "error": str(e)})}
         except Exception as e:
             traceback.print_exc()
             return {"statusCode": 500, "headers": headers,

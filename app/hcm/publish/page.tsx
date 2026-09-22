@@ -7,7 +7,7 @@ import { withAuthenticator } from '@aws-amplify/ui-react';
 import '@aws-amplify/ui-react/styles.css';
 import config from '../../../amplify_outputs.json';
 import { ApiResult, apiPost } from '../../lib/symphony';
-import HcmShell, { formatSize, partyLabel, useHcm } from '../HcmShell';
+import HcmShell, { fileTypeLabel, formatSize, partyLabel, useHcm } from '../HcmShell';
 import './publish.css';
 
 Amplify.configure(config);
@@ -99,7 +99,7 @@ function Destinations({ targets }: { targets: Target[] }) {
       {targets.map((t, i) => (
         <li key={i}>
           <span className="hp-target-party">{partyLabel(t)}</span>
-          <span className="hp-target-folder">{[t.module, t.file_type, t.entity].filter(Boolean).join(' / ')}</span>
+          <span className="hp-target-folder">{[t.module, fileTypeLabel(t.file_type), t.entity].filter(Boolean).join(' / ')}</span>
         </li>
       ))}
     </ul>

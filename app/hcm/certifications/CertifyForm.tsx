@@ -188,7 +188,7 @@ export default function CertifyForm({ record, party, responses, onTouched, onSav
 
   // Why the certification cannot be submitted yet; empty when it can.
   const why = (() => {
-    if (!response) return 'Choose one of the three responses.';
+    if (!response) return 'Choose a response.';
     if (!resource.trim()) return 'Enter the full name of the agency resource.';
     if (items === null) return issuesFailed ? 'The issues of this record must load before you can submit.' : 'Loading the issues of this record…';
     if (response !== ISSUES) return '';
@@ -241,7 +241,7 @@ export default function CertifyForm({ record, party, responses, onTouched, onSav
         <legend>Your response</legend>
         {responses.length === 0 && <div className="sy-error">The responses could not be loaded. Please reload the page.</div>}
         <div className="hcert-choices">
-          {responses.map(r => (
+          {responses.filter(r => !record.response_codes || record.response_codes.includes(r.code)).map(r => (
             <label key={r.code} className={`hcert-choice${response === r.code ? ' hcert-choice-on' : ''}`}>
               <input type="radio" name={`${id}-response`} value={r.code} checked={response === r.code}
                 onChange={() => setResponse(r.code)} />

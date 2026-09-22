@@ -57,6 +57,7 @@ function CleanseLogView() {
   const [search, setSearch] = useState('');
   const [showAll, setShowAll] = useState(false);
   const [openCode, setOpenCode] = useState('');
+  const [openRowAt, setOpenRowAt] = useState(-1);   // the row whose code was clicked, among the log's rows
   const [exporting, setExporting] = useState(false);
   const [exported, setExported] = useState<CleanseLogExport | null>(null);
   const latest = useRef(0);
@@ -154,19 +155,33 @@ function CleanseLogView() {
     return { codes: distinct(idx.code), occurrences, sources: distinct(idx.source), bus: distinct(idx.bu) };
   }, [rows, idx]);
 
-  // The validation whose rule is open, read from any of its rows.
+  // The validation whose rule is open: the clicked row, and every row of the same code.
   const openRow = useMemo(
-    () => (log && openCode && idx.code >= 0 ? log.rows.find(r => text(r[idx.code]) === openCode) : undefined),
-    [log, openCode, idx.code],
+    () => (log && openCode && idx.code >= 0
+      ? (text(log.rows[openRowAt]?.[idx.code]) === openCode ? log.rows[openRowAt] : log.rows.find(r => text(r[idx.code]) === openCode))
+      : undefined),
+    [log, openCode, openRowAt, idx.code],
   );
+  const occurrences = useMemo(() => {
+    if (!log || !openCode || idx.code < 0) return [];
+    return log.rows
+      .filter(r => text(r[idx.code]) === openCode)
+      .map(r => ({
+        source: idx.source >= 0 ? text(r[idx.source]) : '',
+        bu: idx.bu >= 0 ? text(r[idx.bu]) : '',
+        count: idx.count >= 0 ? Number(r[idx.count]) || 0 : 0,
+      }))
+      .sort((a, b) => a.source.localeCompare(b.source) || a.bu.localeCompare(b.bu));
+  }, [log, openCode, idx]);
 
   useEffect(() => {
     if (openCode) panelTitle.current?.focus();
   }, [openCode]);
 
-  const openRule = (code: string, button: HTMLButtonElement) => {
+  const openRule = (code: string, button: HTMLButtonElement, rowAt: number) => {
     opener.current = button;
     setOpenCode(code);
+    setOpenRowAt(rowAt);
   };
   const closeRule = () => {
     setOpenCode('');
@@ -197,13 +212,13 @@ function CleanseLogView() {
     if (isMessage(column) || LONG_TEXT.includes(column.trim().toLowerCase())) return 'hcl-long';
     return undefined;
   };
-  const renderCell = (v: Cell, column: string, i: number) => {
+  const renderCell = (v: Cell, column: string, i: number, rowAt: number) => {
     if (v === null || v === undefined || v === '') return '';
     if (i === idx.code) {
       const code = text(v);
       return (
         <button type="button" className="sy-link" aria-label={`${code}: show the rule and its path forward`}
-          onClick={e => openRule(code, e.currentTarget)}>
+          onClick={e => openRule(code, e.currentTarget, rowAt)}>
           {code}
         </button>
       );
@@ -322,7 +337,7 @@ function CleanseLogView() {
                 <tbody>
                   {visible.map((r, n) => (
                     <tr key={n} className={openCode && text(r[idx.code]) === openCode ? 'hcl-current' : undefined}>
-                      {columns.map((c, i) => <td key={i} className={cellClass(c, i)}>{renderCell(r[i], c, i)}</td>)}
+                      {columns.map((c, i) => <td key={i} className={cellClass(c, i)}>{renderCell(r[i], c, i, log.rows.indexOf(r))}</td>)}
                     </tr>
                   ))}
                   {rows.length === 0 && (
@@ -365,6 +380,25 @@ function CleanseLogView() {
               : <p className="hcl-forward hcl-forward-empty">
                   {rule ? 'No path forward has been recorded for this validation yet.' : 'The rule of this validation could not be loaded with the log.'}
                 </p>}
+            {occurrences.length > 0 && (
+              <>
+                <h3 className="hcl-forward-title">Where it was found</h3>
+                <p className="sy-muted small hcl-where-note">
+                  The same rule is listed once for every source and agency it was found in. The row you opened is marked.
+                </p>
+                <ul className="hcl-where" aria-label="Where this validation was found">
+                  {occurrences.map((o, n) => {
+                    const current = openRow && text(openRow[idx.source]) === o.source && text(openRow[idx.bu]) === o.bu;
+                    return (
+                      <li key={n} className={current ? 'hcl-where-current' : undefined}>
+                        <span className="mono">{[o.source, o.bu ? buLabel(o.bu) : ''].filter(Boolean).join(' · ') || '—'}</span>
+                        <span className="num">{o.count.toLocaleString()}</span>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </>
+            )}
           </aside>
         )}
       </div>

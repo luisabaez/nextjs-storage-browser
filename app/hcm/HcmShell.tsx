@@ -85,6 +85,10 @@ export function partyLabel(p: { source: string; agency: string; bu?: string; par
   return `${source} · ${name}`;
 }
 
+/** A file type as people read it: the team's folder names carry an ordering number ("2 Validations"). */
+export const fileTypeLabel = (fileType?: string | null) =>
+  (fileType || '').replace(/^\d+\s*[-.)]?\s*/, '').trim() || (fileType || '');
+
 /** Badge classes for a party status (Signed off, Ready to sign, In progress, Not started). */
 export function statusBadgeClass(status?: string): string {
   const s = (status || '').toLowerCase();

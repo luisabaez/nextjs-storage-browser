@@ -40,3 +40,10 @@
   .hcl-split.hcl-open { grid-template-columns: minmax(0, 1fr); }
   .hcl-panel { position: static; max-height: none; order: -1; }
 }
+
+.hcl-where-note { margin: 0 0 8px; }
+.hcl-where { list-style: none; margin: 0; padding: 0; max-height: 280px; overflow: auto; border: 1px solid #e2e8f0; border-radius: 6px; }
+.hcl-where li { display: flex; justify-content: space-between; gap: 12px; padding: 5px 10px; font-size: 13px; border-top: 1px solid #f1f5f9; }
+.hcl-where li:first-child { border-top: 0; }
+.hcl-where li .num { font-variant-numeric: tabular-nums; }
+.hcl-where-current { background: #eff6ff; font-weight: 600; }
