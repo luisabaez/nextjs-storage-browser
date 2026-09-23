@@ -47,3 +47,6 @@
 .hcl-where li:first-child { border-top: 0; }
 .hcl-where li .num { font-variant-numeric: tabular-nums; }
 .hcl-where-current { background: #eff6ff; font-weight: 600; }
+
+.hcl-records-link { margin: 12px 0 0; }
+.hcl-records { margin-top: 16px; }

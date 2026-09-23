@@ -108,3 +108,12 @@ a.hcm-tile:hover { border-color: #2563eb; box-shadow: 0 8px 20px rgba(30, 58, 95
   .hcm-tile { min-height: 0; }
   .hcm-user { margin-left: 0; }
 }
+
+/* Failing records of one validation (RecordsTable) */
+.hcm-records { margin-top: 10px; }
+.hcm-records-bar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 16px; margin-bottom: 8px; }
+.hcm-records-nav { display: flex; gap: 8px; }
+.hcm-records-scroll { overflow: auto; max-height: 60vh; border: 1px solid #e2e8f0; border-radius: 8px; }
+.hcm-records-table { min-width: 100%; }
+.hcm-records-table th, .hcm-records-table td { white-space: nowrap; max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
+.hcm-records-table th { position: sticky; top: 0; background: #f8fafc; z-index: 1; }

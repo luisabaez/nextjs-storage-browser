@@ -8,6 +8,7 @@ import config from '../../../amplify_outputs.json';
 import Link from 'next/link';
 import { ApiResult, LAMBDA_URL, apiGet, fmtDateTime } from '../../lib/symphony';
 import HcmShell, { partyLabel, useHcm } from '../HcmShell';
+import RecordsTable from '../RecordsTable';
 import './validations.css';
 
 Amplify.configure(config);
@@ -66,6 +67,7 @@ function Validations() {
   const [openCode, setOpenCode] = useState('');
   const [form, setForm] = useState<Commitment>({ reviewed: false, targetDate: '', notes: '' });
   const [saving, setSaving] = useState(false);
+  const [recordsOpen, setRecordsOpen] = useState(false);   // the open validation's records are shown
   const [saveError, setSaveError] = useState('');
   const [notice, setNotice] = useState('');
   const latest = useRef(0);
@@ -121,6 +123,7 @@ function Validations() {
     if (!readOnly && dirty && !window.confirm(`Leave ${openCode} without saving your changes?`)) return;
     setSaveError('');
     setNotice('');
+    setRecordsOpen(false);
     if (v.validation_code === openCode) {
       setOpenCode('');
       return;
@@ -217,6 +220,16 @@ function Validations() {
             : <p className="hval-forward hval-forward-empty">The path forward for this validation has not been published yet.</p>}
         </section>
       </div>
+
+      <section className="hval-records" aria-label="Records">
+        <div className="hval-actions">
+          <button type="button" className="btn btn-secondary" aria-expanded={recordsOpen} onClick={() => setRecordsOpen(o => !o)}>
+            {recordsOpen ? 'Hide the records' : `View the ${(v.count ?? 0).toLocaleString()} records`}
+          </button>
+          <span className="sy-muted">The records of your agency that this validation found.</span>
+        </div>
+        {recordsOpen && <RecordsTable validationCode={v.validation_code} source={party.source} agency={party.agency} />}
+      </section>
 
       <section className="hval-commit" aria-label="Commitment">
         <h3>{readOnly ? 'Commitment' : 'Your commitment'}</h3>

@@ -7,6 +7,7 @@ import '@aws-amplify/ui-react/styles.css';
 import config from '../../../amplify_outputs.json';
 import { ApiResult, apiGet, apiPost } from '../../lib/symphony';
 import HcmShell, { useHcm } from '../HcmShell';
+import RecordsTable from '../RecordsTable';
 import './cleanse-log.css';
 
 Amplify.configure(config);
@@ -58,6 +59,7 @@ function CleanseLogView() {
   const [showAll, setShowAll] = useState(false);
   const [openCode, setOpenCode] = useState('');
   const [openRowAt, setOpenRowAt] = useState(-1);   // the row whose code was clicked, among the log's rows
+  const [records, setRecords] = useState<{ code: string; source: string; bu: string } | null>(null);
   const [exporting, setExporting] = useState(false);
   const [exported, setExported] = useState<CleanseLogExport | null>(null);
   const latest = useRef(0);
@@ -380,6 +382,14 @@ function CleanseLogView() {
               : <p className="hcl-forward hcl-forward-empty">
                   {rule ? 'No path forward has been recorded for this validation yet.' : 'The rule of this validation could not be loaded with the log.'}
                 </p>}
+            {openRow && (
+              <p className="hcl-records-link">
+                <button type="button" className="btn btn-secondary"
+                  onClick={() => setRecords({ code: openCode, source: fromRow(idx.source), bu: fromRow(idx.bu) })}>
+                  View the records of this row
+                </button>
+              </p>
+            )}
             {occurrences.length > 0 && (
               <>
                 <h3 className="hcl-forward-title">Where it was found</h3>
@@ -402,6 +412,20 @@ function CleanseLogView() {
           </aside>
         )}
       </div>
+
+      {records && (
+        <section className="hcm-card hcl-records" aria-labelledby="hcl-records-title">
+          <div className="hcm-card-head">
+            <h2 id="hcl-records-title">
+              Records of <span className="hcl-panel-code">{records.code}</span>
+              {records.source ? ` — ${records.source}` : ''}{records.bu ? ` · ${buLabel(records.bu)}` : ''}
+            </h2>
+            <button type="button" className="btn btn-secondary" onClick={() => setRecords(null)}>Close</button>
+          </div>
+          <RecordsTable key={`${records.code}|${records.source}|${records.bu}`}
+            validationCode={records.code} source={records.source} bu={records.bu} />
+        </section>
+      )}
     </>
   );
 }

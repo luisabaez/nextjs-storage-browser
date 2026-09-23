@@ -55,7 +55,7 @@ ACTIONS = {
     "cert_expected", "cert_validations", "cert_issues", "cert_records", "cert_certify_validation",
     "cert_certify_file", "cert_issue_save", "cert_issue_delete", "cert_signoff",
     "cert_upload_url", "cert_attachment_add", "cert_attachments", "cert_download_url",
-    "cert_attachment_delete", "cert_status", "cert_status_report", "cert_revoke",
+    "cert_attachment_delete", "cert_status", "cert_status_report", "cert_revoke", "cert_validation_rows",
 }
 
 DB = validation_seed.TARGET_DB
@@ -506,6 +506,26 @@ def _log_counts(cur, db, mock, flags, source):
     return rows
 
 
+def _log_db(cur, mock, have, warnings):
+    """The database whose detail log answers for the cycle: a test database
+    starts with an empty log, so until a cycle's rows exist there the main
+    database is read. None when there is no log at all."""
+    if validation_seed.is_test_target():
+        empty = LOG_TABLE not in have
+        if not empty:
+            cur.execute(f"SELECT TOP 1 1 FROM [{DB}].dbo.[{LOG_TABLE}] WHERE [MOCK] = ?", (mock,))
+            empty = cur.fetchone() is None
+        if empty:
+            warnings.append(f"The Data Cleanse Log in {DB} has no rows for {mock}; the validation "
+                            f"results were read from {SOURCE}.")
+            return SOURCE
+        return DB
+    if LOG_TABLE not in have:
+        warnings.append(f"{LOG_TABLE} does not exist in {DB}; no validations are reported.")
+        return None
+    return DB
+
+
 def _reported(conn, cur, mock, warnings, source=None):
     """({SOURCE: {BU3: {code: count}}}, {CODE: catalog entry}) for the rules the
     catalog reports to agencies or to sources. Counts only — one aggregate
@@ -535,20 +555,8 @@ def _reported(conn, cur, mock, warnings, source=None):
         entry["to_agency"] |= _s(r[7]).upper() == "Y"
         entry["to_source"] |= _s(r[8]).upper() == "Y"
 
-    read_db = DB
-    if validation_seed.is_test_target():
-        empty = LOG_TABLE not in have
-        if not empty:
-            cur.execute(f"SELECT TOP 1 1 FROM [{DB}].dbo.[{LOG_TABLE}] WHERE [MOCK] = ?", (mock,))
-            empty = cur.fetchone() is None
-        if empty:
-            # A test database starts with an empty log: the agencies' counts
-            # (never their records) come from the main database instead.
-            read_db = SOURCE
-            warnings.append(f"The Data Cleanse Log in {DB} has no rows for {mock}; the validation counts "
-                            f"were read from {SOURCE}.")
-    elif LOG_TABLE not in have:
-        warnings.append(f"{LOG_TABLE} does not exist in {DB}; no validations are reported.")
+    read_db = _log_db(cur, mock, have, warnings)
+    if read_db is None:
         return {}, catalog
 
     reported = {}
@@ -868,6 +876,64 @@ def _validations(conn, cur, p, headers):
                                  "party": party_name(source, agency),
                                  "validations": [{f: v[f] for f in _VALIDATION_FIELDS} for v in rows],
                                  "warnings": warnings})
+
+
+# What an agency sees of a failing record: who it concerns, where it came
+# from and the values the rule flagged (the team's Column 1..30).
+_DETAIL_SHOWN = ["PersonNumber", "BU", "Source", "Entity", "File"] + [f"Col{i}" for i in range(1, 31)]
+_DETAIL_LABELS = {"PersonNumber": "Person number"}
+RECORDS_PAGE, RECORDS_PAGE_MAX = 200, 500
+
+
+def _validation_records(conn, cur, p, headers):
+    """The failing records behind one validation, for one party (an agency
+    user or anyone reading as one) or, for the validation team, for a source
+    and optionally a BU. Paged."""
+    mock = _mock(p.get("mock"))
+    code = _need(p, "validation_code", "Validation code", 50)
+    email = _s(p.get("email"))
+    source, agency, bu = _need(p, "source"), _s(p.get("agency")), _s(p.get("bu"))
+    warnings = []
+    if not agency and authz.role_of(email) in (authz.SUPER_USER, authz.CERT_REVIEWER):
+        authz.require(email, authz.CERT_REVIEWER, what="viewing validation records")
+        number = authz.agency_code(bu)[:3] if bu else ""
+        party = " · ".join(v for v in (source, bu) if v)
+    else:
+        access = _reader(email, "viewing validation records")
+        _, source, agency, bu = _resolve_party(conn, cur, access, mock, source, agency, warnings)
+        reported, catalog = _reported(conn, cur, mock, warnings, source=source)
+        if code.upper() not in {c.upper() for c in validations_for(reported, catalog, source, agency)}:
+            raise ApiError(f"{code} is not reported to {party_name(source, agency)} for {mock}", 404)
+        number = authz.party_key(source, agency)[1]
+        party = party_name(source, agency)
+    try:
+        offset = max(0, int(p.get("offset") or 0))
+        limit = min(RECORDS_PAGE_MAX, max(1, int(p.get("limit") or RECORDS_PAGE)))
+    except ValueError:
+        raise ApiError("offset and limit must be numbers")
+    empty = {"mock": mock, "validation_code": code, "source": source, "agency": agency, "bu": bu, "party": party,
+             "columns": [], "rows": [], "total": 0, "offset": offset, "limit": limit, "warnings": warnings}
+    have = _ensure_team_objects(conn, cur, [LOG_TABLE], warnings)
+    read_db = _log_db(cur, mock, have, warnings)
+    if read_db is None:
+        return api_util.ok(headers, empty)
+    cur.execute(f"SELECT COLUMN_NAME FROM [{read_db}].INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = ?", (LOG_TABLE,))
+    present = {r[0].upper() for r in cur.fetchall()}
+    shown = [c for c in _DETAIL_SHOWN if c.upper() in present]
+    where, args = ["d.[MOCK] = ?", "d.[Validation_Code] = ?", "d.[Source] = ?"], [mock, code, source]
+    if number:
+        where.append("LEFT(LTRIM(ISNULL(d.[BU], '')), 3) = ?")
+        args.append(number)
+    clause = " AND ".join(where)
+    cur.execute(f"SELECT COUNT(*) FROM [{read_db}].dbo.[{LOG_TABLE}] d WHERE {clause}", tuple(args))
+    total = cur.fetchone()[0]
+    cur.execute(
+        f"SELECT {', '.join(f'd.[{c}]' for c in shown)} FROM [{read_db}].dbo.[{LOG_TABLE}] d WHERE {clause} "
+        "ORDER BY d.[PersonNumber], d.[Col1], d.[Col2] OFFSET ? ROWS FETCH NEXT ? ROWS ONLY",
+        tuple(args) + (offset, limit))
+    rows = [[None if v is None else str(v).strip() for v in r] for r in cur.fetchall()]
+    return api_util.ok(headers, {**empty, "columns": [{"name": c, "label": _DETAIL_LABELS.get(c, c)} for c in shown],
+                                 "rows": rows, "total": total})
 
 
 def _issues_list(conn, cur, p, headers):
@@ -1218,6 +1284,8 @@ def handle(action, event, bucket, headers, conn_str):
                 return _expected(conn, cur, api_util.params(event), headers)
             if action == "cert_validations":
                 return _validations(conn, cur, api_util.params(event), headers)
+            if action == "cert_validation_rows":
+                return _validation_records(conn, cur, api_util.params(event), headers)
             if action == "cert_issues":
                 return _issues_list(conn, cur, api_util.params(event), headers)
             if action == "cert_records":
