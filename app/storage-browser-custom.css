@@ -210,6 +210,63 @@ body {
   }
 }
 
+/* Programs menu: the other programs behind one header button */
+.programs-menu {
+  position: relative;
+}
+
+.programs-menu-button {
+  border: 0;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.programs-menu-caret {
+  font-size: 12px;
+  opacity: 0.85;
+}
+
+.programs-menu-list {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 1000;
+  min-width: 220px;
+  margin: 0;
+  padding: 6px;
+  list-style: none;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: var(--radius-md);
+  box-shadow: 0 10px 25px rgba(15, 23, 42, 0.18);
+}
+
+.programs-menu-list a {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border-radius: 6px;
+  color: #1e293b;
+  font-size: 14px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.programs-menu-list a:hover,
+.programs-menu-list a:focus-visible {
+  background: #eff6ff;
+  color: #1e3a5f;
+  outline: none;
+}
+
+.programs-menu-icon {
+  width: 20px;
+  text-align: center;
+}
+
 .user-info {
   display: flex;
   align-items: center;

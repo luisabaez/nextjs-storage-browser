@@ -6,7 +6,6 @@ import { Button, withAuthenticator } from '@aws-amplify/ui-react';
 import '@aws-amplify/ui-react/styles.css';
 import './components/enhanced-file-browser.css';
 import config from '../amplify_outputs.json';
-import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { isAdminUser, getUserRole, UserRole, syncCurrentUserPermissions } from './admin/types';
 import { useSymphonySession, usePortalGuard } from './lib/symphony';
@@ -22,6 +21,7 @@ import { ToastContainer, useToast } from './components/Toast';
 import { NotificationCenter, useNotifications } from './components/NotificationCenter';
 import { UploadProgress, UploadItem, OperationType } from './components/UploadProgress';
 import { FilePreviewModal } from './components/FilePreviewModal';
+import { ProgramsMenu } from './components/ProgramsMenu';
 
 // Amplify Storage imports
 import { uploadData, remove, copy, list, getUrl } from 'aws-amplify/storage';
@@ -1084,43 +1084,20 @@ function FileBrowser() {
         </div>
 
         <div className="header-right">
-          {/* Agency users and certification reviewers only certify / review */}
-          {userRole !== 'agency_user' && userRole !== 'certification_reviewer' && (
-            <>
-              <Link href="/ap-invoices" className="admin-link" title="File Processing Dashboard">
-                <span className="admin-icon">📋</span>
-                <span className="admin-text">File Processing</span>
-              </Link>
-              <Link href="/validations" className="admin-link" title="Validations & Sampling">
-                <span className="admin-icon">✅</span>
-                <span className="admin-text">Validations</span>
-              </Link>
-            </>
-          )}
-          {/* Record-level validation results: super users only */}
-          {userRole === 'super_user' && (
-            <Link href="/data-validation" className="admin-link" title="Data Validation results">
-              <span className="admin-icon">🔎</span>
-              <span className="admin-text">Data Validation</span>
-            </Link>
-          )}
-          {(isAdmin || userRole) && (
-            <Link href="/hcm" className="admin-link" title="HCM Data Validation portal">
-              <span>HCM Portal</span>
-            </Link>
-          )}
-          {userRole === 'super_user' && (
-            <Link href="/config" className="admin-link" title="Configuration">
-              <span className="admin-icon">⚙️</span>
-              <span className="admin-text">Configuration</span>
-            </Link>
-          )}
-          {isAdmin && (
-            <Link href="/admin" className="admin-link" title="Admin Dashboard">
-              <span className="admin-icon">🛡️</span>
-              <span className="admin-text">Admin</span>
-            </Link>
-          )}
+          <ProgramsMenu programs={[
+            // Agency users and certification reviewers only certify / review
+            ...(userRole !== 'agency_user' && userRole !== 'certification_reviewer' ? [
+              { href: '/ap-invoices', label: 'File Processing', icon: '📋', title: 'File Processing Dashboard' },
+              { href: '/validations', label: 'Validations', icon: '✅', title: 'Validations & Sampling' },
+            ] : []),
+            // Record-level validation results: super users only
+            ...(userRole === 'super_user' ? [
+              { href: '/data-validation', label: 'Data Validation', icon: '🔎', title: 'Data Validation results' },
+            ] : []),
+            ...(isAdmin || userRole ? [{ href: '/hcm', label: 'HCM Portal', icon: '👥', title: 'HCM Data Validation portal' }] : []),
+            ...(userRole === 'super_user' ? [{ href: '/config', label: 'Configuration', icon: '⚙️', title: 'Configuration' }] : []),
+            ...(isAdmin ? [{ href: '/admin', label: 'Admin', icon: '🛡️', title: 'Admin Dashboard' }] : []),
+          ]} />
 
           <button
             className="notification-btn"
