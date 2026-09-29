@@ -187,8 +187,6 @@ function PartyFiles({ party, link, canRemove, onRemoved }: PartyFilesProps) {
     onRemoved?.();
   };
 
-  const certifyHref = (m: PubModule, t: PubFileType, e: PubEntity) =>
-    `/hcm/certifications?${new URLSearchParams({ module: m.module || '', file_type: t.file_type || '', entity: e.entity || '' })}`;
 
   return (
     <>
@@ -260,7 +258,7 @@ function PartyFiles({ party, link, canRemove, onRemoved }: PartyFilesProps) {
                             ? <span className={responseBadgeClass(e.response_code)}>Certified · {responseShort(e.response_code)}</span>
                             : <span className="sy-badge sy-badge-warn">Certification required</span>)}
                           {e.certification_required && canCertify && (
-                            <Link href={certifyHref(m, t, e)} className={`btn ${e.certified ? 'btn-secondary' : 'btn-primary'} hf-small`}
+                            <Link href="/hcm/certifications" className={`btn ${e.certified ? 'btn-secondary' : 'btn-primary'} hf-small`}
                               aria-label={`${e.certified ? 'Change the response for' : 'Certify'} ${e.entity}, ${fileTypeLabel(t.file_type)}, ${m.module}`}>
                               {e.certified ? 'Change response' : 'Certify'}
                             </Link>

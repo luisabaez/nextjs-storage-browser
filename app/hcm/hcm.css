@@ -53,8 +53,6 @@ a.hcm-tile:hover { border-color: #2563eb; box-shadow: 0 8px 20px rgba(30, 58, 95
 .hcm-tile-title { font-size: 18px; font-weight: 700; line-height: 1.25; }
 .hcm-tile-text { font-size: 14px; line-height: 1.45; color: #475569; }
 .hcm-tile-badge { position: absolute; top: 16px; right: 16px; }
-.hcm-tile-disabled { background: #f8fafc; border-style: dashed; box-shadow: none; color: #64748b; }
-.hcm-tile-disabled .hcm-tile-icon { background: #e2e8f0; color: #64748b; }
 .hcm-tiles-small { grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
 .hcm-tiles-small .hcm-tile { flex-direction: row; align-items: center; min-height: 0; padding: 14px 16px; }
 .hcm-tiles-small .hcm-tile-icon { width: 40px; height: 40px; border-radius: 10px; }

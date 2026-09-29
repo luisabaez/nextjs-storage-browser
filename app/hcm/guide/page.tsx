@@ -14,6 +14,8 @@ interface Guide { name: string; size?: number; last_modified?: string }
 interface GuideList extends ApiResult { guides?: Guide[] }
 interface GuideUrl extends ApiResult { url?: string }
 interface GuideUploadUrl extends ApiResult { url?: string; key?: string; content_type?: string }
+interface Template { kind: string; label: string; uploaded: boolean; size?: number; last_modified?: string }
+interface Templates extends ApiResult { templates?: Template[] }
 
 const MAX_BYTES = 50 * 1024 * 1024;
 const CONTENT_TYPES: Record<string, string> = {
@@ -198,10 +200,136 @@ function Guides() {
   );
 }
 
+/** The cycle's blank certification forms: agencies download them from Certifications with their agency filled in. */
+function FormTemplates() {
+  const { mock, email } = useHcm();
+  const [templates, setTemplates] = useState<Template[] | null>(null);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [busy, setBusy] = useState('');
+  const latest = useRef(0);
+
+  const load = useCallback(async () => {
+    const id = ++latest.current;
+    const d = await apiGet<Templates>('certform_templates', { mock, email });
+    if (id !== latest.current) return;
+    if (!d.ok) setError(d.error || 'The certification forms could not be loaded');
+    setTemplates(d.ok ? d.templates ?? [] : []);
+  }, [mock, email]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const upload = async (t: Template, file: File) => {
+    setError('');
+    setNotice('');
+    if (extension(file.name) !== 'xlsx') {
+      setError('The certification form must be the Excel workbook (.xlsx).');
+      return;
+    }
+    if (t.uploaded && !window.confirm(`Replace the ${t.label} form of ${mock}?`)) return;
+    setBusy(t.kind);
+    const d = await apiPost<GuideUploadUrl>('certform_template_upload_url', { actor: email, mock, kind: t.kind, file_name: file.name, size: file.size });
+    let problem = d.ok && d.url ? '' : d.error || 'The upload could not be started';
+    if (!problem) {
+      try {
+        const resp = await fetch(d.url!, { method: 'PUT', headers: { 'Content-Type': d.content_type || CONTENT_TYPES.xlsx }, body: file });
+        if (!resp.ok) problem = `The upload did not complete (${resp.status}). Please try again.`;
+      } catch (e) {
+        problem = `The upload did not complete: ${(e as Error).message}`;
+      }
+    }
+    setBusy('');
+    if (problem) {
+      setError(problem);
+      return;
+    }
+    setNotice(`The ${t.label} form of ${mock} was saved. Agencies download it with their agency filled in.`);
+    load();
+  };
+
+  const download = async (t: Template) => {
+    setBusy(t.kind);
+    setError('');
+    const d = await apiGet<GuideUrl>('certform_template_url', { mock, kind: t.kind, email });
+    setBusy('');
+    if (!d.ok || !d.url) {
+      setError(d.error || 'The form could not be downloaded');
+      return;
+    }
+    window.location.assign(d.url);
+  };
+
+  const remove = async (t: Template) => {
+    if (!window.confirm(`Remove the ${t.label} form of ${mock}? Agencies can no longer download it.`)) return;
+    setBusy(t.kind);
+    setError('');
+    const d = await apiPost<ApiResult>('certform_template_delete', { actor: email, mock, kind: t.kind });
+    setBusy('');
+    if (!d.ok) {
+      setError(d.error || 'The form could not be removed');
+      return;
+    }
+    setNotice(`The ${t.label} form was removed.`);
+    load();
+  };
+
+  return (
+    <section className="hcm-card">
+      <h2>Certification forms</h2>
+      <p className="sy-muted">
+        The blank Excel forms for {mock}. Agencies download them from Certifications with their agency filled in, sign them and upload them back.
+      </p>
+      {error && <div className="sy-error" role="alert">{error}</div>}
+      {notice && <div className="sy-success" role="status">{notice}</div>}
+      {templates === null ? <p className="hcm-loading">Loading…</p> : (
+        <ul className="hcm-list">
+          {templates.map(t => (
+            <li key={t.kind} className="hcm-row">
+              <span className="hcm-row-icon"><DocumentIcon /></span>
+              <div className="hcm-row-main">
+                <div className="hcm-row-title">{t.label} certification form</div>
+                <div className="hcm-row-meta">
+                  {t.uploaded ? [formatSize(t.size), t.last_modified ? `Updated ${fmtDateTime(t.last_modified).slice(0, 16)}` : ''].filter(Boolean).join(' · ') : 'Not added yet'}
+                </div>
+              </div>
+              <div className="hcm-row-actions">
+                {t.uploaded && (
+                  <button type="button" className="btn btn-secondary" disabled={busy === t.kind} onClick={() => download(t)}>Download</button>
+                )}
+                <label className={`btn ${t.uploaded ? 'btn-secondary' : 'btn-primary'}`}>
+                  {busy === t.kind ? 'Please wait…' : t.uploaded ? 'Replace' : 'Add'}
+                  <input type="file" accept=".xlsx" style={{ display: 'none' }} disabled={!!busy} onChange={e => {
+                    const chosen = e.target.files?.[0];
+                    e.target.value = '';
+                    if (chosen) upload(t, chosen);
+                  }} />
+                </label>
+                {t.uploaded && (
+                  <button type="button" className="btn btn-secondary" disabled={busy === t.kind} onClick={() => remove(t)}>Remove</button>
+                )}
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+function GuidePage() {
+  const { view, isSuperUser } = useHcm();
+  return (
+    <>
+      <Guides />
+      {isSuperUser && view === 'staff' && <FormTemplates />}
+    </>
+  );
+}
+
 function HcmGuidePage() {
   return (
     <HcmShell title="User Guide" subtitle="Instructions for the selected Mock Cycle.">
-      <Guides />
+      <GuidePage />
     </HcmShell>
   );
 }

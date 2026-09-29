@@ -5,17 +5,20 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiResult, apiGet, apiPost, fmtDateTime } from '../../lib/symphony';
 import { fileTypeLabel, partyLabel, statusBadgeClass, useHcm } from '../HcmShell';
+import { FormInfo, FormRow, FormRowsTable, formTitle, openFormFile } from './FormsStep';
 import {
   CertRecord, Documents, Issue, IssuesResult, ReasonForm, ResponseBadge, count, day, partyId, recordKey, recordName, responseShort,
 } from './shared';
 
-type Tab = 'pending' | 'issues' | 'completed' | 'status';
+type Tab = 'pending' | 'issues' | 'completed' | 'forms' | 'status';
 const TABS: { id: Tab; label: string }[] = [
   { id: 'pending', label: 'Pending' },
   { id: 'issues', label: 'Reported issues' },
   { id: 'completed', label: 'Completed' },
+  { id: 'forms', label: 'Signed forms' },
   { id: 'status', label: 'Status by agency' },
 ];
+const FORM_LABELS: Record<string, string> = { HR: 'HCM-HR', PAYROLL: 'HCM-Payroll', SOURCES: 'Sources' };
 
 interface Records extends ApiResult { records?: CertRecord[] }
 
@@ -47,6 +50,8 @@ interface StatusTotals {
 }
 interface Status extends ApiResult { totals?: StatusTotals; parties?: StatusParty[] }
 interface Report extends ApiResult { url?: string; name?: string }
+interface Forms extends ApiResult { forms?: FormInfo[] }
+interface FormRows extends ApiResult { rows?: FormRow[] }
 
 /** One list of the cycle, reloadable; a newer request always wins over an older one. */
 function useList<T extends ApiResult>(action: string, state?: string) {
@@ -233,6 +238,89 @@ function IssuesTab() {
   );
 }
 
+/** Every signed form the agencies uploaded: open the file, or read what the portal took from it. */
+function FormsTab() {
+  const { email } = useHcm();
+  const { data, error, reload } = useList<Forms>('certform_list');
+  const labelOf = usePartyLabels();
+  const [search, setSearch] = useState('');
+  const [openId, setOpenId] = useState(0);
+  const [rows, setRows] = useState<FormRow[] | null>(null);
+  const [busy, setBusy] = useState(0);
+  const [problem, setProblem] = useState('');
+
+  const forms = useMemo(() => [...(data?.forms ?? [])].sort((a, b) => (b.uploaded_at || '').localeCompare(a.uploaded_at || '')), [data]);
+  const shown = forms.filter(f => matches(search, labelOf(f), FORM_LABELS[f.kind], f.file_name, f.signer_name, f.uploaded_by));
+
+  const toggle = async (f: FormInfo) => {
+    if (openId === f.id) {
+      setOpenId(0);
+      return;
+    }
+    setOpenId(f.id);
+    setRows(null);
+    const d = await apiGet<FormRows>('certform_rows', { id: f.id, email });
+    setRows(d.ok ? d.rows ?? [] : []);
+    if (!d.ok) setProblem(d.error || 'The rows of the form could not be loaded');
+  };
+  const open = async (f: FormInfo) => {
+    setBusy(f.id);
+    setProblem(await openFormFile(f.id, email));
+    setBusy(0);
+  };
+
+  if (!data) return error ? <LoadProblem error={error} onRetry={reload} /> : <p className="hcm-loading">Loading…</p>;
+  return (
+    <>
+      {error && <LoadProblem error={error} onRetry={reload} />}
+      {problem && <div className="sy-error" role="alert">{problem}</div>}
+      <div className="hcert-filters">
+        <label className="sy-field">
+          <span>Search</span>
+          <input type="search" value={search} onChange={e => setSearch(e.target.value)} placeholder="Agency, form, signer…" />
+        </label>
+        <p className="hcert-count" role="status">Showing {shown.length.toLocaleString()} of {count(forms.length, 'signed form', 'signed forms')}</p>
+      </div>
+      {shown.length === 0 ? (
+        <div className="hcm-empty"><p>{forms.length > 0 ? 'No form matches the search.' : 'No signed form has been uploaded in this cycle yet.'}</p></div>
+      ) : (
+        <ul className="hcm-list">
+          {shown.map(f => (
+            <li key={f.id} className="hcm-row hcert-record">
+              <div className="hcm-row-main">
+                <div className="hcm-row-title">{labelOf(f)} · {formTitle(FORM_LABELS[f.kind] || f.kind)}</div>
+                <div className="hcm-row-meta">
+                  {[
+                    f.signer_name && `Signed by ${[f.signer_name, f.signer_title].filter(Boolean).join(', ')}`,
+                    f.signed_date,
+                    `${f.answered ?? 0} of ${f.rows ?? 0} entities answered`,
+                    f.uploaded_by && `Uploaded by ${f.uploaded_by} on ${day(f.uploaded_at)}`,
+                    !f.signature_image && 'no signature image',
+                  ].filter(Boolean).join(' · ')}
+                </div>
+              </div>
+              <div className="hcm-row-actions">
+                <button type="button" className="btn btn-secondary" disabled={busy === f.id} onClick={() => open(f)}
+                  aria-label={`Open the file ${f.file_name}`}>
+                  {busy === f.id ? 'Please wait…' : 'Open file'}
+                </button>
+                <button type="button" className="btn btn-secondary" aria-expanded={openId === f.id} onClick={() => toggle(f)}>
+                  {openId === f.id ? 'Hide rows' : 'Show rows'}
+                </button>
+              </div>
+              {openId === f.id && (
+                <div className="hcert-row-more">
+                  {rows === null ? <p className="hcm-loading">Loading…</p> : <FormRowsTable rows={rows} />}
+                </div>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </>
+  );
+}
+
 function StatusTab() {
   const { mock, email, parties, isSuperUser, reloadParties } = useHcm();
   const { data, error, reload } = useList<Status>('cert_status');
@@ -395,6 +483,7 @@ export default function StaffView() {
       {tab === 'pending' && <RecordsTab key="pending" state="pending" />}
       {tab === 'completed' && <RecordsTab key="completed" state="completed" />}
       {tab === 'issues' && <IssuesTab />}
+      {tab === 'forms' && <FormsTab />}
       {tab === 'status' && <StatusTab />}
     </>
   );

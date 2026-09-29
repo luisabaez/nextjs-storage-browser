@@ -80,31 +80,62 @@ MAX_ISSUE_LENGTH = 4000
 CERT_TYPES = ("FILE", "VALIDATION", "ISSUE")
 REVOKE_TYPES = ("FILE", "VALIDATION", "SIGNOFF")
 
-# The comments of the team's certification form, word for word from the user
-# guide. Which ones a record offers depends on its file type (responses_for).
+# The comments of the team's certification form, word for word from the
+# form's own lists. Which ones a record offers depends on its file type
+# (responses_for).
 RESPONSES = {
     "NO_ERRORS": "Se verificó la data y no contiene errores.",
     "AGREE": ("Estoy de acuerdo con los errores presentados y se estarán corrigiendo los mismos, de lo contrario "
               "las transacciones asociadas a estos errores se convertirán en error."),
+    "COST_ALLOCATION": "Cost Allocation: Agencia se compromete a atender errores de Validacion con equipo de OGP.",
     "NO_EXCLUSIONS": "Se verificó la data y no contiene exclusiones.",
     "AGREE_EXCLUSIONS": ("Se confirma que el usuario está de acuerdo con la exclusión de los datos y que se tomará "
                          "acción para que aquellos récords que deben ser convertidos se realicen las correcciones "
                          "aplicables a los sistemas de origen."),
+    "CONVERTED_OK": "Se verificó la data convertida y la misma está correcta.",
     "ISSUES": ("Se verificó la data y la misma está parcial o completamente incorrecta. Se incluye un anejo con "
                "documentación de soporte."),
 }
 
 
+def file_class(file_type):
+    """VALIDATION, CONVERTED or RECON: the setup table says "2 Validations", the
+    form "Validation" / "Converted Data" / "Pre Load Recon"."""
+    kind = _s(file_type).upper()
+    if "RECON" in kind:
+        return "RECON"
+    return "CONVERTED" if "CONVERT" in kind else "VALIDATION"
+
+
 def responses_for(file_type):
     """The response codes a record's file type offers: recon reports ask about
     exclusions, converted files only whether the data is right, validations
-    the three comments of the form."""
-    kind = _s(file_type).upper()
-    if "RECON" in kind:
+    the comments of the form's Validation list."""
+    kind = file_class(file_type)
+    if kind == "RECON":
         return ("NO_EXCLUSIONS", "AGREE_EXCLUSIONS", "ISSUES")
-    if "CONVERTED" in kind:
-        return ("NO_ERRORS", "ISSUES")
-    return ("NO_ERRORS", "AGREE", "ISSUES")
+    if kind == "CONVERTED":
+        return ("CONVERTED_OK", "NO_ERRORS", "ISSUES")
+    return ("NO_ERRORS", "AGREE", "COST_ALLOCATION", "ISSUES")
+
+
+def module_class(module):
+    """HR or PAYROLL for a module or a form segment ("HCM-HR (Fase 2)"); blank
+    when it names neither (the setup table's "HCM")."""
+    text = _s(module).upper()
+    if "PAYROLL" in text:
+        return "PAYROLL"
+    return "HR" if text == "HR" or text.startswith("HCM-HR") else ""
+
+
+def form_kind(party_rows, record):
+    """Which of the team's forms certifies a record. A party that also
+    certifies converted files or recon reports (a source) certifies everything
+    on the Sources form; an agency that certifies only validations has one
+    form per module."""
+    if any(file_class(r["file_type"]) != "VALIDATION" for r in party_rows):
+        return "SOURCES"
+    return "PAYROLL" if module_class(record["module"]) == "PAYROLL" else "HR"
 SIGNOFF_STATEMENT = ("Certifico que la agencia completó la revisión de todos los archivos y validaciones del ciclo "
                      "{mock} y que las respuestas registradas representan la posición oficial de la agencia.")
 
@@ -126,12 +157,13 @@ _DDL = {
         "[File_Type] VARCHAR(30) NOT NULL, [Notes] NVARCHAR(MAX) NULL, "
         "[Certified_By] NVARCHAR(200) NULL, [Certified_DTTM] DATETIME NULL, "
         f"[Is_Current] BIT NOT NULL DEFAULT 1, {_REVOKE_DDL}, [Module] VARCHAR(50) NULL, "
-        "[Response_Code] VARCHAR(20) NULL, [Resource_Name] NVARCHAR(200) NULL"),
+        "[Response_Code] VARCHAR(20) NULL, [Resource_Name] NVARCHAR(200) NULL, [Form_ID] INT NULL"),
     T_ISSUE: (
         "[ID] INT IDENTITY(1,1) PRIMARY KEY, [MOCK] VARCHAR(20) NOT NULL, [Source] VARCHAR(50) NOT NULL, "
         "[Agency] VARCHAR(100) NOT NULL, [Module] VARCHAR(50) NOT NULL, [File_Type] VARCHAR(30) NOT NULL, "
         "[Entity] VARCHAR(50) NOT NULL, [Description] NVARCHAR(MAX) NOT NULL, "
-        "[Reported_By] NVARCHAR(200) NULL, [Reported_DTTM] DATETIME NULL, [Deleted] BIT NOT NULL DEFAULT 0"),
+        "[Reported_By] NVARCHAR(200) NULL, [Reported_DTTM] DATETIME NULL, [Deleted] BIT NOT NULL DEFAULT 0, "
+        "[Form_ID] INT NULL"),
     T_SIGNOFF: (
         "[ID] INT IDENTITY(1,1) PRIMARY KEY, [MOCK] VARCHAR(20) NOT NULL, [Source] VARCHAR(50) NOT NULL, "
         "[Agency] VARCHAR(100) NOT NULL, [Signer_Name] NVARCHAR(200) NOT NULL, [Signer_Title] NVARCHAR(200) NOT NULL, "
@@ -290,7 +322,9 @@ _REVOKE_COLUMNS = (("Revoked_By", "NVARCHAR(200)"), ("Revoked_DTTM", "DATETIME")
 _ADDED_COLUMNS = {
     T_VALIDATION: _REVOKE_COLUMNS + (("Reviewed", "BIT"), ("Target_Date", "DATE")),
     T_FILE: _REVOKE_COLUMNS + (("Module", "VARCHAR(50)"), ("Response_Code", "VARCHAR(20)"),
-                               ("Resource_Name", "NVARCHAR(200)")),
+                               ("Resource_Name", "NVARCHAR(200)"), ("Form_ID", "INT")),
+    # The signed form a certification or an issue was read from (cert_forms).
+    T_ISSUE: (("Form_ID", "INT"),),
 }
 _TABLES_READY = False
 
@@ -849,18 +883,23 @@ def _expected(conn, cur, p, headers):
     if not location:
         return api_util.ok(headers, unavailable)
     snap = _snapshot(conn, cur, mock, location, access, warnings)
+    by_party = {}
+    for r in snap["files"]:
+        by_party.setdefault(authz.party_key(r["source"], r["agency"]), []).append(r)
+    kinds = {_row_key(r): form_kind(by_party[authz.party_key(r["source"], r["agency"])], r) for r in snap["files"]}
     parties = [{"source": s["source"], "agency": s["agency"], "bu": s["bu"], "party": s["party"],
                 "required": s["files_required"], "certified": s["files_certified"], "with_issues": s["with_issues"],
                 "validations_reported": s["validations_reported"],
                 "validations_committed": s["validations_certified"], "signed_off": s["signoff"],
                 "status": portal_status(s["signoff"], s["files_certified"] + s["validations_certified"],
-                                        s["files_required"] + s["validations_reported"])}
+                                        s["files_required"] + s["validations_reported"]),
+                "forms": sorted({kinds[_row_key(r)] for r in by_party[authz.party_key(s["source"], s["agency"])]})}
                for s in snap["parties"]]
     return api_util.ok(headers, {
         "available": True, "mock": mock, "responses": [{"code": c, "label": t} for c, t in RESPONSES.items()],
         "parties": parties,
-        "rows": [{**{f: r[f] for f in _ROW_FIELDS}, "response_codes": list(responses_for(r["file_type"]))}
-                 for r in snap["files"]],
+        "rows": [{**{f: r[f] for f in _ROW_FIELDS}, "response_codes": list(responses_for(r["file_type"])),
+                  "form_kind": kinds[_row_key(r)]} for r in snap["files"]],
         "warnings": warnings})
 
 

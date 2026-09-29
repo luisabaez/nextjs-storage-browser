@@ -33,11 +33,9 @@ interface TileProps {
   text: string;
   icon: React.ReactNode;
   badge?: React.ReactNode;
-  external?: boolean;          // opens in a new tab
-  disabled?: boolean;
 }
 
-function Tile({ href, title, text, icon: tileIcon, badge, external, disabled }: TileProps) {
+function Tile({ href, title, text, icon: tileIcon, badge }: TileProps) {
   const inner = (
     <>
       <span className="hcm-tile-icon">{tileIcon}</span>
@@ -48,8 +46,6 @@ function Tile({ href, title, text, icon: tileIcon, badge, external, disabled }: 
       {badge && <span className="hcm-tile-badge">{badge}</span>}
     </>
   );
-  if (disabled) return <div className="hcm-tile hcm-tile-disabled" aria-disabled="true">{inner}</div>;
-  if (external) return <a className="hcm-tile" href={href} target="_blank" rel="noopener noreferrer">{inner}</a>;
   return <Link className="hcm-tile" href={href}>{inner}</Link>;
 }
 
@@ -82,7 +78,7 @@ function AgencyHome({ party }: { party: HcmParty }) {
         <Tile href="/hcm/files" title="My Files" icon={ICONS.files}
           text="Open the files published for your agency, by module, file type and entity." />
         <Tile href="/hcm/certifications" title="Certifications" icon={ICONS.certifications}
-          text="Certify each file you reviewed, report issues and sign the final certification."
+          text="Download your certification forms, sign them, upload them back and sign the cycle."
           badge={party.required === undefined ? undefined : pending > 0
             ? <span className="sy-badge sy-badge-warn">{pending} pending</span>
             : <span className="sy-badge sy-badge-ok">Complete</span>} />
@@ -97,9 +93,7 @@ function AgencyHome({ party }: { party: HcmParty }) {
 }
 
 function StaffHome() {
-  const { session, parties, cycleAvailable, isSuperUser, mock } = useHcm();
-  const reconUrl = (session.config?.recon_tool_url || '').trim();
-  const reconReady = /^https:\/\//i.test(reconUrl);
+  const { parties, cycleAvailable, isSuperUser, mock } = useHcm();
   const pending = parties.reduce((n, p) => n + pendingOf(p), 0);
   const withIssues = parties.reduce((n, p) => n + (p.with_issues ?? 0), 0);
   const signedOff = parties.filter(p => p.signed_off).length;
@@ -124,14 +118,14 @@ function StaffHome() {
         <Tile href="/hcm/files" title="Files by Source & Agency" icon={ICONS.files}
           text="Browse everything published to each source and agency." />
         <Tile href="/hcm/certifications" title="Certifications" icon={ICONS.certifications}
-          text="Pending, completed and reported issues"
+          text="Pending, signed forms, completed and reported issues"
           badge={pending > 0 ? <span className="sy-badge sy-badge-warn">{pending} pending</span> : undefined} />
         <Tile href="/hcm/cleanse-log" title="Data Cleanse Log" icon={ICONS.log}
           text="Every validation reported in the cycle, by source and agency." />
         <Tile href="/hcm/rules" title="Validation Rules" icon={ICONS.rules}
           text="Messages, severity and path forward of each validation." />
-        <Tile href={reconUrl} title="Recon Report Tools" icon={ICONS.recon} external disabled={!reconReady}
-          text={reconReady ? 'Opens the reconciliation report tools in a new tab.' : 'Link not set up yet'} />
+        <Tile href="/hcm/recon" title="Recon Reports" icon={ICONS.recon}
+          text="Pre-load reconciliation reports for each source." />
       </div>
       {/* Managing is for super users; reviewers keep a way to read the guide */}
       <h2 className="hcm-section">{isSuperUser ? 'Manage' : 'Reference'}</h2>
@@ -141,7 +135,7 @@ function StaffHome() {
             text="Send files to the agencies they belong to." />
         )}
         <Tile href="/hcm/guide" title="User Guides" icon={ICONS.guide}
-          text={isSuperUser ? 'Add or replace the guide agencies see.' : 'The guide agencies see for this cycle.'} />
+          text={isSuperUser ? 'The guides and the certification forms agencies download.' : 'The guide agencies see for this cycle.'} />
       </div>
     </>
   );

@@ -76,3 +76,10 @@
   .hcert-steps { grid-template-columns: minmax(0, 1fr); }
   .hcert-count { margin-left: 0; }
 }
+
+/* the signed certification forms */
+.hcert-howto { margin: 0 0 16px; padding: 12px 16px 12px 36px; background: #f8fafc; border: 1px solid #dbe2ec; border-radius: 10px; display: grid; gap: 4px; line-height: 1.5; }
+.hcert-disabled { opacity: 0.6; pointer-events: none; }
+.hcert-form-rows td:last-child { white-space: nowrap; }
+.hcert-record .hcert-record-actions { margin-top: 12px; }
+.hcert-record .hcert-facts { margin-top: 8px; }

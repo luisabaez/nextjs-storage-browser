@@ -19,7 +19,6 @@ export interface CertRecord {
   entity: string;
   certified?: boolean;
   response_code?: string | null;
-  response_codes?: string[];     // the responses this record's file type offers
   resource_name?: string | null;
   notes?: string | null;
   certified_by?: string | null;
@@ -53,24 +52,17 @@ export interface IssuesResult extends ApiResult { issues?: Issue[] }
 
 interface DownloadUrl extends ApiResult { url?: string }
 
-export const ISSUES = 'ISSUES';
-
-// The responses are shown in the wording the server sends; these go with them.
-const RESPONSE_INFO: Record<string, { short: string; gloss: string; badge: string }> = {
-  NO_ERRORS: { short: 'No errors', gloss: 'I verified the data and it has no errors', badge: 'sy-badge-ok' },
-  AGREE: { short: 'Agrees with the errors', gloss: 'I agree with the errors shown and they will be corrected', badge: 'sy-badge-info' },
-  NO_EXCLUSIONS: { short: 'No exclusions', gloss: 'I verified the data and it has no exclusions', badge: 'sy-badge-ok' },
-  AGREE_EXCLUSIONS: {
-    short: 'Agrees with the exclusions', badge: 'sy-badge-info',
-    gloss: 'I agree with the excluded records; the ones that must be converted will be corrected in the source system',
-  },
-  ISSUES: {
-    short: 'Issues reported', badge: 'sy-badge-warn',
-    gloss: 'The data is partly or completely incorrect - I am reporting issues with supporting documents',
-  },
+// The responses are shown in the wording the server sends; these short names go with them.
+const RESPONSE_INFO: Record<string, { short: string; badge: string }> = {
+  NO_ERRORS: { short: 'No errors', badge: 'sy-badge-ok' },
+  CONVERTED_OK: { short: 'Converted data is correct', badge: 'sy-badge-ok' },
+  NO_EXCLUSIONS: { short: 'No exclusions', badge: 'sy-badge-ok' },
+  AGREE: { short: 'Agrees with the errors', badge: 'sy-badge-info' },
+  AGREE_EXCLUSIONS: { short: 'Agrees with the exclusions', badge: 'sy-badge-info' },
+  COST_ALLOCATION: { short: 'Cost allocation with OGP', badge: 'sy-badge-info' },
+  ISSUES: { short: 'Incorrect, documents attached', badge: 'sy-badge-warn' },
 };
 
-export const responseGloss = (code: string) => RESPONSE_INFO[code]?.gloss || '';
 export const responseShort = (code?: string | null) => (code && RESPONSE_INFO[code]?.short) || 'Certified';
 export const responseBadgeClass = (code?: string | null) => `sy-badge ${(code && RESPONSE_INFO[code]?.badge) || 'sy-badge-ok'}`;
 

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useRef } from 'react';
+import React from 'react';
 import { Amplify } from 'aws-amplify';
 import { withAuthenticator } from '@aws-amplify/ui-react';
 import '@aws-amplify/ui-react/styles.css';
@@ -14,8 +14,7 @@ Amplify.configure(config);
 
 function Certifications() {
   const { view, party, cycleAvailable, mock } = useHcm();
-  const deepLink = useRef(false);    // the record named in the address opens once, not again for another agency
-  if (view === 'agency' && party) return <AgencyView key={partyKey(party)} party={party} deepLink={deepLink} />;
+  if (view === 'agency' && party) return <AgencyView key={partyKey(party)} party={party} />;
   if (!cycleAvailable) {
     return <div className="hcm-empty"><p>Certifications have not been set up for {mock} yet.</p></div>;
   }
@@ -24,7 +23,7 @@ function Certifications() {
 
 function HcmCertificationsPage() {
   return (
-    <HcmShell title="Certifications" subtitle="The certification of every file, the reported issues and the final signature of the cycle.">
+    <HcmShell title="Certifications" subtitle="The signed certification forms, the reported issues and the final signature of the cycle.">
       <Certifications />
     </HcmShell>
   );

@@ -57,7 +57,6 @@ export interface AppConfig extends ApiResult {
   is_admin?: boolean;
   portal_only?: boolean;       // has a role and is not an administrator: sees the HCM portal only
   parties?: { source: string; agency: string }[];   // agency users; agency '' = source level
-  recon_tool_url?: string;
 }
 
 export const fetchAppConfig = (email?: string) => apiGet<AppConfig>('app_config_get', { email });

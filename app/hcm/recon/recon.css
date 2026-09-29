@@ -1,0 +1,8 @@
+/* Recon Reports page of the HCM portal. Cards, tables and badges come from
+   ../hcm.css and ../../lib/symphony.css. */
+.hrc-controls { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 12px 16px; margin: 16px 0 12px; }
+.hrc-controls .sy-field { flex: 0 1 240px; }
+.hrc-check { display: flex; align-items: center; gap: 8px; font-size: 14px; padding-bottom: 8px; }
+.hrc-table td { vertical-align: top; }
+.hrc-result { min-width: 220px; font-size: 13px; }
+.sy-error-text { color: #b91c1c; font-size: 13px; }

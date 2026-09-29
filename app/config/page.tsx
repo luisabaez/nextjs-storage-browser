@@ -17,7 +17,6 @@ Amplify.configure(config);
 type Tab = 'mock' | 'rules' | 'history';
 
 interface ConfigSetResult extends ApiResult { current_mock: string; previous: string | null }
-interface ReconLinkResult extends ApiResult { recon_tool_url?: string }
 
 function MockCycleTab({ session }: { session: SymphonySession }) {
   const cfg = session.config;
@@ -25,10 +24,6 @@ function MockCycleTab({ session }: { session: SymphonySession }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
-  const [reconUrl, setReconUrl] = useState(cfg?.recon_tool_url || '');
-  const [reconSaving, setReconSaving] = useState(false);
-  const [reconError, setReconError] = useState('');
-  const [reconSuccess, setReconSuccess] = useState('');
 
   if (!cfg) return <div className="sy-error">{session.error || 'The configuration could not be loaded.'}</div>;
 
@@ -51,23 +46,6 @@ function MockCycleTab({ session }: { session: SymphonySession }) {
       setSuccess(`The current Mock Cycle is now ${res.current_mock} (it was ${res.previous || 'not set'}).`);
     }
     setSaving(false);
-  };
-
-  const reconValue = reconUrl.trim();
-  const reconValid = reconValue === '' || (/^https:\/\/\S+$/i.test(reconValue) && reconValue.length <= 500);
-  const saveRecon = async () => {
-    setReconSaving(true);
-    setReconError('');
-    setReconSuccess('');
-    const res = await apiPost<ReconLinkResult>('app_config_set', { actor: session.email, recon_tool_url: reconValue });
-    if (!res.ok) {
-      setReconError(res.error || 'The link could not be saved');
-    } else {
-      await session.reloadConfig();
-      setReconUrl(res.recon_tool_url ?? reconValue);
-      setReconSuccess(reconValue ? 'The Recon Report Tools link was saved.' : 'The Recon Report Tools link was cleared.');
-    }
-    setReconSaving(false);
   };
 
   return (
@@ -98,24 +76,6 @@ function MockCycleTab({ session }: { session: SymphonySession }) {
       </section>
 
       <section className="sy-card">
-        <h2>Recon Report Tools link</h2>
-        <p className="sy-muted small">The address the Recon Report Tools tile of the HCM portal opens. Leave it empty to switch the tile off.</p>
-        {reconError && <div className="sy-error">{reconError}</div>}
-        {reconSuccess && <div className="sy-success">{reconSuccess}</div>}
-        <div className="cfg-set">
-          <label className="sy-field sy-field-wide">
-            <span>Link (https)</span>
-            <input type="url" value={reconUrl} maxLength={500} placeholder="https://" disabled={reconSaving}
-              onChange={e => setReconUrl(e.target.value)} />
-          </label>
-          <button className="btn btn-primary" disabled={reconSaving || !reconValid || reconValue === (cfg.recon_tool_url || '')} onClick={saveRecon}>
-            {reconSaving ? 'Saving…' : 'Save'}
-          </button>
-        </div>
-        {!reconValid && <p className="sy-muted small">Enter an address that starts with https:// (500 characters at most).</p>}
-      </section>
-
-      <section className="sy-card">
         <h2>Change history</h2>
         {cfg.history.length === 0 ? <p className="sy-muted">No changes have been recorded yet.</p> : (
           <div className="sy-scroll">
@@ -125,7 +85,7 @@ function MockCycleTab({ session }: { session: SymphonySession }) {
                 {cfg.history.map((h, i) => (
                   <tr key={i}>
                     <td className="mono">{fmtDateTime(h.at)}</td>
-                    <td>{h.key === 'current_mock' ? 'Current Mock Cycle' : h.key === 'recon_tool_url' ? 'Recon Report Tools link' : h.key}</td>
+                    <td>{h.key === 'current_mock' ? 'Current Mock Cycle' : h.key}</td>
                     <td className="mono">{h.old || '—'}</td>
                     <td className="mono">{h.new || '—'}</td>
                     <td>{h.by || '—'}</td>
