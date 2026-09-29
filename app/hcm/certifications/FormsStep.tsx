@@ -373,7 +373,7 @@ function IssueDocuments({ party, locked, refreshKey, onChanged }: {
               </label>
             )}
             {working?.id === issue.id && <p className="hcert-note" role="status">{working.text}</p>}
-            {issue.reported_at && <p className="hcert-note">From the form uploaded on {day(issue.reported_at)}</p>}
+            {issue.reported_at && <p className="hcert-note">Reported on {day(issue.reported_at)}</p>}
           </li>
         ))}
       </ol>

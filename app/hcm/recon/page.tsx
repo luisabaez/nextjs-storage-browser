@@ -66,7 +66,7 @@ function ReconReports() {
     return () => { latest.current++; stop.current = true; };
   }, [load]);
 
-  const reports = useMemo(() => list?.reports ?? [], [list]);
+  const reports = useMemo(() => [...(list?.reports ?? [])].sort((a, b) => a.token.localeCompare(b.token) || a.label.localeCompare(b.label)), [list]);
   const shown = reports.filter(r => (!source || r.token === source)
     && (!onlyRouted || (r.targets ?? []).length > 0)
     && (!search.trim() || `${r.label} ${r.entity} ${r.token}`.toLowerCase().includes(search.trim().toLowerCase())));
