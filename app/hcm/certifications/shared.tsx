@@ -4,6 +4,7 @@
 // certifications page.
 import React, { useEffect, useRef, useState } from 'react';
 import { ApiResult, LAMBDA_URL, apiGet, fmtDateTime } from '../../lib/symphony';
+import { authHeaders } from '../../lib/authHeaders';
 import { fileTypeLabel, formatSize } from '../HcmShell';
 
 export interface ResponseOption { code: string; label: string }
@@ -99,7 +100,7 @@ export async function post<T extends ApiResult>(action: string, body: Record<str
   try {
     const resp = await fetch(`${LAMBDA_URL}?action=${encodeURIComponent(action)}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
       body: JSON.stringify(body),
     });
     return { ...((await resp.json()) as T), status: resp.status };

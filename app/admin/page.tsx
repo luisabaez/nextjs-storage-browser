@@ -10,6 +10,7 @@ import './admin.css';
 import config from '../../amplify_outputs.json';
 import { isAdminUser, getUserRole, USER_ROLE_LABELS, CognitoUser, ApprovalAction, ADMIN_EMAILS, syncCurrentUserPermissions, syncAllPermissions } from './types';
 import Link from 'next/link';
+import { authHeaders } from '../lib/authHeaders';
 
 Amplify.configure(config);
 
@@ -82,7 +83,8 @@ function AdminDashboard() {
       // user list reflect what's stored server-side, not just this browser.
       await syncAllPermissions();
       const response = await fetch(
-        `${APPROVAL_HANDLER_URL}?action=list&token=${encodeURIComponent(APPROVAL_TOKEN)}`
+        `${APPROVAL_HANDLER_URL}?action=list&token=${encodeURIComponent(APPROVAL_TOKEN)}`,
+        { headers: await authHeaders() }
       );
 
       if (response.ok) {

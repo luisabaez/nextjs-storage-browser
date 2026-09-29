@@ -1,0 +1,19 @@
+/* Users & Permissions page of the HCM portal. Cards, tables and badges come
+   from ../hcm.css and ../../lib/symphony.css. */
+.hus-toolbar { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 12px 16px; margin: 12px 0; }
+.hus-toolbar .sy-field { flex: 0 1 240px; }
+.hus-toolbar .btn { margin-left: auto; }
+.hus-form { display: grid; gap: 16px; margin: 12px 0 16px; }
+.hus-form h2 { margin: 0; font-size: 18px; }
+.hus-form .sy-field small { display: block; margin-top: 4px; }
+.hus-parties { border: 1px solid #dbe2ec; border-radius: 10px; padding: 12px 16px; margin: 0; min-width: 0; }
+.hus-parties legend { padding: 0 4px; font-weight: 700; }
+.hus-chips { list-style: none; margin: 0 0 12px; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+.hus-chip { display: flex; align-items: center; gap: 8px; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 999px; padding: 4px 12px; font-size: 14px; }
+.hus-add { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 12px; }
+.hus-add .sy-field { flex: 0 1 280px; }
+.hus-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px 12px; }
+.hus-why { margin-right: auto; font-size: 14px; font-weight: 600; color: #92400e; }
+.hus-table td { vertical-align: top; }
+.hus-name { font-weight: 600; }
+.hus-row-actions { display: flex; flex-wrap: wrap; gap: 6px; }

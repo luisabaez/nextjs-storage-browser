@@ -1,3 +1,5 @@
+import { authHeaders } from '../lib/authHeaders';
+
 // Admin Dashboard Types
 
 // ============================================
@@ -481,7 +483,7 @@ export async function pushPermissionsToBackend(
   try {
     const payload = { email: email.toLowerCase(), permissions, actor };
     const url = `${PERMISSION_HANDLER_URL}?action=set_permissions&token=${encodeURIComponent(PERMISSION_TOKEN)}&data=${encodeURIComponent(JSON.stringify(payload))}`;
-    const data = await (await fetch(url)).json();
+    const data = await (await fetch(url, { headers: await authHeaders() })).json();
     return !!data?.ok;
   } catch (e) {
     console.error('pushPermissionsToBackend failed', e);
@@ -492,7 +494,7 @@ export async function pushPermissionsToBackend(
 export async function fetchAllPermissionsFromBackend(): Promise<UserPermissions[]> {
   try {
     const url = `${PERMISSION_HANDLER_URL}?action=list_permissions&token=${encodeURIComponent(PERMISSION_TOKEN)}`;
-    const data = await (await fetch(url)).json();
+    const data = await (await fetch(url, { headers: await authHeaders() })).json();
     return data?.ok && Array.isArray(data.permissions) ? (data.permissions as UserPermissions[]) : [];
   } catch (e) {
     console.error('fetchAllPermissionsFromBackend failed', e);

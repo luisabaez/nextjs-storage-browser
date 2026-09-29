@@ -7,17 +7,20 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { fetchUserAttributes } from 'aws-amplify/auth';
 import { getUserRole, isAdminUser, syncCurrentUserPermissions, UserRole } from '../admin/types';
+import { authHeaders } from './authHeaders';
 
 export const LAMBDA_URL = 'https://5ahxjcxhrcopng5hjgc2n6utxq0rwcmm.lambda-url.us-east-1.on.aws/';
+// The user and permission service (it also runs the HCM portal's user management).
+export const PERMISSIONS_URL = 'https://w47wliqar3ka27qsezzckqpoza0kkmbt.lambda-url.us-east-1.on.aws/';
 
 export interface ApiResult { ok: boolean; error?: string }
 
-function query(action: string, params: Record<string, string | number | boolean | undefined | null>): string {
+function query(action: string, params: Record<string, string | number | boolean | undefined | null>, base = LAMBDA_URL): string {
   const q = new URLSearchParams({ action });
   Object.entries(params).forEach(([k, v]) => {
     if (v !== undefined && v !== null && v !== '') q.set(k, String(v));
   });
-  return `${LAMBDA_URL}?${q.toString()}`;
+  return `${base}?${q.toString()}`;
 }
 
 /** GET ?action=…; always resolves to an object with `ok` (network errors included). */
@@ -26,7 +29,7 @@ export async function apiGet<T extends ApiResult>(
   params: Record<string, string | number | boolean | undefined | null> = {},
 ): Promise<T> {
   try {
-    return (await (await fetch(query(action, params))).json()) as T;
+    return (await (await fetch(query(action, params), { headers: await authHeaders() })).json()) as T;
   } catch (e) {
     return { ok: false, error: `Network error: ${(e as Error).message}` } as T;
   }
@@ -37,7 +40,29 @@ export async function apiPost<T extends ApiResult>(action: string, body: Record<
   try {
     const resp = await fetch(query(action, {}), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
+      body: JSON.stringify(body),
+    });
+    return (await resp.json()) as T;
+  } catch (e) {
+    return { ok: false, error: `Network error: ${(e as Error).message}` } as T;
+  }
+}
+
+/** The HCM portal's user management, on the permission service; same contract as apiGet / apiPost. */
+export async function usersGet<T extends ApiResult>(action: string): Promise<T> {
+  try {
+    return (await (await fetch(query(action, {}, PERMISSIONS_URL), { headers: await authHeaders() })).json()) as T;
+  } catch (e) {
+    return { ok: false, error: `Network error: ${(e as Error).message}` } as T;
+  }
+}
+
+export async function usersPost<T extends ApiResult>(action: string, body: Record<string, unknown>): Promise<T> {
+  try {
+    const resp = await fetch(query(action, {}, PERMISSIONS_URL), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
       body: JSON.stringify(body),
     });
     return (await resp.json()) as T;

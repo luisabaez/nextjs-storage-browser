@@ -25,6 +25,11 @@ exports.handler = async (event) => {
   console.log("========================================");
   console.log("Full event:", JSON.stringify(event, null, 2));
 
+  // Accounts a super user creates from the HCM portal are approved already.
+  if (event.triggerSource === "PreSignUp_AdminCreateUser") {
+    return event;
+  }
+
   const { userName, request, userPoolId, region } = event;
   const userEmail = request.userAttributes.email || userName;
   const timestamp = new Date().toISOString();

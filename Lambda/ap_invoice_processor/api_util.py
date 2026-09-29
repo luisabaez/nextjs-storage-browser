@@ -22,6 +22,19 @@ def params(event):
     return event.get("queryStringParameters") or {}
 
 
+def set_caller(event, email):
+    """Put the verified caller where the actions read it: the e-mail of a
+    read and the actor of a change, replacing whatever the page sent."""
+    event["queryStringParameters"] = {**(event.get("queryStringParameters") or {}), "email": email}
+    if event.get("body"):
+        data = body(event)
+        data["actor"] = email
+        if "email" in data:
+            data["email"] = email
+        event["body"] = json.dumps(data)
+        event["isBase64Encoded"] = False
+
+
 def body(event):
     raw = event.get("body")
     if not raw:

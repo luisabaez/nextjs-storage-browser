@@ -3,6 +3,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
 import { fetchUserAttributes } from 'aws-amplify/auth';
 import { isAdminUser, CognitoUser, ApprovalAction, DashboardStats } from './types';
+import { authHeaders } from '../lib/authHeaders';
 
 interface AdminContextType {
   isAdmin: boolean;
@@ -85,7 +86,8 @@ export function AdminProvider({ children }: AdminProviderProps) {
 
     try {
       // Fetch data via the admin API endpoint
-      const response = await fetch(`${APPROVAL_HANDLER_URL}?action=list&token=${encodeURIComponent(APPROVAL_TOKEN)}`);
+      const response = await fetch(`${APPROVAL_HANDLER_URL}?action=list&token=${encodeURIComponent(APPROVAL_TOKEN)}`,
+        { headers: await authHeaders() });
 
       if (response.ok) {
         const data = await response.json();

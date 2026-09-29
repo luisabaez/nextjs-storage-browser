@@ -25,6 +25,7 @@ const ICONS = {
   rules: icon('M4 7h10', 'M18 7h2', 'M4 17h2', 'M10 17h10', 'M16 5v4', 'M8 15v4'),
   recon: icon('M4 20V10', 'M10 20V4', 'M16 20v-7', 'M22 20H2'),
   publish: icon('M12 16V4', 'M7 9l5-5 5 5', 'M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3'),
+  users: icon('M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2', 'M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z', 'M22 21v-2a4 4 0 0 0-3-3.87', 'M16 3.13a4 4 0 0 1 0 7.75'),
 };
 
 interface TileProps {
@@ -131,8 +132,12 @@ function StaffHome() {
       <h2 className="hcm-section">{isSuperUser ? 'Manage' : 'Reference'}</h2>
       <div className="hcm-tiles hcm-tiles-small">
         {isSuperUser && (
-          <Tile href="/hcm/publish" title="Publish Files" icon={ICONS.publish}
-            text="Send files to the agencies they belong to." />
+          <>
+            <Tile href="/hcm/users" title="Users & Permissions" icon={ICONS.users}
+              text="Invite users and choose the sources and agencies they act for." />
+            <Tile href="/hcm/publish" title="Publish Files" icon={ICONS.publish}
+              text="Send files to the agencies they belong to." />
+          </>
         )}
         <Tile href="/hcm/guide" title="User Guides" icon={ICONS.guide}
           text={isSuperUser ? 'The guides and the certification forms agencies download.' : 'The guide agencies see for this cycle.'} />

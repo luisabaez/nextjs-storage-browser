@@ -1239,6 +1239,11 @@ def lambda_handler(event, context):
     # ── Feature modules (configuration, rules, data cleanse log, certifications, reports) ──
     for feature in FEATURE_MODULES:
         if action in getattr(feature, "ACTIONS", ()):
+            # The caller is who their Cognito token says, whatever the page sent.
+            try:
+                api_util.set_caller(event, authz.verified_email(event))
+            except api_util.ApiError as denied:
+                return api_util.fail(headers, str(denied), denied.status)
             return feature.handle(action, event, bucket, headers, get_connection_string())
 
     # ── ENTITIES ACTION ──

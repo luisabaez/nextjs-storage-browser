@@ -7,6 +7,7 @@ import '@aws-amplify/ui-react/styles.css';
 import config from '../../../amplify_outputs.json';
 import Link from 'next/link';
 import { ApiResult, LAMBDA_URL, apiGet, fmtDateTime } from '../../lib/symphony';
+import { authHeaders } from '../../lib/authHeaders';
 import HcmShell, { partyLabel, useHcm } from '../HcmShell';
 import RecordsTable from '../RecordsTable';
 import './validations.css';
@@ -40,7 +41,7 @@ async function postCommitment(body: Record<string, unknown>): Promise<ApiResult 
   try {
     const resp = await fetch(`${LAMBDA_URL}?action=cert_certify_validation`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
       body: JSON.stringify(body),
     });
     return { ...((await resp.json()) as ApiResult), status: resp.status };

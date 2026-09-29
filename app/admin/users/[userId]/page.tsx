@@ -7,6 +7,7 @@ import { withAuthenticator } from '@aws-amplify/ui-react';
 import '@aws-amplify/ui-react/styles.css';
 import '../../admin.css';
 import './user-detail.css';
+import { authHeaders } from '../../../lib/authHeaders';
 import config from '../../../../amplify_outputs.json';
 import {
   isAdminUser,
@@ -136,7 +137,8 @@ function UserDetailPage() {
 
     try {
       const response = await fetch(
-        `${APPROVAL_HANDLER_URL}?action=list&token=${encodeURIComponent(APPROVAL_TOKEN)}`
+        `${APPROVAL_HANDLER_URL}?action=list&token=${encodeURIComponent(APPROVAL_TOKEN)}`,
+        { headers: await authHeaders() }
       );
 
       if (response.ok) {

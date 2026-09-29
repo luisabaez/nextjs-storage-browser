@@ -10,10 +10,11 @@ same store the admin screens edit):
                           business units they are allowed
   certification_reviewer  read-only certification dashboards + status report
 
-A user flagged isAdmin (or on the bootstrap list) is a super user. The
-caller's identity is the e-mail the page sends; this is the same trust model
-as the rest of the app's Lambda actions, enforced here so a page bug or a
-hand-made request cannot skip the role rules.
+A user flagged isAdmin (or on the bootstrap list) is a super user. For the
+portal's actions the caller is who their Cognito access token says
+(verified_email): the page sends the token and Cognito answers only for a
+valid one it issued, so an e-mail typed into a request counts for nothing.
+The role rules here then apply to that verified caller.
 
 An agency user acts for parties. A party is Source + Agency, stored with the
 permissions as "SOURCE|AGENCY"; the agency may be empty ("RHUM|" is the person
@@ -45,6 +46,31 @@ _PERMISSIONS_URL = os.environ.get(
 _PERMISSIONS_TOKEN = os.environ.get("PERMISSIONS_TOKEN", "hacienda-erp-approval-2024")
 _CACHE = {}
 _TTL = 60  # seconds
+_SESSIONS = {}
+_SESSION_TTL = 300  # seconds a verified token is remembered
+
+
+def verified_email(event):
+    """The e-mail of the signed-in user who sent the request, as Cognito
+    vouches for it (GetUser with their access token)."""
+    headers = {k.lower(): v for k, v in (event.get("headers") or {}).items()}
+    token = re.sub(r"^Bearer\s+", "", headers.get("authorization") or "", flags=re.I).strip()
+    if not token:
+        raise ApiError("Sign in again: the request did not carry your session.", 401)
+    hit = _SESSIONS.get(token)
+    if hit and hit[0] > time.time():
+        return hit[1]
+    import boto3
+    try:
+        user = boto3.client("cognito-idp", region_name="us-east-1").get_user(AccessToken=token)
+    except Exception:  # noqa: BLE001 - expired, revoked or not one of the pool's tokens
+        raise ApiError("Your session has expired. Sign in again.", 401)
+    email = next((a["Value"] for a in user.get("UserAttributes", []) if a["Name"] == "email"),
+                 user.get("Username", "")).strip().lower()
+    if len(_SESSIONS) > 500:
+        _SESSIONS.clear()
+    _SESSIONS[token] = (time.time() + _SESSION_TTL, email)
+    return email
 
 
 def get_permissions(email):

@@ -9,6 +9,12 @@
  * - email: user email to approve/deny (not needed for list)
  * - token: simple security token
  *
+ * Reading everyone's accounts and changing permissions also need the caller's
+ * Cognito access token (Authorization: Bearer ...), checked with Cognito:
+ * set_permissions, list and list_permissions are for administrators; the
+ * portal_* actions let the HCM portal's super users manage the portal's users
+ * (agency users and certification reviewers; administrators also super users).
+ *
  * Environment Variables:
  * - ADMIN_EMAIL: Email to receive approval requests
  * - APPROVAL_TOKEN: Secret token for approval links
@@ -16,7 +22,10 @@
  * - APPROVED_EMAILS: Comma-separated list of approved emails (used for legacy compatibility)
  */
 
-const { CognitoIdentityProviderClient, AdminGetUserCommand, AdminUpdateUserAttributesCommand, AdminEnableUserCommand, ListUsersCommand } = require("@aws-sdk/client-cognito-identity-provider");
+const {
+  CognitoIdentityProviderClient, AdminGetUserCommand, AdminUpdateUserAttributesCommand, AdminEnableUserCommand, ListUsersCommand,
+  AdminCreateUserCommand, AdminDisableUserCommand, GetUserCommand,
+} = require("@aws-sdk/client-cognito-identity-provider");
 const { SESClient, SendEmailCommand } = require("@aws-sdk/client-ses");
 const { LambdaClient, GetFunctionConfigurationCommand, UpdateFunctionConfigurationCommand } = require("@aws-sdk/client-lambda");
 const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
@@ -32,6 +41,70 @@ const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "mrichcreek@elitebco.com";
 const APPROVAL_TOKEN = process.env.APPROVAL_TOKEN || "hacienda-erp-approval-2024";
 const USER_POOL_ID = process.env.USER_POOL_ID || "us-east-1_3iz7lup2k";
 const PRE_AUTH_FUNCTION = process.env.PRE_AUTH_FUNCTION || "cognito-pre-auth-approval";
+// Built-in administrators (the same list as the application's ADMIN_EMAILS).
+const ADMIN_EMAILS = ["mrichcreek@elitebco.com", "lbaez@elitebco.com", "jvelilla@elitebco.com", "flockwood@elitebco.com"];
+const PORTAL_ROLES = ["super_user", "agency_user", "certification_reviewer"];
+
+class HttpError extends Error {
+  constructor(status, message) {
+    super(message);
+    this.status = status;
+  }
+}
+
+const asArray = (v) => (Array.isArray(v) ? v : []);
+const asRole = (v) => (PORTAL_ROLES.includes(v) ? v : "");
+// Source / agency assignments as "SOURCE|AGENCY"; the agency is empty for a
+// source-level certifier. Anything that is not a clean pair is dropped.
+const asParties = (v) => {
+  const parties = new Set();
+  for (const entry of asArray(v)) {
+    if (typeof entry !== "string") continue;
+    const parts = entry.toUpperCase().split("|").map((s) => s.trim());
+    if (parts.length === 2 && /^[A-Z0-9_]{1,20}$/.test(parts[0]) && /^[A-Z0-9_-]{0,20}$/.test(parts[1])) {
+      parties.add(parts.join("|"));
+    }
+  }
+  return [...parties].slice(0, 200);
+};
+
+async function getRecord(email) {
+  const res = await ddb.send(new GetCommand({ TableName: PERMISSIONS_TABLE, Key: { email: email.toLowerCase() } }));
+  return res.Item || null;
+}
+
+// Access token -> e-mail, for a few minutes: Cognito answers GetUser only for a
+// token it issued and that is still valid.
+const sessions = new Map();
+
+async function verifyCaller(event) {
+  const headers = event.headers || {};
+  const token = (headers.authorization || headers.Authorization || "").replace(/^Bearer\s+/i, "").trim();
+  if (!token) throw new HttpError(401, "Sign in again: the request did not carry your session.");
+  let known = sessions.get(token);
+  if (!known || known.until < Date.now()) {
+    let user;
+    try {
+      user = await cognitoClient.send(new GetUserCommand({ AccessToken: token }));
+    } catch (e) {
+      throw new HttpError(401, "Your session has expired. Sign in again.");
+    }
+    const email = ((user.UserAttributes || []).find((a) => a.Name === "email")?.Value || user.Username || "").toLowerCase();
+    known = { email, until: Date.now() + 5 * 60 * 1000 };
+    if (sessions.size > 500) sessions.clear();
+    sessions.set(token, known);
+  }
+  const record = await getRecord(known.email);
+  const isAdmin = ADMIN_EMAILS.includes(known.email) || !!record?.isAdmin;
+  if (record?.disabled && !isAdmin) throw new HttpError(403, "This account has been removed.");
+  return { email: known.email, isAdmin, role: isAdmin ? "super_user" : asRole(record?.role) };
+}
+
+async function requireAdmin(event) {
+  const caller = await verifyCaller(event);
+  if (!caller.isAdmin) throw new HttpError(403, "Only an administrator can do this.");
+  return caller;
+}
 
 exports.handler = async (event) => {
   console.log("User Approval Handler invoked");
@@ -41,17 +114,38 @@ exports.handler = async (event) => {
   const queryParams = event.queryStringParameters || {};
   const { action, email, token } = queryParams;
 
+  const cors = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS"
+  };
   // JSON response helper for API calls
   const jsonResponse = (statusCode, data) => ({
     statusCode,
-    headers: {
-      "Content-Type": "application/json",
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Headers": "Content-Type",
-      "Access-Control-Allow-Methods": "GET, OPTIONS"
-    },
+    headers: { "Content-Type": "application/json", ...cors },
     body: JSON.stringify(data)
   });
+
+  // The browser asks before sending the Authorization header.
+  if ((event.requestContext?.http?.method || "").toUpperCase() === "OPTIONS") {
+    return { statusCode: 204, headers: cors, body: "" };
+  }
+
+  // The HCM portal's user management: the caller is who their Cognito token says.
+  if (PORTAL_ACTIONS[action]) {
+    try {
+      let body = {};
+      if (event.body) {
+        body = JSON.parse(event.isBase64Encoded ? Buffer.from(event.body, "base64").toString("utf-8") : event.body);
+      }
+      const caller = await verifyCaller(event);
+      if (!caller.isAdmin && caller.role !== "super_user") throw new HttpError(403, "Only a super user can manage users.");
+      return jsonResponse(200, { ok: true, ...(await PORTAL_ACTIONS[action](caller, body || {})) });
+    } catch (e) {
+      console.error(`${action} error:`, e);
+      return jsonResponse(e.status || 500, { ok: false, error: e.message });
+    }
+  }
 
   // HTML response helper
   const htmlResponse = (statusCode, title, message, isSuccess = true) => ({
@@ -93,6 +187,15 @@ exports.handler = async (event) => {
       return jsonResponse(403, { error: "Invalid or missing security token" });
     }
     return htmlResponse(403, "Access Denied", "Invalid or missing security token.", false);
+  }
+
+  // Everyone's accounts and permissions: administrators only, checked on their token.
+  if (["list", "list_permissions", "set_permissions"].includes(action)) {
+    try {
+      await requireAdmin(event);
+    } catch (e) {
+      return jsonResponse(e.status || 500, { ok: false, error: e.message });
+    }
   }
 
   // Handle list action (returns JSON for admin dashboard)
@@ -139,22 +242,8 @@ exports.handler = async (event) => {
       const targetEmail = (payload.email || "").toLowerCase();
       if (!targetEmail) return jsonResponse(400, { ok: false, error: "email required" });
       const p = payload.permissions || {};
-      const asArray = (v) => (Array.isArray(v) ? v : []);
-      const asRole = (v) => (["super_user", "agency_user", "certification_reviewer"].includes(v) ? v : "");
-      // Source / agency assignments as "SOURCE|AGENCY"; the agency is empty for a
-      // source-level certifier. Anything that is not a clean pair is dropped.
-      const asParties = (v) => {
-        const parties = new Set();
-        for (const entry of asArray(v)) {
-          if (typeof entry !== "string") continue;
-          const parts = entry.toUpperCase().split("|").map((s) => s.trim());
-          if (parts.length === 2 && /^[A-Z0-9_]{1,20}$/.test(parts[0]) && /^[A-Z0-9_-]{0,20}$/.test(parts[1])) {
-            parties.add(parts.join("|"));
-          }
-        }
-        return [...parties].slice(0, 200);
-      };
       const item = {
+        ...((await getRecord(targetEmail)) || {}),
         email: targetEmail,
         isAdmin: !!p.isAdmin,
         role: asRole(p.role),
@@ -457,3 +546,185 @@ async function getAdminDashboardData() {
     }
   };
 }
+
+// ── HCM portal user management ───────────────────────────────────────────────
+
+async function allRecords() {
+  const items = [];
+  let start;
+  do {
+    const res = await ddb.send(new ScanCommand({ TableName: PERMISSIONS_TABLE, ExclusiveStartKey: start }));
+    items.push(...(res.Items || []));
+    start = res.LastEvaluatedKey;
+  } while (start);
+  return items;
+}
+
+async function allAccounts() {
+  const users = [];
+  let next;
+  do {
+    const res = await cognitoClient.send(new ListUsersCommand({ UserPoolId: USER_POOL_ID, Limit: 60, PaginationToken: next }));
+    users.push(...(res.Users || []));
+    next = res.PaginationToken;
+  } while (next);
+  return users;
+}
+
+async function account(email) {
+  try {
+    return await cognitoClient.send(new AdminGetUserCommand({ UserPoolId: USER_POOL_ID, Username: email }));
+  } catch (e) {
+    if (e.name === "UserNotFoundException") return null;
+    throw e;
+  }
+}
+
+const attribute = (attrs, name) => (attrs || []).find((a) => a.Name === name)?.Value || "";
+
+function statusOf(record, cognito) {
+  if (!cognito) return "no_account";
+  if (!cognito.enabled || record?.disabled) return "removed";
+  if (cognito.status === "FORCE_CHANGE_PASSWORD") return "invited";
+  return asRole(record?.role) ? "active" : "no_access";
+}
+
+// A super user manages agency users and certification reviewers; an
+// administrator also manages super users. Administrators are managed only on
+// the Admin page.
+function manageable(caller, record, email) {
+  if (ADMIN_EMAILS.includes(email) || record?.isAdmin || email === caller.email) return false;
+  return caller.isAdmin || asRole(record?.role) !== "super_user";
+}
+
+function rolesFor(caller) {
+  return caller.isAdmin ? PORTAL_ROLES : ["agency_user", "certification_reviewer"];
+}
+
+function publicUser(caller, email, record, cognito) {
+  return {
+    email,
+    name: record?.name || cognito?.name || "",
+    role: asRole(record?.role),
+    parties: asArray(record?.parties),
+    status: statusOf(record, cognito),
+    created: cognito?.created || null,
+    updatedBy: record?.updatedBy || "",
+    updatedAt: record?.updatedAt || "",
+    invitedBy: record?.invitedBy || "",
+    invitedAt: record?.invitedAt || "",
+    manageable: manageable(caller, record, email),
+  };
+}
+
+function targetEmail(body) {
+  const email = String(body.email || "").trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 200) throw new HttpError(400, "Enter a valid e-mail address.");
+  return email;
+}
+
+async function checkTarget(caller, email) {
+  const record = await getRecord(email);
+  if (!manageable(caller, record, email)) {
+    throw new HttpError(403, email === caller.email ? "You cannot change your own access here."
+      : "This account is managed by an administrator.");
+  }
+  return record;
+}
+
+const PORTAL_ACTIONS = {
+  // Everyone who can use the portal, or could be given access to it.
+  async portal_users(caller) {
+    const records = new Map((await allRecords()).map((r) => [String(r.email || "").toLowerCase(), r]));
+    const accounts = new Map((await allAccounts()).map((u) => [
+      (attribute(u.Attributes, "email") || u.Username || "").toLowerCase(),
+      { status: u.UserStatus, enabled: u.Enabled, name: attribute(u.Attributes, "name"),
+        created: u.UserCreateDate ? u.UserCreateDate.toISOString() : null },
+    ]));
+    const users = [];
+    for (const email of new Set([...records.keys(), ...accounts.keys()])) {
+      const record = records.get(email);
+      if (!email || ADMIN_EMAILS.includes(email) || record?.isAdmin) continue;
+      if (!accounts.has(email) && !asRole(record?.role)) continue;
+      users.push(publicUser(caller, email, record, accounts.get(email)));
+    }
+    users.sort((a, b) => a.email.localeCompare(b.email));
+    return { users, roles: rolesFor(caller), you: caller.email, isAdmin: caller.isAdmin };
+  },
+
+  // Add a user (an invitation e-mail with a temporary password when they have
+  // no account yet) or change their role and source / agency assignments.
+  async portal_user_save(caller, body) {
+    const email = targetEmail(body);
+    const record = await checkTarget(caller, email);
+    const role = String(body.role || "");
+    if (!rolesFor(caller).includes(role)) throw new HttpError(400, "Choose a role.");
+    const parties = role === "agency_user" ? asParties(body.parties) : [];
+    if (role === "agency_user" && parties.length === 0) {
+      throw new HttpError(400, "An agency user needs at least one source / agency assignment.");
+    }
+    const name = String(body.name || "").trim().slice(0, 200);
+    let cognito = await account(email);
+    let invited = false;
+    if (!cognito) {
+      if (!body.invite) throw new HttpError(404, "This person has no account yet. Send an invitation instead.");
+      const attributes = [{ Name: "email", Value: email }, { Name: "email_verified", Value: "true" }];
+      if (name) attributes.push({ Name: "name", Value: name });
+      await cognitoClient.send(new AdminCreateUserCommand({
+        UserPoolId: USER_POOL_ID, Username: email, UserAttributes: attributes, DesiredDeliveryMediums: ["EMAIL"],
+      }));
+      invited = true;
+    } else if (!cognito.Enabled) {
+      await cognitoClient.send(new AdminEnableUserCommand({ UserPoolId: USER_POOL_ID, Username: email }));
+    }
+    const now = new Date().toISOString();
+    const item = {
+      allowedSources: [], allowedEntities: [], allowedMocks: [], allowedBusinessUnits: [],
+      ...(record || {}),
+      email, name: name || record?.name || "", isAdmin: false, role, parties,
+      approved: true, disabled: false, updatedBy: caller.email, updatedAt: now,
+      ...(invited ? { invitedBy: caller.email, invitedAt: now } : {}),
+    };
+    delete item.removedBy;
+    delete item.removedAt;
+    await ddb.send(new PutCommand({ TableName: PERMISSIONS_TABLE, Item: item }));
+    cognito = await account(email);
+    return {
+      invited,
+      user: publicUser(caller, email, item, cognito && { status: cognito.UserStatus, enabled: cognito.Enabled,
+        created: cognito.UserCreateDate ? cognito.UserCreateDate.toISOString() : null }),
+    };
+  },
+
+  // Take the portal away: the account can no longer sign in and loses its
+  // role and assignments. Kept, so it can be given access again later.
+  async portal_user_remove(caller, body) {
+    const email = targetEmail(body);
+    const record = await checkTarget(caller, email);
+    if (await account(email)) {
+      await cognitoClient.send(new AdminDisableUserCommand({ UserPoolId: USER_POOL_ID, Username: email }));
+    }
+    const item = {
+      ...(record || { email, allowedSources: [], allowedEntities: [], allowedMocks: [], allowedBusinessUnits: [] }),
+      email, isAdmin: false, role: "", parties: [], approved: false, disabled: true,
+      removedBy: caller.email, removedAt: new Date().toISOString(),
+      updatedBy: caller.email, updatedAt: new Date().toISOString(),
+    };
+    await ddb.send(new PutCommand({ TableName: PERMISSIONS_TABLE, Item: item }));
+    return { email, removed: true };
+  },
+
+  // A new invitation e-mail for someone who has not signed in yet.
+  async portal_user_resend(caller, body) {
+    const email = targetEmail(body);
+    await checkTarget(caller, email);
+    const cognito = await account(email);
+    if (!cognito || cognito.UserStatus !== "FORCE_CHANGE_PASSWORD") {
+      throw new HttpError(400, "This person has already signed in; there is no invitation to send again.");
+    }
+    await cognitoClient.send(new AdminCreateUserCommand({
+      UserPoolId: USER_POOL_ID, Username: email, MessageAction: "RESEND", DesiredDeliveryMediums: ["EMAIL"],
+    }));
+    return { email, resent: true };
+  },
+};

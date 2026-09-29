@@ -6,8 +6,22 @@
  * APPROVAL METHOD: Add approved emails to the APPROVED_EMAILS environment variable
  * as a comma-separated list, e.g.: "user1@example.com,user2@example.com"
  *
- * NO SPECIAL PERMISSIONS REQUIRED - just uses environment variable
+ * The HCM portal's super users invite and remove users themselves; those
+ * accounts are approved by their record in the permissions table
+ * (HaciendaUserPermissions: approved = true and not disabled), which has no
+ * size limit. Needs dynamodb:GetItem on that table.
  */
+
+const { DynamoDBClient, GetItemCommand } = require("@aws-sdk/client-dynamodb");
+
+const ddb = new DynamoDBClient({ region: process.env.AWS_REGION || "us-east-1" });
+const PERMISSIONS_TABLE = process.env.PERMISSIONS_TABLE || "HaciendaUserPermissions";
+
+async function approvedInTable(email) {
+  const res = await ddb.send(new GetItemCommand({ TableName: PERMISSIONS_TABLE, Key: { email: { S: email } } }));
+  const item = res.Item || {};
+  return item.approved?.BOOL === true && item.disabled?.BOOL !== true;
+}
 
 exports.handler = async (event) => {
   console.log("========================================");
@@ -32,7 +46,7 @@ exports.handler = async (event) => {
 
   // Check if user is approved
   const userEmailLower = userEmail.toLowerCase();
-  const isApproved = approvedEmails.includes(userEmailLower);
+  const isApproved = approvedEmails.includes(userEmailLower) || await approvedInTable(userEmailLower);
 
   console.log(`User email: ${userEmailLower}`);
   console.log(`Is approved: ${isApproved}`);
