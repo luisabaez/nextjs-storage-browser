@@ -234,6 +234,7 @@ export default function AgencyView({ party }: { party: HcmParty }) {
   const [notice, setNotice] = useState('');
   const [refused, setRefused] = useState<RecordName[]>([]);   // records the server named when it refused the signature
   const [signer, setSigner] = useState({ name: '', title: '' });
+  const [focus, setFocus] = useState<{ record: string; n: number } | null>(null);   // the certification whose form to show
   const latest = useRef(0);
   const noticeBox = useRef<HTMLDivElement>(null);
 
@@ -249,6 +250,14 @@ export default function AgencyView({ party }: { party: HcmParty }) {
     load();
     return () => { latest.current++; };
   }, [load]);
+
+  // Opened from the staff list of pending certifications: /hcm/certifications?record=<record key>
+  useEffect(() => {
+    const record = new URLSearchParams(window.location.search).get('record');
+    if (!record) return;
+    setFocus({ record, n: 1 });
+    window.history.replaceState(null, '', window.location.pathname);
+  }, []);
 
   const locked = !!party.signed_off;
 
@@ -292,7 +301,7 @@ export default function AgencyView({ party }: { party: HcmParty }) {
       {locked && <div className="hcm-banner">This cycle is signed, so the certifications below can no longer be changed.</div>}
 
       <h2 className="hcm-section" id="hcert-forms">Certification forms</h2>
-      <FormsStep party={party} locked={locked} onChanged={changed} onSigner={setSigner} />
+      <FormsStep party={party} locked={locked} focus={focus} onChanged={changed} onSigner={setSigner} />
 
       <h2 className="hcm-section">What your forms certified ({completed.length} of {rows.length})</h2>
       {rows.length === 0 ? (
@@ -316,6 +325,12 @@ export default function AgencyView({ party }: { party: HcmParty }) {
                 {r.certified ? <ResponseBadge code={r.response_code} responses={responses} />
                   : <span className="sy-badge sy-badge-warn">Pending</span>}
                 <div className="hcm-row-actions">
+                  {!r.certified && (
+                    <button type="button" className="btn btn-primary" aria-label={`Go to the form that certifies ${recordName(r)}`}
+                      onClick={() => setFocus(f => ({ record: recordKey(r), n: (f?.n ?? 0) + 1 }))}>
+                      Go to the form
+                    </button>
+                  )}
                   <Link href={filesHref(r)} className="btn btn-secondary" aria-label={`View the files of ${recordName(r)}`}>View files</Link>
                 </div>
               </li>

@@ -88,7 +88,7 @@ export default function ESignForm({ kind, formName, party, onSigned, onCancel }:
 
   return (
     <div className="hcert-esign">
-      <h4>Fill in and sign the {formName.toLowerCase()}</h4>
+      <h4>Fill in and sign the {formName}</h4>
       {!data.esign_open && (
         <div className="hcm-banner">
           <strong>Pending approval.</strong> Agencies do not see electronic signature yet. You can use it because you are on the
@@ -157,9 +157,9 @@ export default function ESignForm({ kind, formName, party, onSigned, onCancel }:
       {confirming ? (
         <div className="hcert-confirm" role="group" aria-label="Confirm the electronic signature">
           <p>
-            You are signing the {formName.toLowerCase()} of <strong>{partyLabel(party)}</strong> as {name.trim()}, {signerTitle.trim()}.
+            You are signing the {formName} of <strong>{partyLabel(party)}</strong> as {name.trim()}, {signerTitle.trim()}.
             {' '}{count(answered, 'data entity has', 'data entities have')} a comment
-            {answered < rows.length && `; ${count(rows.length - answered, 'has', 'have')} none and stay pending`}.
+            {answered < rows.length && `; ${rows.length - answered} without one`}.
           </p>
           <div className="sy-actions">
             <button type="button" className="btn btn-secondary" disabled={busy} onClick={() => setConfirming(false)}>Go back</button>

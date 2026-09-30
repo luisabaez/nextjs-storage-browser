@@ -12,7 +12,7 @@ import { HcmParty, fileTypeLabel, formatSize, useHcm } from '../HcmShell';
 import ESignForm from './ESignForm';
 import {
   Attachment, Documents, Issue, IssuesResult, ReasonForm, RecordName, Written, agencyProblem, count, day, post,
-  responseBadgeClass, responseShort,
+  recordKey, responseBadgeClass, responseShort,
 } from './shared';
 
 const XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -90,11 +90,12 @@ export function FormRowsTable({ rows }: { rows: FormRow[] }) {
   );
 }
 
-function FormCard({ item, party, locked, esignOpen, onChanged }: {
+function FormCard({ item, party, locked, esignOpen, focused, onChanged }: {
   item: FormKind;
   party: HcmParty;
   locked: boolean;
   esignOpen: boolean;           // electronic signature is approved for agencies
+  focused: boolean;             // the card of the certification the user chose
   onChanged: (message: string) => void;
 }) {
   const { mock, email, canWrite, isSuperUser } = useHcm();
@@ -188,10 +189,12 @@ function FormCard({ item, party, locked, esignOpen, onChanged }: {
     : count(item.records.length, 'certification', 'certifications');
 
   return (
-    <section className="hcm-card hcert-record" aria-labelledby={`hcert-form-${item.kind}`}>
+    <section className={`hcm-card hcert-record${focused ? ' hcert-focus' : ''}`} id={`hcert-card-${item.kind}`}
+      aria-labelledby={`hcert-form-${item.kind}`}>
       <div className="hcert-record-head">
-        <h3 className="hcert-record-name" id={`hcert-form-${item.kind}`}>{title}</h3>
-        {form ? <span className="sy-badge sy-badge-ok">Uploaded</span> : <span className="sy-badge sy-badge-warn">Not uploaded yet</span>}
+        <h3 className="hcert-record-name" id={`hcert-form-${item.kind}`} tabIndex={-1}>{title}</h3>
+        {form ? <span className="sy-badge sy-badge-ok">{form.electronic ? 'Signed electronically' : 'Uploaded'}</span>
+          : <span className="sy-badge sy-badge-warn">Not uploaded yet</span>}
       </div>
       <p className="hcert-note">Covers {covers}.</p>
 
@@ -267,7 +270,7 @@ function FormCard({ item, party, locked, esignOpen, onChanged }: {
           onSigned={d => {
             setSigning(false);
             setResult(d);
-            onChanged(`The ${title.toLowerCase()} was signed electronically.`);
+            onChanged(`The ${title} was signed electronically.`);
           }} />
       )}
       {showRows && form && <FormRowsTable rows={item.rows} />}
@@ -403,15 +406,18 @@ function IssueDocuments({ party, locked, refreshKey, onChanged }: {
   );
 }
 
-export default function FormsStep({ party, locked, onChanged, onSigner }: {
+export default function FormsStep({ party, locked, focus, onChanged, onSigner }: {
   party: HcmParty;
   locked: boolean;
+  focus: { record: string; n: number } | null;   // show the form that certifies this record (n: each request)
   onChanged: (message: string) => void;
   onSigner: (signer: { name: string; title: string }) => void;   // what the latest form says in its signature block
 }) {
   const { mock, email, canWrite, isSuperUser } = useHcm();
   const [kinds, setKinds] = useState<FormKind[] | null>(null);
   const [esignOpen, setESignOpen] = useState(false);
+  const [focusKind, setFocusKind] = useState('');
+  const shownFocus = useRef(0);
   const [failed, setFailed] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const latest = useRef(0);
@@ -434,6 +440,17 @@ export default function FormsStep({ party, locked, onChanged, onSigner }: {
     load();
     return () => { latest.current++; };
   }, [load]);
+
+  // Bring the card that certifies the chosen record into view, once per request.
+  useEffect(() => {
+    if (!focus || !kinds || shownFocus.current === focus.n) return;
+    shownFocus.current = focus.n;
+    const kind = kinds.find(k => k.records.some(r => recordKey(r) === focus.record))?.kind || '';
+    setFocusKind(kind);
+    const target = document.getElementById(kind ? `hcert-card-${kind}` : 'hcert-forms');
+    target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    if (kind) document.getElementById(`hcert-form-${kind}`)?.focus({ preventScroll: true });
+  }, [focus, kinds]);
 
   const changed = (message: string) => {
     onChanged(message);
@@ -461,7 +478,10 @@ export default function FormsStep({ party, locked, onChanged, onSigner }: {
           with your name and title, without Excel.{!esignOpen && ' Pending approval: only the validation team sees this option for now.'}
         </p>
       )}
-      {kinds.map(k => <FormCard key={k.kind} item={k} party={party} locked={locked} esignOpen={esignOpen} onChanged={changed} />)}
+      {kinds.map(k => (
+        <FormCard key={k.kind} item={k} party={party} locked={locked} esignOpen={esignOpen} focused={k.kind === focusKind}
+          onChanged={changed} />
+      ))}
       <IssueDocuments party={party} locked={locked} refreshKey={refreshKey} onChanged={() => onChanged('')} />
     </>
   );

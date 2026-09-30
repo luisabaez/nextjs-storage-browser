@@ -52,6 +52,7 @@ export interface HcmContext {
   isReviewer: boolean;
   canWrite: boolean;
   reloadParties: () => void;
+  openParty: (key: string) => void;   // show one source / agency (staff: view as it)
 }
 
 interface CertExpected extends ApiResult { available?: boolean; parties?: HcmParty[] }
@@ -190,6 +191,15 @@ export default function HcmShell({ title, subtitle, children, staffOnly, agencyO
   const [viewAs, setViewAs] = useState(() => stored(VIEW_AS_KEY));
   const chooseOwnParty = (key: string) => { setOwnParty(key); store(PARTY_KEY, key); };
   const chooseViewAs = (key: string) => { setViewAs(key); store(VIEW_AS_KEY, key); };
+  const openParty = useCallback((key: string) => {
+    if (agencyUser) {
+      setOwnParty(key);
+      store(PARTY_KEY, key);
+    } else {
+      setViewAs(key);
+      store(VIEW_AS_KEY, key);
+    }
+  }, [agencyUser]);
 
   const party = useMemo(() => {
     if (agencyUser) return parties.find(p => partyKey(p) === ownParty) || parties[0] || null;
@@ -203,8 +213,8 @@ export default function HcmShell({ title, subtitle, children, staffOnly, agencyO
     cycleAvailable: !!current?.available,
     isSuperUser, isReviewer,
     canWrite: isSuperUser || role === 'agency_user',
-    reloadParties,
-  }), [session, email, mock, mocks, view, party, parties, partiesLoading, current, isSuperUser, isReviewer, role, reloadParties]);
+    reloadParties, openParty,
+  }), [session, email, mock, mocks, view, party, parties, partiesLoading, current, isSuperUser, isReviewer, role, reloadParties, openParty]);
 
   if (!ready) return <div className="hcm-app"><main className="hcm-main"><p className="hcm-loading">Loading…</p></main></div>;
 

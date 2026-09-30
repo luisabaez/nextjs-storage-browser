@@ -4,7 +4,7 @@
 // completed certification, the reported issues and the status of each agency.
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiResult, apiGet, apiPost, fmtDateTime } from '../../lib/symphony';
-import { fileTypeLabel, partyLabel, statusBadgeClass, useHcm } from '../HcmShell';
+import { fileTypeLabel, partyKey, partyLabel, statusBadgeClass, useHcm } from '../HcmShell';
 import { FormInfo, FormRow, FormRowsTable, formTitle, openFormFile } from './FormsStep';
 import {
   CertRecord, Documents, Issue, IssuesResult, ReasonForm, ResponseBadge, count, day, partyId, recordKey, recordName, responseShort,
@@ -101,6 +101,7 @@ const matches = (search: string, ...values: (string | null | undefined)[]) => {
 };
 
 function RecordsTab({ state }: { state: 'pending' | 'completed' }) {
+  const { parties, openParty } = useHcm();
   const { data, error, reload } = useList<Records>('cert_records', state);
   const labelOf = usePartyLabels();
   const [search, setSearch] = useState('');
@@ -113,10 +114,20 @@ function RecordsTab({ state }: { state: 'pending' | 'completed' }) {
     && matches(search, labelOf(r), r.module, r.file_type, r.entity, r.resource_name, r.certified_by,
       completed ? responseShort(r.response_code) : ''));
 
+  // A pending certification opens its agency's view at the form that certifies it (AgencyView reads ?record=).
+  const openForm = (r: CertRecord) => {
+    const p = parties.find(x => partyId(x) === partyId(r));
+    if (!p) return;
+    window.history.replaceState(null, '', `${window.location.pathname}?record=${encodeURIComponent(recordKey(r))}`);
+    openParty(partyKey(p));
+    window.scrollTo(0, 0);
+  };
+
   if (!data) return error ? <LoadProblem error={error} onRetry={reload} /> : <p className="hcm-loading">Loading…</p>;
   return (
     <>
       {error && <LoadProblem error={error} onRetry={reload} />}
+      {!completed && records.length > 0 && <p className="hcert-note">Choose a certification to open its agency&apos;s form, where it is signed.</p>}
       <div className="hcert-filters">
         <label className="sy-field">
           <span>Search</span>
@@ -146,11 +157,13 @@ function RecordsTab({ state }: { state: 'pending' | 'completed' }) {
               <tr>
                 <th>Source / Agency</th><th>Module</th><th>File type</th><th>Entity</th>
                 {completed && <><th>Response</th><th>Agency resource</th><th>Certified by</th><th>Date</th><th className="num">Issues</th></>}
+                {!completed && <th><span className="hcert-hidden">Form</span></th>}
               </tr>
             </thead>
             <tbody>
               {shown.map(r => (
-                <tr key={`${partyId(r)}|${recordKey(r)}`}>
+                <tr key={`${partyId(r)}|${recordKey(r)}`} className={completed ? undefined : 'sy-clickable'}
+                  onClick={completed ? undefined : () => openForm(r)}>
                   <td>{labelOf(r)}</td>
                   <td>{r.module || '—'}</td>
                   <td>{fileTypeLabel(r.file_type)}</td>
@@ -163,6 +176,14 @@ function RecordsTab({ state }: { state: 'pending' | 'completed' }) {
                       <td>{day(r.certified_at) || '—'}</td>
                       <td className="num">{r.issues ?? 0}</td>
                     </>
+                  )}
+                  {!completed && (
+                    <td>
+                      <button type="button" className="sy-link hcert-nowrap" onClick={e => { e.stopPropagation(); openForm(r); }}
+                        aria-label={`Open the form of ${labelOf(r)} for ${recordName(r)}`}>
+                        Open the form
+                      </button>
+                    </td>
                   )}
                 </tr>
               ))}
