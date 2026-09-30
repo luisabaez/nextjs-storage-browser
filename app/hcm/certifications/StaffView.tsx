@@ -7,7 +7,8 @@ import { ApiResult, apiGet, apiPost, fmtDateTime } from '../../lib/symphony';
 import { fileTypeLabel, partyKey, partyLabel, statusBadgeClass, useHcm } from '../HcmShell';
 import { FormInfo, FormRow, FormRowsTable, formTitle, openFormFile } from './FormsStep';
 import {
-  CertRecord, Documents, Issue, IssuesResult, ReasonForm, ResponseBadge, count, day, partyId, recordKey, recordName, responseShort,
+  CertRecord, Documents, FOCUS_KEY, Issue, IssuesResult, ReasonForm, ResponseBadge, count, day, partyId, recordKey, recordName,
+  responseShort,
 } from './shared';
 
 type Tab = 'pending' | 'issues' | 'completed' | 'forms' | 'status';
@@ -114,11 +115,16 @@ function RecordsTab({ state }: { state: 'pending' | 'completed' }) {
     && matches(search, labelOf(r), r.module, r.file_type, r.entity, r.resource_name, r.certified_by,
       completed ? responseShort(r.response_code) : ''));
 
-  // A pending certification opens its agency's view at the form that certifies it (AgencyView reads ?record=).
+  // A pending certification opens its agency's view at the form that certifies it (AgencyView reads FOCUS_KEY).
+  // Not a query string: changing it remounts the page and would lose the view.
   const openForm = (r: CertRecord) => {
     const p = parties.find(x => partyId(x) === partyId(r));
     if (!p) return;
-    window.history.replaceState(null, '', `${window.location.pathname}?record=${encodeURIComponent(recordKey(r))}`);
+    try {
+      window.sessionStorage.setItem(FOCUS_KEY, recordKey(r));
+    } catch {
+      // storage unavailable: the agency view opens at its top
+    }
     openParty(partyKey(p));
     window.scrollTo(0, 0);
   };

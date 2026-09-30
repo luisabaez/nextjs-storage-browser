@@ -90,6 +90,9 @@ export const recordName = (r: RecordName) =>
 export const filesHref = (r: RecordName) =>
   `/hcm/files?${new URLSearchParams({ module: r.module || '', file_type: r.file_type || '', entity: r.entity || '' }).toString()}`;
 
+/** Session storage key of the certification whose form the agency view opens at (set by the staff lists). */
+export const FOCUS_KEY = 'hcm.certFocus';
+
 export const day = (iso?: string | null) => (iso ? fmtDateTime(iso).slice(0, 10) : '');
 export const count = (n: number, one: string, many: string) => `${n.toLocaleString()} ${n === 1 ? one : many}`;
 

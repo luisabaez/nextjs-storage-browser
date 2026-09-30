@@ -9,8 +9,8 @@ import { ApiResult, apiGet, fmtDateTime } from '../../lib/symphony';
 import { HcmParty, partyLabel, useHcm } from '../HcmShell';
 import FormsStep from './FormsStep';
 import {
-  CertRecord, ReasonForm, RecordName, ResponseBadge, ResponseOption, agencyProblem, count, day, filesHref, partyId, post, recordKey,
-  recordName,
+  CertRecord, FOCUS_KEY, ReasonForm, RecordName, ResponseBadge, ResponseOption, agencyProblem, count, day, filesHref, partyId, post,
+  recordKey, recordName,
 } from './shared';
 
 interface Expected extends ApiResult { responses?: ResponseOption[]; rows?: CertRecord[] }
@@ -251,12 +251,16 @@ export default function AgencyView({ party }: { party: HcmParty }) {
     return () => { latest.current++; };
   }, [load]);
 
-  // Opened from the staff list of pending certifications: /hcm/certifications?record=<record key>
+  // Opened from the staff list of pending certifications at one of them.
   useEffect(() => {
-    const record = new URLSearchParams(window.location.search).get('record');
-    if (!record) return;
-    setFocus({ record, n: 1 });
-    window.history.replaceState(null, '', window.location.pathname);
+    let record = '';
+    try {
+      record = window.sessionStorage.getItem(FOCUS_KEY) || '';
+      window.sessionStorage.removeItem(FOCUS_KEY);
+    } catch {
+      // storage unavailable: nothing to open at
+    }
+    if (record) setFocus({ record, n: 1 });
   }, []);
 
   const locked = !!party.signed_off;
