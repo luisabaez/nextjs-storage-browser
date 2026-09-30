@@ -29,17 +29,26 @@ before agreement before no errors). Every row answered as incorrect becomes an
 issue on its record, and needs a supporting document before the party signs
 off (certifications._signoff).
 
+Electronic signature: instead of downloading, signing and uploading, the
+agency answers the same rows in the portal and signs with its name and title.
+The portal writes the answers and a signature block (name, e-mail of the
+signed-in account, date and time) into the cycle's form, keeps that file and
+reads it exactly like an uploaded one. Until the validation team approves it,
+only super users can sign this way (setting esign_agencies turns it on for
+agencies).
+
 Tables (application database):
-  DATA_CLEANSE_CERT_FORM       one uploaded form: party, kind, file, what was read
+  DATA_CLEANSE_CERT_FORM       one uploaded or signed form: party, kind, file, what was read
   DATA_CLEANSE_CERT_FORM_ROW   its rows
 Certifications and issues it produced carry its ID (Form_ID).
 """
+import hashlib
 import io
 import re
 import unicodedata
 import uuid
 import zipfile
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from xml.sax.saxutils import escape
 
 import boto3
@@ -47,6 +56,7 @@ import openpyxl
 import pyodbc
 
 import api_util
+import app_settings
 import authz
 import certifications as certs
 from api_util import ApiError
@@ -55,9 +65,10 @@ ACTIONS = {
     "certform_templates", "certform_template_upload_url", "certform_template_url", "certform_template_delete",
     "certform_status", "certform_list", "certform_rows", "certform_file_url",
     "certform_download", "certform_upload_url", "certform_submit", "certform_revoke",
+    "certform_esign_form", "certform_esign", "certform_esign_setting",
 }
 _READS = {"certform_templates", "certform_template_url", "certform_status", "certform_list", "certform_rows",
-          "certform_file_url"}
+          "certform_file_url", "certform_esign_form"}
 
 DB = certs.DB
 T_FORM = "DATA_CLEANSE_CERT_FORM"
@@ -68,6 +79,11 @@ KINDS = {"HR": "HCM-HR", "PAYROLL": "HCM-Payroll", "SOURCES": "Sources"}
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 MAX_FORM_BYTES = 25 * 1024 * 1024
 
+ESIGN_SETTING = "esign_agencies"   # "on" once electronic signature is approved for agencies
+ESIGN_CONSENT = ("Firmo este formulario electrónicamente con mi nombre, título y cuenta del portal. Acepto que esta "
+                 "firma electrónica tiene la misma validez que mi firma manuscrita.")
+_PR_TIME = timezone(timedelta(hours=-4), "AST")   # Puerto Rico does not change the clock
+
 _DDL = {
     T_FORM: (
         "[ID] INT IDENTITY(1,1) PRIMARY KEY, [MOCK] VARCHAR(20) NOT NULL, [Source] VARCHAR(50) NOT NULL, "
@@ -77,7 +93,7 @@ _DDL = {
         "[Signed_Date] NVARCHAR(50) NULL, [Has_Signature_Image] BIT NULL, [Rows_Total] INT NULL, "
         "[Rows_Answered] INT NULL, [Uploaded_By] NVARCHAR(200) NULL, [Uploaded_DTTM] DATETIME NULL, "
         "[Is_Current] BIT NOT NULL DEFAULT 1, [Revoked_By] NVARCHAR(200) NULL, [Revoked_DTTM] DATETIME NULL, "
-        "[Revoke_Reason] NVARCHAR(MAX) NULL"),
+        "[Revoke_Reason] NVARCHAR(MAX) NULL"),  # plus _ESIGN_COLUMNS
     T_ROW: (
         "[ID] INT IDENTITY(1,1) PRIMARY KEY, [Form_ID] INT NOT NULL, [Row_Number] INT NULL, "
         "[Segment] NVARCHAR(100) NULL, [Data_Entity] NVARCHAR(200) NULL, [Folder] NVARCHAR(100) NULL, "
@@ -87,6 +103,11 @@ _DDL = {
 # How serious an answer is: a record answered on several rows takes the most serious.
 _WEIGHT = {"ISSUES": 3, "AGREE": 2, "AGREE_EXCLUSIONS": 2, "COST_ALLOCATION": 2,
            "NO_ERRORS": 1, "NO_EXCLUSIONS": 1, "CONVERTED_OK": 1}
+# How a form was signed: Sign_Method ESIGN for one signed in the portal (NULL:
+# uploaded), with where it was signed from and a fingerprint of the file.
+_ESIGN_COLUMNS = (("Sign_Method", "VARCHAR(20)"), ("Signer_IP", "VARCHAR(64)"), ("Signer_Agent", "NVARCHAR(400)"),
+                  ("Content_SHA256", "CHAR(64)"), ("Consent_Text", "NVARCHAR(1000)"))
+
 _HEADERS = {"segment": "segment", "data entity": "entity", "folder": "folder", "archivo": "folder",
             "agency resource": "resource", "comments": "comment"}
 _LABELS = {"agency": "agency", "name": "name", "title": "title", "date": "date"}
@@ -195,6 +216,17 @@ def _right_of(ws, row, col):
     return ""
 
 
+def _table_header(ws):
+    """(header row, {field: column}) of the form's table."""
+    for row in ws.iter_rows(max_row=40):
+        found = {_HEADERS[_plain(c.value)]: c.column for c in row
+                 if isinstance(c.value, str) and _plain(c.value) in _HEADERS}
+        if {"entity", "comment"} <= set(found):
+            return row[0].row, found
+    raise ApiError("This file is not the certification form: the table header (Segment, Data Entity, "
+                   "Folder, Agency Resource, Comments) was not found")
+
+
 def read_form(content):
     """What a filled-in form says: {agency, name, title, date, signature_image,
     rows:[{row, segment, entity, folder, resource, comment, code}]}."""
@@ -204,16 +236,7 @@ def read_form(content):
     except Exception:  # noqa: BLE001 - anything unreadable is simply not the form
         raise ApiError("The file could not be read as an Excel workbook (.xlsx)")
     ws = _cert_sheet(wb)
-    header, cols = None, {}
-    for row in ws.iter_rows(max_row=40):
-        found = {_HEADERS[_plain(c.value)]: c.column for c in row
-                 if isinstance(c.value, str) and _plain(c.value) in _HEADERS}
-        if {"entity", "comment"} <= set(found):
-            header, cols = row[0].row, found
-            break
-    if not header:
-        raise ApiError("This file is not the certification form: the table header (Segment, Data Entity, "
-                       "Folder, Agency Resource, Comments) was not found")
+    header, cols = _table_header(ws)
 
     def get(r, field):
         return _cell_text(ws.cell(r, cols[field]).value) if field in cols else ""
@@ -255,7 +278,7 @@ def form_problems(form, party):
                         + (" …" if len(blank) > 10 else ""))
     if not form["title"] or not form["date"]:
         warnings.append("Title or Date is empty in the signature block")
-    if not form["signature_image"]:
+    if not form["signature_image"] and not form.get("electronic"):
         warnings.append("No signature image was found in the file")
     return errors, warnings
 
@@ -344,8 +367,40 @@ def fill_template(content, party):
             m = _SOURCE_LINE.match(_s(c.value)) if isinstance(c.value, str) else None
             if m:
                 edits[c.coordinate] = f"{m.group(1)}{_s(party['source'])}{m.group(3)}"
+    return _write_cells(content, ws.title, edits)
+
+
+def sign_form(content, answers, signer):
+    """A filled-in form (from fill_template) with the portal's answers and an
+    electronic signature block. answers: {row number: (resource, comment)};
+    signer: {name, title, email, at}."""
+    ws = _cert_sheet(openpyxl.load_workbook(io.BytesIO(content)))
+    _, cols = _table_header(ws)
+    edits = {}
+    for row, (resource, comment) in answers.items():
+        if resource and "resource" in cols:
+            edits[ws.cell(row, cols["resource"]).coordinate] = resource
+        if comment:
+            edits[ws.cell(row, cols["comment"]).coordinate] = comment
+    labels = _label_cells(ws)
+    at = signer["at"]
+    for key, text in (("name", signer["name"]), ("title", signer["title"]), ("date", at.strftime("%Y-%m-%d"))):
+        if key in labels:
+            row, col = labels[key]
+            edits[ws.cell(row, col + 1).coordinate] = text
+    signature = next((c for r in ws.iter_rows() for c in r
+                      if isinstance(c.value, str) and _plain(c.value) == "signature"), None)
+    if signature:
+        edits[ws.cell(signature.row, signature.column + 1).coordinate] = (
+            f"Firmado electrónicamente por {signer['name']} ({signer['email']}) en el portal Data Symphony, "
+            f"{at.strftime('%Y-%m-%d %H:%M')} (hora de Puerto Rico)")
+    return _write_cells(content, ws.title, edits)
+
+
+def _write_cells(content, title, edits):
+    """The workbook with the cells of sheet `title` set to text (see set_cell)."""
     source = zipfile.ZipFile(io.BytesIO(content))
-    path = _sheet_path(source, ws.title)
+    path = _sheet_path(source, title)
     xml = source.read(path).decode("utf-8")
     for ref, text in edits.items():
         xml = set_cell(xml, ref, text)
@@ -370,6 +425,10 @@ def _ensure_tables(cur, conn):
     for name, ddl in _DDL.items():
         if name.upper() not in have:
             cur.execute(f"CREATE TABLE [{DB}].dbo.[{name}] ({ddl})")
+    cols = certs._columns(cur, T_FORM)
+    for col, sql_type in _ESIGN_COLUMNS:
+        if col.upper() not in cols:
+            cur.execute(f"ALTER TABLE [{DB}].dbo.[{T_FORM}] ADD [{col}] {sql_type} NULL")
     conn.commit()
     _TABLES_READY = True
 
@@ -377,7 +436,7 @@ def _ensure_tables(cur, conn):
 _FORM_COLUMNS = ("[ID], [MOCK], [Source], [Agency], [BU], [Kind], [File_Name], [S3_Key], [Size_Bytes], "
                  "[Form_Agency], [Signer_Name], [Signer_Title], [Signed_Date], [Has_Signature_Image], "
                  "[Rows_Total], [Rows_Answered], [Uploaded_By], [Uploaded_DTTM], [Is_Current], [Revoked_By], "
-                 "[Revoked_DTTM], [Revoke_Reason]")
+                 "[Revoked_DTTM], [Revoke_Reason], [Sign_Method], [Signer_IP], [Signer_Agent], [Content_SHA256]")
 
 
 def _form(r):
@@ -385,7 +444,8 @@ def _form(r):
             "file_name": r[6], "s3_key": r[7], "size": r[8], "form_agency": r[9], "signer_name": r[10],
             "signer_title": r[11], "signed_date": r[12], "signature_image": bool(r[13]), "rows": r[14],
             "answered": r[15], "uploaded_by": r[16], "uploaded_at": r[17], "current": bool(r[18]),
-            "revoked_by": r[19], "revoked_at": r[20], "revoke_reason": r[21]}
+            "revoked_by": r[19], "revoked_at": r[20], "revoke_reason": r[21], "electronic": r[22] == "ESIGN",
+            "signer_ip": r[23], "signer_agent": r[24], "sha256": r[25]}
 
 
 def _public(form):
@@ -452,9 +512,16 @@ def _checked_form(cur, raw_id, email, what):
 
 # ── templates (super users upload, everyone downloads) ───────────────────────
 
-def _templates(p, bucket):
+def esign_open(cur):
+    """Whether agencies may sign in the portal (super users always may)."""
+    return (app_settings.get_setting(cur, ESIGN_SETTING, "off")[0] or "") == "on"
+
+
+def _templates(conn, cur, p, bucket):
     certs._reader(p.get("email"), "viewing the certification forms")
     mock = certs._mock(p.get("mock"))
+    app_settings._ensure_tables(cur, conn)
+    value, by, at = app_settings.get_setting(cur, ESIGN_SETTING, "off")
     s3 = boto3.client("s3")
     out = []
     for kind, label in KINDS.items():
@@ -464,7 +531,17 @@ def _templates(p, bucket):
                         "last_modified": head["LastModified"].isoformat()})
         except Exception:  # noqa: BLE001 - no template for this kind yet
             out.append({"kind": kind, "label": label, "uploaded": False})
-    return {"mock": mock, "templates": out}
+    return {"mock": mock, "templates": out, "esign_open": value == "on", "esign_changed_by": by, "esign_changed_at": at}
+
+
+def _esign_setting(conn, cur, data, bucket):
+    """A super user opens (or closes) electronic signature to the agencies."""
+    actor = _s(data.get("actor"))
+    authz.require(actor, what="changing electronic signature")
+    app_settings._ensure_tables(cur, conn)
+    app_settings.set_setting(cur, ESIGN_SETTING, "on" if data.get("open") is True else "off", actor)
+    conn.commit()
+    return {"esign_open": esign_open(cur)}
 
 
 def _template_kind(values):
@@ -521,7 +598,7 @@ def _status(conn, cur, p, bucket):
                       "records": [{f: r[f] for f in ("module", "file_type", "entity")} for r in covers],
                       "form": _public(form) if form else None,
                       "rows": _rows_of(cur, form["id"]) if form else []})
-    return {"mock": mock, "source": source, "agency": agency, "bu": bu, "kinds": kinds}
+    return {"mock": mock, "source": source, "agency": agency, "bu": bu, "kinds": kinds, "esign_open": esign_open(cur)}
 
 
 def _list(conn, cur, p, bucket):
@@ -547,16 +624,22 @@ def _download(conn, cur, data, bucket):
     rows, source, agency, bu = certs._resolve_party(conn, cur, access, mock, certs._need(data, "source"),
                                                     _s(data.get("agency")), [])
     kind = _kind(data, _party_rows(rows, source, agency))
+    party = {"source": source, "agency": agency, "bu": bu}
+    name = download_name(mock, kind, party)
+    key = f"{FORMS_PREFIX}/{mock}/out/{uuid.uuid4().hex}/{name}"
+    boto3.client("s3").put_object(Bucket=bucket, Key=key, Body=_party_form(bucket, mock, kind, party),
+                                  ContentType=XLSX)
+    return {"name": name, "url": api_util.presign_get(bucket, key, name)}
+
+
+def _party_form(bucket, mock, kind, party):
+    """The cycle's blank form of a kind with the party filled in."""
     try:
         content = boto3.client("s3").get_object(Bucket=bucket, Key=template_key(mock, kind))["Body"].read()
     except Exception:  # noqa: BLE001 - the template has not been uploaded
         raise ApiError(f"The {KINDS[kind]} form has not been added for {mock} yet. The validation team adds it "
                        "under User Guides.", 404)
-    party = {"source": source, "agency": agency, "bu": bu}
-    name = download_name(mock, kind, party)
-    key = f"{FORMS_PREFIX}/{mock}/out/{uuid.uuid4().hex}/{name}"
-    boto3.client("s3").put_object(Bucket=bucket, Key=key, Body=fill_template(content, party), ContentType=XLSX)
-    return {"name": name, "url": api_util.presign_get(bucket, key, name)}
+    return fill_template(content, party)
 
 
 def _upload_url(conn, cur, data, bucket):
@@ -596,6 +679,14 @@ def _submit(conn, cur, data, bucket):
     errors, warnings = form_problems(form, party)
     if errors:
         raise ApiError(". ".join(errors) + ".")
+    return _record(conn, cur, access, mock, party, mine, kind, key, name, obj["ContentLength"], form, warnings)
+
+
+def _record(conn, cur, access, mock, party, mine, kind, key, name, size, form, warnings, esign=None):
+    """Keep a read form as the party's current one and certify what it covers.
+    esign: {ip, agent, sha256, consent} for a form signed in the portal."""
+    source, agency, bu = party["source"], party["agency"], party["bu"]
+    esign = esign or {}
     covers = [r for r in mine if certs.form_kind(mine, r) == kind]
     answers = assign(covers, form["rows"])
 
@@ -606,11 +697,13 @@ def _submit(conn, cur, data, bucket):
     cur.execute(
         f"INSERT INTO [{DB}].dbo.[{T_FORM}] ([MOCK], [Source], [Agency], [BU], [Kind], [File_Name], [S3_Key], "
         "[Size_Bytes], [Form_Agency], [Signer_Name], [Signer_Title], [Signed_Date], [Has_Signature_Image], "
-        "[Rows_Total], [Rows_Answered], [Uploaded_By], [Uploaded_DTTM], [Is_Current]) OUTPUT INSERTED.[ID] "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, GETDATE(), 1)",
-        (mock, source, agency, bu, kind, name, key, obj["ContentLength"], form["agency"][:200] or None,
+        "[Rows_Total], [Rows_Answered], [Uploaded_By], [Uploaded_DTTM], [Is_Current], [Sign_Method], [Signer_IP], "
+        "[Signer_Agent], [Content_SHA256], [Consent_Text]) OUTPUT INSERTED.[ID] "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, GETDATE(), 1, ?, ?, ?, ?, ?)",
+        (mock, source, agency, bu, kind, name, key, size, form["agency"][:200] or None,
          form["name"][:200], form["title"][:200] or None, form["date"][:50] or None, form["signature_image"],
-         len(form["rows"]), answered, access.email))
+         len(form["rows"]), answered, access.email, "ESIGN" if esign else None, _s(esign.get("ip"))[:64] or None,
+         _s(esign.get("agent"))[:400] or None, esign.get("sha256"), esign.get("consent")))
     form_id = cur.fetchone()[0]
     cur.fast_executemany = True
     cur.executemany(
@@ -647,7 +740,8 @@ def _submit(conn, cur, data, bucket):
             "[File_Type], [Response_Code], [Resource_Name], [Notes], [Certified_By], [Certified_DTTM], "
             "[Is_Current], [Form_ID]) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, GETDATE(), 1, ?)",
             (mock, source, agency, bu, rec["module"], rec["entity"], rec["file_type"], code, resources,
-             f"From the signed form {name}", access.email, form_id))
+             f"{'Signed electronically on the form' if esign else 'From the signed form'} {name}", access.email,
+             form_id))
         for x in chosen:
             if x["code"] != "ISSUES" or id(x) in raised:
                 continue
@@ -677,6 +771,75 @@ def _submit(conn, cur, data, bucket):
             "certified": len(answers), "not_certified": missing, "new_issues": issues, "warnings": warnings}
 
 
+def _esign_form(conn, cur, p, bucket):
+    """The rows of a party's form to answer in the portal, with the comments
+    each row offers and the answers of the party's current form."""
+    access, mock, mine, source, agency, bu = _read_party(conn, cur, p, "signing a certification form")
+    kind = _kind(p, mine)
+    party = {"source": source, "agency": agency, "bu": bu}
+    rows = read_form(_party_form(bucket, mock, kind, party))["rows"]
+    current = next((f for f in _forms(cur, mock) if f["kind"] == kind
+                    and authz.party_key(f["source"], f["agency"]) == authz.party_key(source, agency)), None)
+    earlier = {(_plain(x["segment"]), _entity_key(x["entity"]), _plain(x["folder"])): x
+               for x in (_rows_of(cur, current["id"]) if current else [])}
+    out = []
+    for x in rows:
+        before = earlier.get((_plain(x["segment"]), _entity_key(x["entity"]), _plain(x["folder"]))) or {}
+        out.append({"row": x["row"], "segment": x["segment"], "entity": x["entity"], "folder": x["folder"],
+                    "options": list(certs.responses_for(x["folder"] or "Validation")),
+                    "resource": _s(before.get("resource")), "code": before.get("code")})
+    perms = authz.get_permissions(access.email)
+    return {"kind": kind, "label": KINDS[kind], "agency_label": agency_label(party), "rows": out,
+            "responses": certs.RESPONSES, "consent": ESIGN_CONSENT, "esign_open": esign_open(cur),
+            "signer": {"email": access.email, "name": _s(perms.get("name"))}}
+
+
+def _esign(conn, cur, data, bucket):
+    """Answer and sign a form in the portal. The portal writes the answers and
+    the signature into the cycle's form, keeps that file and records it like
+    an uploaded one."""
+    access, mock, rows, source, agency, bu = certs._writable_party(conn, cur, data, "signing a certification form")
+    if access.role != authz.SUPER_USER and not esign_open(cur):
+        raise ApiError("Electronic signature is not available yet. Download the form, sign it and upload it.", 403)
+    mine = _party_rows(rows, source, agency)
+    kind = _kind(data, mine)
+    name = certs._need(data, "signer_name", "Name", 200)
+    title = certs._need(data, "signer_title", "Title", 200)
+    if data.get("consent") is not True:
+        raise ApiError("Confirm that you sign this form electronically")
+    party = {"source": source, "agency": agency, "bu": bu}
+    blank = _party_form(bucket, mock, kind, party)
+    table = {x["row"]: x for x in read_form(blank)["rows"]}
+    answers = {}
+    for a in data.get("answers") or []:
+        try:
+            row = int(a.get("row"))
+        except (TypeError, ValueError, AttributeError):
+            raise ApiError("Every answer needs the row of the form it answers")
+        if row not in table:
+            raise ApiError(f"Row {row} is not a data entity row of the {KINDS[kind]} form", 404)
+        code = _s(a.get("code")).upper() or None
+        if code and code not in certs.responses_for(table[row]["folder"] or "Validation"):
+            raise ApiError(f"{table[row]['entity']}: that comment is not one of the options for this row")
+        resource = _s(a.get("resource"))[:200]
+        if code or resource:
+            answers[row] = (resource, certs.RESPONSES[code] if code else "")
+    at = datetime.now(_PR_TIME)
+    content = sign_form(blank, answers, {"name": name, "title": title, "email": access.email, "at": at})
+    form = read_form(content)
+    form["electronic"] = True
+    errors, warnings = form_problems(form, party)
+    if errors:
+        raise ApiError(". ".join(errors) + ".")
+    file_name = download_name(mock, kind, party)[:-len(".xlsx")] + "_eSigned.xlsx"
+    key = certs.attachment_key(mock, source, agency, bu, "FORM", kind, file_name)
+    boto3.client("s3").put_object(Bucket=bucket, Key=key, Body=content, ContentType=XLSX)
+    client = data.get("_client") or {}
+    return _record(conn, cur, access, mock, party, mine, kind, key, file_name, len(content), form, warnings,
+                   esign={"ip": client.get("ip"), "agent": client.get("agent"),
+                          "sha256": hashlib.sha256(content).hexdigest(), "consent": ESIGN_CONSENT})
+
+
 def _revoke(conn, cur, data, bucket):
     """A super user sends a form back: it and what it certified stop counting."""
     actor = _s(data.get("actor"))
@@ -696,16 +859,22 @@ def _revoke(conn, cur, data, bucket):
     return {"id": form["id"], "revoked": True, "records": revoked}
 
 
-_S3_ONLY = {"certform_templates": _templates, "certform_template_upload_url": _template_upload_url,
+_S3_ONLY = {"certform_template_upload_url": _template_upload_url,
             "certform_template_url": _template_url, "certform_template_delete": _template_delete}
-_WITH_DATABASE = {"certform_status": _status, "certform_list": _list, "certform_rows": _rows,
-                  "certform_file_url": _file_url, "certform_download": _download,
-                  "certform_upload_url": _upload_url, "certform_submit": _submit, "certform_revoke": _revoke}
+_WITH_DATABASE = {"certform_templates": _templates, "certform_status": _status, "certform_list": _list,
+                  "certform_rows": _rows, "certform_file_url": _file_url, "certform_download": _download,
+                  "certform_upload_url": _upload_url, "certform_submit": _submit, "certform_revoke": _revoke,
+                  "certform_esign_form": _esign_form, "certform_esign": _esign,
+                  "certform_esign_setting": _esign_setting}
 
 
 def handle(action, event, bucket, headers, conn_str):
     def run():
         values = api_util.params(event) if action in _READS else api_util.body(event)
+        if action == "certform_esign":
+            # Where the signature came from, for the record of an electronic signature.
+            http = (event.get("requestContext") or {}).get("http") or {}
+            values["_client"] = {"ip": http.get("sourceIp"), "agent": http.get("userAgent")}
         if action in _S3_ONLY:
             return api_util.ok(headers, _S3_ONLY[action](values, bucket))
         with pyodbc.connect(conn_str, autocommit=False) as conn:

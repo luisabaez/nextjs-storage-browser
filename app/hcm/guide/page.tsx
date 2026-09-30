@@ -15,7 +15,12 @@ interface GuideList extends ApiResult { guides?: Guide[] }
 interface GuideUrl extends ApiResult { url?: string }
 interface GuideUploadUrl extends ApiResult { url?: string; key?: string; content_type?: string }
 interface Template { kind: string; label: string; uploaded: boolean; size?: number; last_modified?: string }
-interface Templates extends ApiResult { templates?: Template[] }
+interface Templates extends ApiResult {
+  templates?: Template[];
+  esign_open?: boolean;         // agencies may fill in and sign the forms in the portal
+  esign_changed_by?: string | null;
+  esign_changed_at?: string | null;
+}
 
 const MAX_BYTES = 50 * 1024 * 1024;
 const CONTENT_TYPES: Record<string, string> = {
@@ -204,6 +209,7 @@ function Guides() {
 function FormTemplates() {
   const { mock, email } = useHcm();
   const [templates, setTemplates] = useState<Template[] | null>(null);
+  const [esign, setESign] = useState<Pick<Templates, 'esign_open' | 'esign_changed_by' | 'esign_changed_at'>>({});
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState('');
@@ -215,6 +221,7 @@ function FormTemplates() {
     if (id !== latest.current) return;
     if (!d.ok) setError(d.error || 'The certification forms could not be loaded');
     setTemplates(d.ok ? d.templates ?? [] : []);
+    if (d.ok) setESign({ esign_open: d.esign_open, esign_changed_by: d.esign_changed_by, esign_changed_at: d.esign_changed_at });
   }, [mock, email]);
 
   useEffect(() => { load(); }, [load]);
@@ -273,6 +280,24 @@ function FormTemplates() {
     load();
   };
 
+  const switchESign = async () => {
+    const open = !esign.esign_open;
+    if (!window.confirm(open
+      ? 'Let agencies fill in and sign their certification forms in the portal? Only do this once electronic signature is approved.'
+      : 'Stop agencies from signing in the portal? Forms already signed keep counting.')) return;
+    setBusy('esign');
+    setError('');
+    setNotice('');
+    const d = await apiPost<ApiResult>('certform_esign_setting', { actor: email, open });
+    setBusy('');
+    if (!d.ok) {
+      setError(d.error || 'The setting could not be changed');
+      return;
+    }
+    setNotice(open ? 'Agencies can now sign their forms electronically.' : 'Agencies sign their forms in Excel again.');
+    load();
+  };
+
   return (
     <section className="hcm-card">
       <h2>Certification forms</h2>
@@ -312,6 +337,16 @@ function FormTemplates() {
           ))}
         </ul>
       )}
+      <h3>Electronic signature</h3>
+      <p className="sy-muted">
+        {esign.esign_open
+          ? 'On: agencies can fill in and sign their forms in the portal instead of downloading, signing and uploading them.'
+          : 'Off (pending approval): agencies download, sign and upload their forms. The validation team can already try signing in the portal while viewing as an agency.'}
+        {esign.esign_changed_by && ` Changed by ${esign.esign_changed_by} on ${fmtDateTime(esign.esign_changed_at).slice(0, 16)}.`}
+      </p>
+      <button type="button" className="btn btn-secondary" disabled={!!busy || templates === null} onClick={switchESign}>
+        {busy === 'esign' ? 'Please wait…' : esign.esign_open ? 'Turn off for agencies' : 'Turn on for agencies'}
+      </button>
     </section>
   );
 }

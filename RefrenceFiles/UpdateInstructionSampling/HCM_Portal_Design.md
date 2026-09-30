@@ -142,3 +142,23 @@ Agencies certify on the validation team's own Excel form instead of choosing a r
 ## 9. Recon reports for sources (module `recon_reports.py`, 2026-09-29)
 - Source-level recon views in the conversion database: `HCM_<ENTITY>_<MOCK>_<SOURCE>_RECON_SUMMARY_VW` / `_RECON_VW` / `_RECON2_VW` (tokens starting with a cycle agency number are agency-level and left out).
 - `recon_list {mock}` (super user, reviewer) lists them with where the distribution list sends them; `recon_generate {mock, entity, token}` (super user) writes `PR_<ENTITY>_<SOURCE>_ReconReport_<MOCK>_<stamp>.xlsx` (Summary, Detail, By BU), publishes it through `portal_files` and retires the earlier report of the same entity and source. Replaces the old Recon Report Tools link (`recon_tool_url` removed).
+
+## 10. Users & Permissions (page `/hcm/users`, 2026-09-29)
+Super users run the portal's accounts themselves; administrators keep the Admin pages.
+- Runs on the permission service (`user-approval-handler`), actions `portal_users`, `portal_user_save {email, name, role, parties, invite}`, `portal_user_remove {email}`, `portal_user_resend {email}`. Callers must be an administrator or a super user.
+- Super users manage Agency Users and Certification Reviewers; administrators also manage Super Users. Nobody changes their own account or an administrator's here.
+- Adding a user with no sign-in account invites them (Cognito `AdminCreateUser`: e-mail with a temporary password, e-mail marked verified). The permission record is written with `approved: true`, so the sign-in check lets them in without the admin approval step. Pre-signup skips its approval e-mail for invitations.
+- Removing a user disables the sign-in account and clears role and assignments (`approved: false`, `disabled: true`). Giving access again re-enables it.
+- Status shown: Active, Invited (has not set a password yet), Removed, Registered with no access (self-registered, no role), No account (a record without a sign-in account).
+- Invitations use the sign-in service's own e-mail, 50 a day. Moving the pool to SES lifts that and allows a custom invitation text with the portal link.
+
+### Caller verification
+Every portal action on the processor and every user-management action checks the caller's Cognito access token (`Authorization: Bearer`, verified with `GetUser`, remembered 5 minutes). The e-mail and actor in the request are replaced with the verified e-mail (`authz.verified_email`, `api_util.set_caller`). The Admin pages' `list`, `list_permissions` and `set_permissions` now also need an administrator's token. `get_permissions` and the approve/deny links in the approval e-mail still use the shared token.
+
+## 11. Electronic signature of the forms (2026-09-30, pending approval)
+An alternative to download, sign and upload: the agency answers the same form in the portal and signs with its details.
+- "Fill in and sign here" on each form card shows the rows of the cycle's template (`certform_esign_form`) with the comments each folder offers, pre-filled from the party's current form. The signer enters Name and Title and accepts the consent text. The signed-in account's e-mail, verified by its token, is part of the signature.
+- `certform_esign` writes the answers and the signature block into the template (Name, Title, Date, and "Firmado electrónicamente por … (e-mail) … fecha y hora de Puerto Rico" next to Signature), stores it as `<form name>_eSigned.xlsx` beside uploaded forms, reads it back with the same reader, and records it with `_record`, the same path as an upload.
+- Audit columns on `DATA_CLEANSE_CERT_FORM`: `Sign_Method` (ESIGN; NULL = uploaded), `Signer_IP`, `Signer_Agent`, `Content_SHA256` of the stored file, `Consent_Text`.
+- Setting `esign_agencies` (APP_SETTINGS, with history): while it is off, only super users can sign this way (e.g. while viewing as an agency, for demos). A super user turns it on under User Guides → Certification forms → Electronic signature (`certform_esign_setting`).
+- The consent wording is a draft for the approvers.

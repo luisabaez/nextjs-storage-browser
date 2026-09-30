@@ -294,8 +294,8 @@ function FormsTab() {
                     f.signer_name && `Signed by ${[f.signer_name, f.signer_title].filter(Boolean).join(', ')}`,
                     f.signed_date,
                     `${f.answered ?? 0} of ${f.rows ?? 0} entities answered`,
-                    f.uploaded_by && `Uploaded by ${f.uploaded_by} on ${day(f.uploaded_at)}`,
-                    !f.signature_image && 'no signature image',
+                    f.uploaded_by && `${f.electronic ? 'Signed electronically in the portal' : 'Uploaded'} by ${f.uploaded_by} on ${day(f.uploaded_at)}`,
+                    !f.signature_image && !f.electronic && 'no signature image',
                   ].filter(Boolean).join(' · ')}
                 </div>
               </div>

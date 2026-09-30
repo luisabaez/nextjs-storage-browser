@@ -83,3 +83,15 @@
 .hcert-form-rows td:last-child { white-space: nowrap; }
 .hcert-record .hcert-record-actions { margin-top: 12px; }
 .hcert-record .hcert-facts { margin-top: 8px; }
+
+/* filling in and signing a form in the portal */
+.hcert-esign { display: grid; gap: 12px; margin-top: 16px; padding-top: 16px; border-top: 1px solid #dbe2ec; }
+.hcert-esign h4 { margin: 0; font-size: 16px; }
+.hcert-esign .hcm-banner { margin-bottom: 0; }
+.hcert-esign-rows td { vertical-align: top; }
+.hcert-esign-rows input, .hcert-esign-rows select { width: 100%; min-width: 180px; }
+.hcert-esign-text { margin: 6px 0 0; max-width: 420px; font-size: 13px; line-height: 1.4; color: #475569; }
+.hcert-esign-account { margin: 0; padding: 8px 0; overflow-wrap: anywhere; }
+.hcert-esign-consent { align-items: flex-start; max-width: 760px; line-height: 1.5; }
+.hcert-esign-consent input { margin-top: 4px; }
+.hcert-esign-badge { margin-left: 8px; }

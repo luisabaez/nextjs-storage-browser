@@ -2,12 +2,14 @@
 
 // Step 1 of an agency: the validation team's certification form. The agency
 // downloads it with its agency already filled in, completes and signs it in
-// Excel and uploads it back. The portal reads the answers, certifies what the
-// form covers and keeps the file for later review. Every entity answered as
+// Excel and uploads it back (or, once approved, fills it in and signs it in the
+// portal: ESignForm). The portal reads the answers, certifies what the form
+// covers and keeps the file for later review. Every entity answered as
 // incorrect becomes an issue that needs its supporting documents.
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ApiResult, apiGet, fmtDateTime } from '../../lib/symphony';
 import { HcmParty, fileTypeLabel, formatSize, useHcm } from '../HcmShell';
+import ESignForm from './ESignForm';
 import {
   Attachment, Documents, Issue, IssuesResult, ReasonForm, RecordName, Written, agencyProblem, count, day, post,
   responseBadgeClass, responseShort,
@@ -41,11 +43,12 @@ export interface FormInfo {
   answered?: number | null;
   uploaded_by?: string | null;
   uploaded_at?: string | null;
+  electronic?: boolean;         // signed in the portal rather than uploaded
 }
 interface FormKind { kind: string; label: string; template: boolean; records: RecordName[]; form: FormInfo | null; rows: FormRow[] }
-interface FormStatus extends ApiResult { kinds?: FormKind[] }
+interface FormStatus extends ApiResult { kinds?: FormKind[]; esign_open?: boolean }
 interface LinkResult extends ApiResult { url?: string; key?: string; content_type?: string }
-interface Submitted extends ApiResult { certified?: number; not_certified?: RecordName[]; new_issues?: string[]; warnings?: string[] }
+export interface Submitted extends ApiResult { certified?: number; not_certified?: RecordName[]; new_issues?: string[]; warnings?: string[] }
 interface DocumentAdded extends ApiResult { id?: number; file_name?: string; size?: number }
 
 export const formTitle = (label: string) => `${label} certification form`;
@@ -87,10 +90,11 @@ export function FormRowsTable({ rows }: { rows: FormRow[] }) {
   );
 }
 
-function FormCard({ item, party, locked, onChanged }: {
+function FormCard({ item, party, locked, esignOpen, onChanged }: {
   item: FormKind;
   party: HcmParty;
   locked: boolean;
+  esignOpen: boolean;           // electronic signature is approved for agencies
   onChanged: (message: string) => void;
 }) {
   const { mock, email, canWrite, isSuperUser } = useHcm();
@@ -99,10 +103,12 @@ function FormCard({ item, party, locked, onChanged }: {
   const [result, setResult] = useState<Submitted | null>(null);
   const [showRows, setShowRows] = useState(false);
   const [rejecting, setRejecting] = useState(false);
+  const [signing, setSigning] = useState(false);
   const ids = { actor: email, mock, source: party.source, agency: party.agency, kind: item.kind };
   const form = item.form;
   const title = formTitle(item.label);
   const canUpload = canWrite && !locked && item.template;
+  const canESign = canUpload && (esignOpen || isSuperUser);
 
   const download = async () => {
     setBusy('download');
@@ -194,11 +200,13 @@ function FormCard({ item, party, locked, onChanged }: {
       ) : form ? (
         <dl className="hcert-facts">
           <dt>File</dt><dd>{form.file_name}{formatSize(form.size) ? ` (${formatSize(form.size)})` : ''}</dd>
-          <dt>Uploaded</dt><dd>{[form.uploaded_by, form.uploaded_at && fmtDateTime(form.uploaded_at).slice(0, 16)].filter(Boolean).join(' on ')}</dd>
+          <dt>{form.electronic ? 'Signed in the portal' : 'Uploaded'}</dt>
+          <dd>{[form.uploaded_by, form.uploaded_at && fmtDateTime(form.uploaded_at).slice(0, 16)].filter(Boolean).join(' on ')}</dd>
           <dt>Signed by</dt>
           <dd>
             {[form.signer_name, form.signer_title, form.signed_date].filter(Boolean).join(', ') || '—'}
-            {!form.signature_image && <span className="sy-muted"> · no signature image in the file</span>}
+            {form.electronic ? <span className="sy-muted"> · signed electronically</span>
+              : !form.signature_image && <span className="sy-muted"> · no signature image in the file</span>}
           </dd>
           <dt>Entities answered</dt><dd>{form.answered ?? 0} of {form.rows ?? 0}</dd>
         </dl>
@@ -219,10 +227,16 @@ function FormCard({ item, party, locked, onChanged }: {
               }} />
             </label>
           )}
+          {canESign && !signing && (
+            <button type="button" className="btn btn-secondary" disabled={!!busy} onClick={() => { setSigning(true); setResult(null); }}>
+              {form ? 'Fill in and sign again here' : 'Fill in and sign here'}
+              {!esignOpen && <span className="sy-badge sy-badge-info hcert-esign-badge">Pending approval</span>}
+            </button>
+          )}
           {form && (
             <>
               <button type="button" className="btn btn-secondary" disabled={!!busy} onClick={open}>
-                {busy === 'open' ? 'Please wait…' : 'Open the uploaded file'}
+                {busy === 'open' ? 'Please wait…' : form.electronic ? 'Open the signed file' : 'Open the uploaded file'}
               </button>
               <button type="button" className="btn btn-secondary" aria-expanded={showRows} onClick={() => setShowRows(s => !s)}>
                 {showRows ? 'Hide what was read' : 'Show what was read'}
@@ -247,6 +261,14 @@ function FormCard({ item, party, locked, onChanged }: {
         <ReasonForm heading={`Send back the ${title.toLowerCase()}`} action="Send back"
           text="The form and what it certified stop counting. The agency downloads, signs and uploads the form again."
           busy={busy === 'reject'} error={error} onSubmit={reject} onCancel={() => { setRejecting(false); setError(''); }} />
+      )}
+      {signing && (
+        <ESignForm kind={item.kind} formName={title} party={party} onCancel={() => setSigning(false)}
+          onSigned={d => {
+            setSigning(false);
+            setResult(d);
+            onChanged(`The ${title.toLowerCase()} was signed electronically.`);
+          }} />
       )}
       {showRows && form && <FormRowsTable rows={item.rows} />}
     </section>
@@ -387,8 +409,9 @@ export default function FormsStep({ party, locked, onChanged, onSigner }: {
   onChanged: (message: string) => void;
   onSigner: (signer: { name: string; title: string }) => void;   // what the latest form says in its signature block
 }) {
-  const { mock, email } = useHcm();
+  const { mock, email, canWrite, isSuperUser } = useHcm();
   const [kinds, setKinds] = useState<FormKind[] | null>(null);
+  const [esignOpen, setESignOpen] = useState(false);
   const [failed, setFailed] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const latest = useRef(0);
@@ -401,6 +424,7 @@ export default function FormsStep({ party, locked, onChanged, onSigner }: {
     if (!d.ok) return;
     const items = d.kinds ?? [];
     setKinds(items);
+    setESignOpen(!!d.esign_open);
     const signed = items.map(k => k.form).filter((f): f is FormInfo => !!f && !!f.signer_name)
       .sort((a, b) => (b.uploaded_at || '').localeCompare(a.uploaded_at || ''))[0];
     if (signed) onSigner({ name: signed.signer_name || '', title: signed.signer_title || '' });
@@ -431,7 +455,13 @@ export default function FormsStep({ party, locked, onChanged, onSigner }: {
         <li>Complete the signature block (<strong>Signature, Name, Title, Date</strong>) and save the file.</li>
         <li><strong>Upload</strong> the saved Excel file here. The portal reads your answers and keeps the file.</li>
       </ol>
-      {kinds.map(k => <FormCard key={k.kind} item={k} party={party} locked={locked} onChanged={changed} />)}
+      {canWrite && !locked && (esignOpen || isSuperUser) && (
+        <p className="hcert-note">
+          Or choose <strong>Fill in and sign here</strong> on a form: answer the same rows in the portal and sign electronically
+          with your name and title, without Excel.{!esignOpen && ' Pending approval: only the validation team sees this option for now.'}
+        </p>
+      )}
+      {kinds.map(k => <FormCard key={k.kind} item={k} party={party} locked={locked} esignOpen={esignOpen} onChanged={changed} />)}
       <IssueDocuments party={party} locked={locked} refreshKey={refreshKey} onChanged={() => onChanged('')} />
     </>
   );
