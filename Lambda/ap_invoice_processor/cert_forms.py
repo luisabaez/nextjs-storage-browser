@@ -23,11 +23,11 @@ cells next to their labels. A comment counts when it is one of the form's
 options (accents, case and spacing ignored).
 
 A form certifies the party's records it covers. A record takes the answer of
-the form rows of its folder and segment: the row for the same data entity
-when there is one, otherwise the most serious answer among those rows (issues
-before agreement before no errors). Every row answered as incorrect becomes an
-issue on its record, and needs a supporting document before the party signs
-off (certifications._signoff).
+the form row for its own data entity in its folder (see assign); a record the
+form has no row for takes the most serious answer of its folder and segment
+(agreement before no errors), never another entity's "incorrect". Every record
+answered as incorrect gets an issue of its own, which needs a supporting
+document before the party signs off (certifications._signoff).
 
 Signed PDF: an agency that signs the form on paper (or prints it to PDF and
 signs that) uploads the PDF. A PDF cannot be read, so the uploader records the
@@ -293,16 +293,25 @@ def form_problems(form, party):
 
 def assign(records, rows):
     """{record key: (response code, rows)} for the records the answered rows
-    cover (see the module notes)."""
+    cover (see the module notes).
+
+    A record takes the row of its own data entity in its folder: of its module
+    when the form has one there, otherwise of any segment (the setup files some
+    payroll entities under HR while the form lists them under Payroll). Only a
+    record with no row of its own takes the folder's answer for its module, and
+    then never another entity's "incorrect": that answer and its issue belong to
+    the entity it was given for."""
     answered = [x for x in rows if x["code"]]
     out = {}
     for rec in records:
         folder, module = certs.file_class(rec["file_type"]), certs.module_class(rec["module"])
-        pool = [x for x in answered if certs.file_class(x["folder"] or "Validation") == folder
-                and (not module or not certs.module_class(x["segment"])
-                     or certs.module_class(x["segment"]) == module)]
-        same = [x for x in pool if _entity_key(x["entity"]) == _entity_key(rec["entity"])]
-        chosen = same or pool
+        in_folder = [x for x in answered if certs.file_class(x["folder"] or "Validation") == folder]
+        pool = [x for x in in_folder if not module or not certs.module_class(x["segment"])
+                or certs.module_class(x["segment"]) == module]
+        key = _entity_key(rec["entity"])
+        same = ([x for x in pool if _entity_key(x["entity"]) == key]
+                or [x for x in in_folder if _entity_key(x["entity"]) == key])
+        chosen = same or [x for x in pool if x["code"] != "ISSUES"] or pool
         if chosen:
             out[certs._row_key(rec)] = (overall([x["code"] for x in chosen]), chosen)
     return out
@@ -793,7 +802,7 @@ def _record(conn, cur, access, mock, party, mine, kind, key, name, size, form, w
                     f"[Form_ID] IN ({', '.join('?' for _ in earlier)})", tuple(earlier))
         kept = {r[1]: r[0] for r in cur.fetchall()}
     by_key = {certs._row_key(r): r for r in covers}
-    raised, issues = set(), []
+    issues = []
     for record_key, (code, chosen) in answers.items():
         rec = by_key[record_key]
         resources = "; ".join(dict.fromkeys(x["resource"] for x in chosen if x["resource"]))[:200] or form["name"][:200]
@@ -808,22 +817,24 @@ def _record(conn, cur, access, mock, party, mine, kind, key, name, size, form, w
             (mock, source, agency, bu, rec["module"], rec["entity"], rec["file_type"], code, resources,
              f"{_NOTE.get(esign.get('method') or 'ESIGN') if esign else 'From the signed form'} {name}", access.email,
              form_id))
-        for x in chosen:
-            if x["code"] != "ISSUES" or id(x) in raised:
-                continue
-            raised.add(id(x))
-            description = f"{x['entity']} ({x['folder'] or 'Validation'}) - {x['segment']}".strip(" -")
-            if description in kept:
-                cur.execute(f"UPDATE [{DB}].dbo.[{certs.T_ISSUE}] SET [Form_ID] = ? WHERE [ID] = ?",
-                            (form_id, kept.pop(description)))
-                continue
-            cur.execute(
-                f"INSERT INTO [{DB}].dbo.[{certs.T_ISSUE}] ([MOCK], [Source], [Agency], [Module], [File_Type], "
-                "[Entity], [Description], [Reported_By], [Reported_DTTM], [Deleted], [Form_ID]) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, GETDATE(), 0, ?)",
-                (mock, source, agency, rec["module"], rec["file_type"], rec["entity"], description, access.email,
-                 form_id))
-            issues.append(description)
+        # A record answered as incorrect gets its own issue, which needs a document
+        # before the party signs off (certifications._signoff checks exactly that).
+        if code != "ISSUES":
+            continue
+        x = next(y for y in chosen if y["code"] == "ISSUES")
+        description = f"{rec['entity']} ({x['folder'] or 'Validation'}) - {x['segment']}".strip(" -")
+        if description in kept:
+            cur.execute(f"UPDATE [{DB}].dbo.[{certs.T_ISSUE}] SET [Form_ID] = ?, [Module] = ?, [File_Type] = ?, "
+                        "[Entity] = ? WHERE [ID] = ?",
+                        (form_id, rec["module"], rec["file_type"], rec["entity"], kept.pop(description)))
+            continue
+        cur.execute(
+            f"INSERT INTO [{DB}].dbo.[{certs.T_ISSUE}] ([MOCK], [Source], [Agency], [Module], [File_Type], "
+            "[Entity], [Description], [Reported_By], [Reported_DTTM], [Deleted], [Form_ID]) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, GETDATE(), 0, ?)",
+            (mock, source, agency, rec["module"], rec["file_type"], rec["entity"], description, access.email,
+             form_id))
+        issues.append(description)
     if kept:
         # Rows no longer answered as incorrect.
         cur.execute(f"UPDATE [{DB}].dbo.[{certs.T_ISSUE}] SET [Deleted] = 1 WHERE [ID] IN "
