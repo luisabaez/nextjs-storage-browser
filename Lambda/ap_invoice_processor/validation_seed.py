@@ -598,8 +598,10 @@ def _known_sources(cur, mock, programs):
     if cur.fetchone():
         cur.execute(f"SELECT DISTINCT UPPER(LTRIM(RTRIM([Source]))) FROM [{SOURCE_DB}].dbo.[SETUP_DATA_CLEANSE_FILE_LOCATION_{mock}]")
         found.update(r[0] for r in cur.fetchall() if r[0])
+    logged = validation_runner._logged_sources(cur, mock)
     for program in programs:
-        found.update(s.upper() for s in validation_runner._sources_for(cur, program, validation_runner.PROGRAMS[program], mock))
+        found.update(s.upper() for s in validation_runner._sources_for(cur, program, validation_runner.PROGRAMS[program],
+                                                                      mock, logged))
     return {s for s in found if re.match(r"^[A-Z0-9_]+$", s)}
 
 

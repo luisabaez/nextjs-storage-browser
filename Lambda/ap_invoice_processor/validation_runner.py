@@ -28,7 +28,8 @@ BPA by the FSCM procedure).
 """
 import os
 import re
-from collections import Counter
+import time
+from collections import Counter, defaultdict
 from datetime import datetime
 
 import pyodbc
@@ -173,12 +174,29 @@ def catalog_views(cur, program, mock, db=None):
     return [f"{r[0].strip()}_{mock}_VW" for r in cur.fetchall() if r[0] and r[0].strip()]
 
 
-def _sources_for(cur, program, spec, mock):
+def _logged_sources(cur, mock):
+    """{logged program name (upper): sources} from a mock's run logs, one scan
+    per log table (the logs hold millions of rows; a scan per program made the
+    program list take a minute). Against a test database the source
+    database's logs count too."""
+    found = defaultdict(set)
+    dbs = [DB] + ([validation_seed.SOURCE_DB] if validation_seed.is_test_target() else [])
+    for db in dbs:
+        for table, col in (("LOG_DATA_CLEANSE_RUNDTTM", "SOURCE"), ("LOG_DATA_CLEANSE", "SOURCE"),
+                           ("LOG_DATA_CLEANSE_DETAIL", "Source")):
+            cur.execute(f"SELECT DISTINCT Validation_Program, [{col}] FROM [{db}].dbo.{table} WHERE MOCK = ?", (mock,))
+            for prog, src in cur.fetchall():
+                if prog and src and _SAFE.match(src):
+                    found[prog.strip().upper()].add(src)
+    return found
+
+
+def _sources_for(cur, program, spec, mock, logged=None):
     """Sources the program can run for: those with views for this mock, plus
     those already logged (HCM/PAY sources only appear in the logs). Against a
     test database the source database's logs count too — they list the
     sources a program has been run for even when the test database has no
-    results yet."""
+    results yet. `logged` (from _logged_sources) saves re-reading the logs."""
     sources = set()
     for family in spec.get("families", []):
         cur.execute(f"SELECT name FROM [{DB}].sys.views WHERE name LIKE ?", (f"{family}_%_{mock}_VW",))
@@ -189,21 +207,22 @@ def _sources_for(cur, program, spec, mock):
             # which the pattern would read as a source — skip those artifacts.
             if m and not re.match(r"^\d{2}(_|$)", m.group(1)):
                 sources.add(m.group(1))
-    names = _log_names(program)
-    dbs = [DB] + ([validation_seed.SOURCE_DB] if validation_seed.is_test_target() else [])
-    for db in dbs:
-        for table, col in (("LOG_DATA_CLEANSE_RUNDTTM", "SOURCE"), ("LOG_DATA_CLEANSE", "SOURCE"),
-                           ("LOG_DATA_CLEANSE_DETAIL", "Source")):
-            cur.execute(
-                f"SELECT DISTINCT [{col}] FROM [{db}].dbo.{table} WHERE MOCK = ? AND Validation_Program IN {_in_clause(names)}",
-                [mock] + names,
-            )
-            sources.update(r[0] for r in cur.fetchall() if r[0] and _SAFE.match(r[0]))
+    if logged is None:
+        logged = _logged_sources(cur, mock)
+    for name in _log_names(program):
+        sources.update(logged.get(name.upper(), ()))
     return sorted(sources)
+
+
+_PROGRAMS_CACHE = {}
+_PROGRAMS_TTL = 120   # seconds: every visit to the page lists the programs
 
 
 def list_programs(conn_str, mock="MOCK14"):
     mock = _check_ident(mock.upper(), "mock")
+    hit = _PROGRAMS_CACHE.get(mock)
+    if hit and hit[0] > time.time():
+        return hit[1]
     if validation_seed.is_test_target():
         # A fresh test database has no catalog or log tables yet.
         with pyodbc.connect(conn_str, autocommit=False) as conn:
@@ -214,16 +233,19 @@ def list_programs(conn_str, mock="MOCK14"):
             f"SELECT Validation_Program, COUNT(*), MAX(Pillar) FROM [{DB}].dbo.SETUP_ERROR_MESSAGES_SOURCE "
             f"WHERE Validation_Program IS NOT NULL GROUP BY Validation_Program ORDER BY 1"
         )
+        catalog = cur.fetchall()
+        logged = _logged_sources(cur, mock)
         programs = []
-        for prog, n, pillar in cur.fetchall():
+        for prog, n, pillar in catalog:
             spec = PROGRAMS.get(prog)
             entry = {"program": prog, "rules": n, "pillar": (pillar or "").strip(), "runnable": spec is not None,
                      "mode": spec["mode"] if spec else None,
                      "runs_via": (spec.get("sp") if spec and spec["mode"] == "sp" else None),
-                     "sources": _sources_for(cur, prog, spec, mock) if spec else []}
+                     "sources": _sources_for(cur, prog, spec, mock, logged) if spec else []}
             programs.append(entry)
-        return {"ok": True, "mock": mock, "db": DB, "is_test": validation_seed.is_test_target(),
-                "programs": programs}
+        out = {"ok": True, "mock": mock, "db": DB, "is_test": validation_seed.is_test_target(), "programs": programs}
+        _PROGRAMS_CACHE[mock] = (time.time() + _PROGRAMS_TTL, out)
+        return out
 
 
 def run_program(conn_str, program, source, mock="MOCK14", actor="", dry_run=False,

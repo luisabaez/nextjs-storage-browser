@@ -162,3 +162,20 @@ An alternative to download, sign and upload: the agency answers the same form in
 - Audit columns on `DATA_CLEANSE_CERT_FORM`: `Sign_Method` (ESIGN; NULL = uploaded), `Signer_IP`, `Signer_Agent`, `Content_SHA256` of the stored file, `Consent_Text`.
 - Setting `esign_agencies` (APP_SETTINGS, with history): while it is off, only super users can sign this way (e.g. while viewing as an agency, for demos). A super user turns it on under User Guides → Certification forms → Electronic signature (`certform_esign_setting`).
 - The consent wording is a draft for the approvers.
+
+## 12. Background validation runs (module `validation_jobs.py`, 2026-10-06)
+A procedure-run program (HCM, PAY, Benefits and the FSCM procedures) can run far longer than a Lambda call's 15 minutes: RHUM's HCM programs take over an hour. On *Run validation* such a program becomes a job in `VALIDATION_RUN_JOB`:
+- **queued** → **running**: the run's log rows are reset and stamped (`validation_runner._new_run`, run number under an application lock), and the procedure is handed to the SQL Server through Systems Manager (`AWS-RunPowerShellScript`). The PowerShell there reads the application's login from Secrets Manager with the server's role, so no password appears in the command, and executes the procedure with SQL parameters and no time limit.
+- **finishing** → **done** (or **failed** / **cancelled**): EventBridge rule `validation-run-finished` reports the end of the command to the Lambda, which writes the counts and the client workbook (`finish_sp_run`, `write_report`). Listing the jobs makes the same check, in case an event is missed.
+- At most 4 jobs run at once (`VALIDATION_MAX_PARALLEL`), the rest wait oldest first. A second job for the same cycle, program and source is refused while one is queued or running. A running job can be stopped (`ssm:CancelCommand`).
+- Actions: `val_run` (queues procedure programs; view-mode programs still run in the call), `val_jobs`, `val_job_cancel`. The Data Validation page shows *Validation runs* and refreshes every 10 seconds while any is active.
+- AWS set-up: inline policy `ValidationRunSqlSecret` on the SQL Server's role (read that one secret); `ValidationRunCancel` on the Lambda's role; the EventBridge rule with permission to invoke the Lambda.
+
+## 13. Publishing generated workbooks (2026-10-06)
+- *Generate agency workbooks* builds the agency's **HR** workbook (HCM programs) and **Payroll** workbook (PAY programs) separately, each named with the beginning its distribution-list row gives (`HCM_FileValidation_RHUM-018…`, `PAY_FileValidation_RHUM-018…`, `HACIENDA_FileValidation_HCM_…`). *Publish to the agency* (`pub_publish_report`) then lands each in that party's Validations folder for HR or for Payroll and Compensation.
+- A workbook whose name the list does not know is reported as not published, with the reason. `pub_rules` lists a source's distribution rows for super users.
+
+## 14. Signed PDF forms (2026-10-06)
+- On a form card, *Upload the signed form* also takes a PDF. A PDF can't be read, so the portal opens the form's rows and the uploader records each entity's Agency resource and Comment as they appear on the PDF, with who signed it, their title and the date signed, and confirms the answers match.
+- The PDF is checked to be a PDF, stored as the signed form, and recorded with `_record` like an uploaded Excel form (`Sign_Method` PDF, fingerprint, uploader's address). Rows answered as incorrect become issues needing documents, as usual.
+- *View the signed PDF* opens it in the browser; staff see it under Signed forms as "Signed PDF uploaded".

@@ -43,13 +43,13 @@ Tick each step and note anything unexpected.
 
 ### A. Validations (main app → Data Validation)
 - [ ] Mock MOCK03HCM, program **PAY**, source **HACIENDA** → *Run validation*. Expect 28 rows, 9 codes, and an HCM workbook under Client reports.
-- [ ] *Generate agency workbook* for HACIENDA, and for RHUM with BU `018`. Open each and check the Summary, File Validation Error and Error Messages sheets.
-- [ ] Don't run RHUM programs from the app: they stop at 15 minutes and leave partial results.
+- [ ] *Generate agency workbooks* for HACIENDA (BU `024`) and for RHUM with BU `018`: an HR and a Payroll workbook each. Open them and check the Summary, File Validation Error and Error Messages sheets.
+- [ ] Run an RHUM program too: it runs in the background (over an hour for the large ones). Start a few runs at once and watch them wait their turn under *Validation runs*.
 
-### B. Publish the workbooks to the agencies (portal → Publish)
-- [ ] Upload the RHUM 018 agency workbook. Check where the page says it will go, then publish.
-- [ ] If it says the name isn't in the distribution list, note the name. Generated workbooks have no one-click publish yet.
-- [ ] As the RHUM 018 user: **Files by Source & Agency** shows it under Validations, and it downloads.
+### B. Publish the workbooks to the agencies
+- [ ] On the Data Validation page, *Publish to the agency* next to each workbook. The page says which folder it went to (HR or Payroll and Compensation).
+- [ ] As the RHUM 018 user: **Files by Source & Agency** shows them under Validations, and they download.
+- [ ] Portal → Publish still takes files you upload by hand.
 
 ### C. Data Cleanse Log and Rules
 - [ ] As the RHUM 018 user: Data Cleanse Log shows only RHUM · 018 rows; Export works.
@@ -62,6 +62,7 @@ Tick each step and note anything unexpected.
 ### E. Certification forms
 RHUM · 018 (HR and Payroll):
 - [ ] *Download the form* → in Excel enter Agency Resource and a Comment for each entity → Name, Title, Date, signature → save → *Upload the signed form*. The portal reports what it certified.
+- [ ] Payroll form as a **signed PDF**: print it to PDF (or scan a signed copy), *Upload the signed form*, record its answers and who signed it, submit. *View the signed PDF* opens it.
 - [ ] Answer one entity "…parcial o completamente incorrecta…": it appears under Supporting documents. Add a document.
 
 HACIENDA · 024 (Sources):
@@ -84,11 +85,11 @@ Staff view:
 ### H. Users
 - [ ] Remove a test user (they can't sign in), give access again, and change their source/agency.
 
-## Known gaps to decide on
+## Added after the first round (2026-10-06)
 
-1. **RHUM validations can't run from the app.** Each run is limited to 15 minutes; RHUM's HCM programs need longer. A background run is needed before the team runs RHUM from the app.
-2. **Signed PDFs.** In Mock 3, RHUM · 018 uploaded its signed form as a PDF, and HACIENDA certified with a signed PDF letter plus a Word issues document. The portal reads only the Excel form, or the electronic signature.
-3. **Publishing generated workbooks** needs a download and re-upload; a *Publish to the agency* button would remove that step.
+1. **Background validation runs.** Procedure programs now run on the database server in the background, up to 4 at a time with the rest waiting in line, so RHUM's programs can be run from the app. Follow them under *Validation runs* on the Data Validation page; you can leave the page.
+2. **Signed PDFs.** *Upload the signed form* also takes a PDF; the portal then asks for the answers on the PDF and who signed it.
+3. **Publish to the agency.** *Generate agency workbooks* builds the HR and Payroll workbooks under the names the distribution list routes, each with a *Publish to the agency* button.
 
 ## Starting over
 
