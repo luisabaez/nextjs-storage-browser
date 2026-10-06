@@ -66,6 +66,7 @@ SUPER_USER_ACTIONS = {
     "val_run": ("body", "actor", "running validations"),
     "val_seed": ("body", "actor", "preparing the test database"),
     "val_copy_log": ("body", "actor", "copying validation results into the test database"),
+    "val_data_plan": ("query", "email", "planning a copy of validation data"),
     "val_detail": ("query", "email", "viewing validation detail rows"),
     "val_objects": ("query", "email", "listing database objects"),
     "val_object_def": ("query", "email", "reading database object definitions"),
@@ -2050,6 +2051,60 @@ def lambda_handler(event, context):
             res = validation_seed.copy_log_rows(get_connection_string(), body.get("mock") or "",
                                                 dry_run=bool(body.get("dry_run")))
             return {"statusCode": 200, "headers": headers, "body": json.dumps(res, default=str)}
+        except ValueError as e:
+            return {"statusCode": 400, "headers": headers, "body": json.dumps({"ok": False, "error": str(e)})}
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
+    if action == "val_data_plan":
+        # ?action=val_data_plan&mock=MOCK03HCM[&programs=PAY,HCM_ABS] — tables a mock's validation reads,
+        # with rows and size in the source and the test database (metadata only)
+        try:
+            p = event.get("queryStringParameters") or {}
+            programs = [x for x in (p.get("programs") or "").split(",") if x in validation_runner.PROGRAMS]
+            res = validation_seed.data_plan(get_connection_string(), p.get("mock") or "", programs or None)
+            return {"statusCode": 200, "headers": headers, "body": json.dumps(res, default=str)}
+        except ValueError as e:
+            return {"statusCode": 400, "headers": headers, "body": json.dumps({"ok": False, "error": str(e)})}
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
+    if action in ("val_copy_data", "val_copy_indexes", "val_reset_cycle", "val_compare"):
+        # Test database only. These load real data and clear portal testing, so the
+        # caller is who their sign-in token says, and must be a super user.
+        #   POST val_copy_data   { mock, sources: [..], refresh_setup, dry_run } — call again until done
+        #   POST val_copy_indexes { mock, sources: [..], dry_run } — the source's indexes; call again until done
+        #   POST val_reset_cycle { mock, dry_run }
+        #   GET  val_compare     ?mock=&program=&source= — test vs source log counts per validation code
+        try:
+            actor = authz.verified_email(event)
+            authz.require(actor, what="preparing the test database")
+            if action == "val_compare":
+                p = event.get("queryStringParameters") or {}
+                res = validation_seed.compare_log(get_connection_string(), p.get("mock") or "",
+                                                  p.get("program") or "", (p.get("source") or "").strip().upper())
+            else:
+                body = json.loads(event.get("body") or "{}")
+                remaining = (lambda: context.get_remaining_time_in_millis())                     if context and hasattr(context, "get_remaining_time_in_millis") else None
+                if action == "val_copy_data":
+                    res = validation_seed.copy_data(get_connection_string(), body.get("mock") or "",
+                                                    body.get("sources") or [],
+                                                    refresh_setup=bool(body.get("refresh_setup")),
+                                                    dry_run=bool(body.get("dry_run")), remaining_ms=remaining)
+                elif action == "val_copy_indexes":
+                    res = validation_seed.copy_indexes(get_connection_string(), body.get("mock") or "",
+                                                       body.get("sources") or [], dry_run=bool(body.get("dry_run")),
+                                                       remaining_ms=remaining)
+                else:
+                    res = validation_seed.reset_cycle(get_connection_string(), bucket, body.get("mock") or "",
+                                                      dry_run=bool(body.get("dry_run")))
+            return {"statusCode": 200, "headers": headers, "body": json.dumps(res, default=str)}
+        except api_util.ApiError as e:
+            return api_util.fail(headers, str(e), e.status)
         except ValueError as e:
             return {"statusCode": 400, "headers": headers, "body": json.dumps({"ok": False, "error": str(e)})}
         except Exception as e:

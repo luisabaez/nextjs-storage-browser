@@ -18,8 +18,11 @@ Nothing here runs when VALIDATION_DB is the source database itself.
 """
 import os
 import re
+import time
 
 import pyodbc
+
+import api_util
 
 SOURCE_DB = "Hacienda_ERP"
 TARGET_DB = os.environ.get("VALIDATION_DB", SOURCE_DB)
@@ -449,6 +452,382 @@ def copy_log_rows(conn_str, mock, dry_run=False):
             conn.commit()
         if seeder:
             out["seeding"] = seeder.report
+    return out
+
+
+def _data_tables(cur, mock, programs):
+    """User tables a mock's validation reads: everything the programs' views
+    and procedure reach through other views and functions, less the
+    configuration and result tables (seeding handles those)."""
+    import validation_runner
+    cat = _Catalog(cur)
+    seen, tables = set(), set()
+
+    def walk(name):
+        key = name.upper()
+        if key in seen:
+            return
+        seen.add(key)
+        kind = cat.type_of(name)
+        if kind == "U":
+            tables.add(key)
+        elif kind in ("V", "P", "FN", "IF", "TF"):
+            for ref in cat.references(name, cat.definition(name)):
+                walk(ref)
+
+    for program in programs:
+        walk(validation_runner.PROGRAMS[program].get("sp") or "")
+        for view in validation_runner.catalog_views(cur, program, mock, db=SOURCE_DB):
+            walk(view)
+    skip = {t.upper() for t in CONFIG_TABLES + RESULT_TABLES}
+    return sorted(t for t in tables if t not in skip and not _is_config_table(t))
+
+
+def _sizes(cur, db, names):
+    """{name: (rows, MB)} of the tables of `db` among names."""
+    out = {}
+    for i in range(0, len(names), 200):
+        chunk = names[i:i + 200]
+        marks = ", ".join("?" for _ in chunk)
+        cur.execute(
+            f"SELECT UPPER(o.name), SUM(p.rows) FROM [{db}].sys.objects o JOIN [{db}].sys.partitions p "
+            f"ON p.object_id = o.object_id AND p.index_id IN (0, 1) WHERE o.type = 'U' AND o.name IN ({marks}) "
+            f"GROUP BY o.name", chunk)
+        rows = dict(cur.fetchall())
+        cur.execute(
+            f"SELECT UPPER(o.name), SUM(a.total_pages) * 8 / 1024.0 FROM [{db}].sys.objects o "
+            f"JOIN [{db}].sys.partitions p ON p.object_id = o.object_id "
+            f"JOIN [{db}].sys.allocation_units a ON a.container_id = p.partition_id "
+            f"WHERE o.type = 'U' AND o.name IN ({marks}) GROUP BY o.name", chunk)
+        for name, mb in cur.fetchall():
+            out[name] = (rows.get(name, 0), round(float(mb or 0), 1))
+    return out
+
+
+def data_plan(conn_str, mock, programs=None):
+    """What copying a mock's validation data into the test database means:
+    every table its programs read, with rows and size in each database
+    (metadata only, nothing is read from the tables)."""
+    import validation_runner
+    mock = re.sub(r"[^A-Za-z0-9_]", "", mock or "").upper()
+    if not mock:
+        raise ValueError("mock is required")
+    with pyodbc.connect(conn_str) as conn:
+        cur = conn.cursor()
+        if not programs:
+            phase_col = "Phase2" if api_util.is_hcm_mock(mock) else "Phase1"
+            cur.execute(f"SELECT DISTINCT Validation_Program FROM [{SOURCE_DB}].dbo.SETUP_ERROR_MESSAGES_SOURCE "
+                        f"WHERE {phase_col} = 'Yes'")
+            programs = sorted(r[0] for r in cur.fetchall()
+                              if r[0] in validation_runner.PROGRAMS
+                              and validation_runner.PROGRAMS[r[0]].get("sp") == validation_runner.PREFIX_SP)
+        tables = _data_tables(cur, mock, programs)
+        source, target = _sizes(cur, SOURCE_DB, tables), _sizes(cur, TARGET_DB, tables)
+        rows = [{"table": t, "source_rows": source.get(t, (None, None))[0], "source_mb": source.get(t, (None, None))[1],
+                 "in_target": t in target, "target_rows": target.get(t, (None, None))[0]} for t in tables]
+        return {"ok": True, "mock": mock, "programs": programs, "tables": rows,
+                "total_rows": sum(r["source_rows"] or 0 for r in rows),
+                "total_mb": round(sum(r["source_mb"] or 0 for r in rows), 1)}
+
+
+# ── a cycle's real data in the test database ─────────────────────────────────
+#
+# For end-to-end testing the test database can hold a copy of one cycle's data
+# for chosen sources: the tables its validations read (data_plan), copied rows
+# and all inside the server, so nothing leaves it. Every step refuses to run
+# unless validation points at a test database.
+
+SETUP_REFRESH = ("SETUP_DATA_CLEANSE_FILE_LOCATION_{mock}", "SETUP_DATA_CLEANSE_FILE_DISTRIBUTION_{mock}",
+                 "SETUP_ERROR_MESSAGES_SOURCE")
+
+
+def _need_test_target():
+    if not is_test_target():
+        raise ValueError("Validation points at the source database; this only runs against a test database")
+
+
+def _clean_mock(mock):
+    mock = re.sub(r"[^A-Za-z0-9_]", "", mock or "").upper()
+    if not mock:
+        raise ValueError("mock is required")
+    return mock
+
+
+def _copy_rows(cur, conn, table):
+    """Replace the target's rows of `table` with the source's, in the columns
+    both have. Returns the number of rows copied."""
+    cols = []
+    for db in (SOURCE_DB, TARGET_DB):
+        cur.execute(f"SELECT c.name, c.is_identity FROM [{db}].sys.columns c "
+                    f"WHERE c.object_id = OBJECT_ID('{db}.dbo.[{table}]') AND c.is_computed = 0 ORDER BY c.column_id")
+        cols.append({r[0].upper(): (r[0], bool(r[1])) for r in cur.fetchall()})
+    shared = [cols[1][c] for c in cols[0] if c in cols[1]]
+    names = ", ".join(f"[{name}]" for name, _ in shared)
+    identity = any(is_identity for _, is_identity in shared)
+    try:
+        cur.execute(f"TRUNCATE TABLE [dbo].[{table}]")
+    except pyodbc.Error:
+        conn.rollback()
+        cur.execute(f"DELETE FROM [dbo].[{table}]")
+    if identity:
+        cur.execute(f"SET IDENTITY_INSERT [dbo].[{table}] ON")
+    cur.execute(f"INSERT INTO [dbo].[{table}] WITH (TABLOCK) ({names}) SELECT {names} FROM [{SOURCE_DB}].dbo.[{table}]")
+    copied = cur.rowcount
+    if identity:
+        cur.execute(f"SET IDENTITY_INSERT [dbo].[{table}] OFF")
+    conn.commit()
+    return copied
+
+
+def _known_sources(cur, mock, programs):
+    """Every source the cycle knows: its file locations and its programs' sources."""
+    import validation_runner
+    found = set()
+    cur.execute(f"SELECT name FROM [{SOURCE_DB}].sys.tables WHERE name = ?", (f"SETUP_DATA_CLEANSE_FILE_LOCATION_{mock}",))
+    if cur.fetchone():
+        cur.execute(f"SELECT DISTINCT UPPER(LTRIM(RTRIM([Source]))) FROM [{SOURCE_DB}].dbo.[SETUP_DATA_CLEANSE_FILE_LOCATION_{mock}]")
+        found.update(r[0] for r in cur.fetchall() if r[0])
+    for program in programs:
+        found.update(s.upper() for s in validation_runner._sources_for(cur, program, validation_runner.PROGRAMS[program], mock))
+    return {s for s in found if re.match(r"^[A-Z0-9_]+$", s)}
+
+
+def table_sources(table, known):
+    """The sources a table name belongs to (HCM_SALARY_MOCK13_RHUM -> {RHUM});
+    empty for a table every source shares. A source inside a longer one that
+    also matches (RHUM in DESTAQUE_RHUM) does not count."""
+    name = table.upper()
+    hits = {s for s in known if name.endswith("_" + s) or f"_{s}_" in name}
+    return {s for s in hits if not any(s != o and s in o for o in hits)}
+
+
+def _hcm_programs(cur, mock):
+    import validation_runner
+    phase_col = "Phase2" if api_util.is_hcm_mock(mock) else "Phase1"
+    cur.execute(f"SELECT DISTINCT Validation_Program FROM [{SOURCE_DB}].dbo.SETUP_ERROR_MESSAGES_SOURCE WHERE {phase_col} = 'Yes'")
+    return sorted(r[0] for r in cur.fetchall() if r[0] in validation_runner.PROGRAMS
+                  and validation_runner.PROGRAMS[r[0]].get("sp") == validation_runner.PREFIX_SP)
+
+
+def _tables_for(cur, mock, wanted):
+    """The cycle's validation tables that are shared or belong to the wanted sources."""
+    programs = _hcm_programs(cur, mock)
+    known = _known_sources(cur, mock, programs) | wanted
+    return [t for t in _data_tables(cur, mock, programs)
+            if not table_sources(t, known) or table_sources(t, known) & wanted]
+
+
+def _index_ddl(cur, table):
+    """[(name, CREATE INDEX statement)] of the source table's row-store
+    indexes, clustered first (primary keys and unique constraints become
+    unique indexes)."""
+    obj = f"OBJECT_ID('{SOURCE_DB}.dbo.[{table}]')"
+    cur.execute(f"SELECT index_id, name, type, is_unique, has_filter, filter_definition FROM [{SOURCE_DB}].sys.indexes "
+                f"WHERE object_id = {obj} AND type IN (1, 2) AND is_hypothetical = 0 AND is_disabled = 0 "
+                f"ORDER BY type, index_id")
+    out = []
+    for index_id, name, kind, unique, has_filter, condition in cur.fetchall():
+        cur.execute(f"SELECT c.name, ic.is_descending_key, ic.is_included_column FROM [{SOURCE_DB}].sys.index_columns ic "
+                    f"JOIN [{SOURCE_DB}].sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id "
+                    f"WHERE ic.object_id = {obj} AND ic.index_id = ? "
+                    f"ORDER BY ic.is_included_column, ic.key_ordinal, ic.index_column_id", (index_id,))
+        cols = cur.fetchall()
+        keys = ", ".join(f"[{c}]{' DESC' if desc else ''}" for c, desc, included in cols if not included)
+        extra = ", ".join(f"[{c}]" for c, _, included in cols if included)
+        if not keys:
+            continue
+        out.append((name, f"CREATE {'UNIQUE ' if unique else ''}{'CLUSTERED' if kind == 1 else 'NONCLUSTERED'} "
+                          f"INDEX [{name}] ON [dbo].[{table}] ({keys})"
+                          + (f" INCLUDE ({extra})" if extra and kind == 2 else "")
+                          + (f" WHERE {condition}" if has_filter else "")))
+    return out
+
+
+def copy_indexes(conn_str, mock, sources, dry_run=False, remaining_ms=None):
+    """Give the test copies of a cycle's tables the source's indexes (the
+    clones start as bare heaps, which leaves the validation views scanning
+    millions of rows). Resumable like copy_data: indexes already there are
+    skipped."""
+    _need_test_target()
+    mock = _clean_mock(mock)
+    wanted = {s.strip().upper() for s in sources or [] if s and s.strip()}
+    if not wanted:
+        raise ValueError("Choose at least one source")
+    out = {"ok": True, "mock": mock, "dry_run": dry_run, "created": [], "failed": [], "pending": 0}
+    with pyodbc.connect(conn_str, autocommit=False) as conn:
+        cur = conn.cursor()
+        tables = _tables_for(cur, mock, wanted)
+        sizes = _sizes(cur, SOURCE_DB, tables)
+        tables.sort(key=lambda t: sizes.get(t, (0, 0))[1])
+        todo = []
+        for table in tables:
+            if not _exists(cur, table):
+                continue
+            cur.execute("SELECT name FROM sys.indexes WHERE object_id = OBJECT_ID(?) AND name IS NOT NULL", (f"dbo.[{table}]",))
+            have = {r[0].upper() for r in cur.fetchall()}
+            todo += [(table, name, ddl) for name, ddl in _index_ddl(cur, table) if name.upper() not in have]
+        out["tables"] = len(tables)
+        out["pending"] = len(todo)
+        out["tables_with_indexes"] = len({t for t, _, _ in todo})
+        if dry_run:
+            out["sample"] = [ddl for _, _, ddl in todo[-10:]]
+            return out
+        for table, name, ddl in todo:
+            if remaining_ms and remaining_ms() < 180_000:
+                break
+            try:
+                cur.execute(ddl)
+                conn.commit()
+                out["created"].append(f"{table}.{name}")
+            except Exception as e:  # noqa: BLE001 - report it and go on
+                conn.rollback()
+                out["failed"].append(f"{table}.{name}: {str(e)[:200]}")
+        out["remaining"] = len(todo) - len(out["created"]) - len(out["failed"])
+        out["done"] = out["remaining"] == 0
+    return out
+
+
+def copy_data(conn_str, mock, sources, refresh_setup=False, dry_run=False, remaining_ms=None):
+    """Copy a cycle's validation data for some sources into the test database:
+    the shared tables plus those of the sources. Resumable: a table whose row
+    count already matches the source is skipped, and the call stops before
+    the Lambda's time runs out (call again to continue). refresh_setup first
+    re-copies the cycle's setup tables, keeping a dated copy of the old ones."""
+    _need_test_target()
+    mock = _clean_mock(mock)
+    wanted = {s.strip().upper() for s in sources or [] if s and s.strip()}
+    if not wanted:
+        raise ValueError("Choose at least one source")
+    out = {"ok": True, "mock": mock, "sources": sorted(wanted), "dry_run": dry_run, "setup": [], "copied": [],
+           "failed": []}
+    with pyodbc.connect(conn_str, autocommit=False) as conn:
+        cur = conn.cursor()
+        tables = _tables_for(cur, mock, wanted)
+        source_sizes = _sizes(cur, SOURCE_DB, tables)
+        tables.sort(key=lambda t: source_sizes.get(t, (0, 0))[1])   # small first: progress shows early
+        seeder = None if dry_run else Seeder(conn)
+        stamp = time.strftime("%Y%m%d")
+        if refresh_setup:
+            for table in (t.format(mock=mock) for t in SETUP_REFRESH):
+                entry = {"table": table}
+                out["setup"].append(entry)
+                cur.execute(f"SELECT COUNT(*) FROM [{SOURCE_DB}].dbo.[{table}]")
+                entry["source_rows"] = cur.fetchone()[0]
+                if dry_run:
+                    continue
+                if _exists(cur, table):
+                    backup = f"{table}_BAK_{stamp}"
+                    if not _exists(cur, backup):
+                        cur.execute(f"SELECT * INTO [dbo].[{backup}] FROM [dbo].[{table}]")
+                        conn.commit()
+                        entry["backup"] = backup
+                else:
+                    seeder.ensure(table)
+                entry["copied"] = _copy_rows(cur, conn, table)
+        target_sizes = _sizes(cur, TARGET_DB, tables)
+        pending = []
+        for table in tables:
+            rows = source_sizes.get(table, (0, 0))[0]
+            if rows and target_sizes.get(table, (None, 0))[0] != rows:
+                pending.append(table)
+        out["tables"] = len(tables)
+        out["rows"] = sum(source_sizes.get(t, (0, 0))[0] for t in tables)
+        out["mb"] = round(sum(source_sizes.get(t, (0, 0))[1] for t in tables), 1)
+        out["to_copy"] = len(pending)
+        if dry_run:
+            out["pending"] = [{"table": t, "rows": source_sizes[t][0], "mb": source_sizes[t][1]} for t in pending]
+            return out
+        for table in tables:
+            seeder.ensure(table)
+        for table in pending:
+            if remaining_ms and remaining_ms() < 240_000:
+                break
+            try:
+                out["copied"].append({"table": table, "rows": _copy_rows(cur, conn, table)})
+            except Exception as e:  # noqa: BLE001 - report the table and go on with the next
+                conn.rollback()
+                out["failed"].append(f"{table}: {str(e)[:200]}")
+        out["remaining"] = len(pending) - len(out["copied"]) - len(out["failed"])
+        out["done"] = out["remaining"] == 0
+        if seeder.report["failed"]:
+            out["seeding_failed"] = seeder.report["failed"][:20]
+    return out
+
+
+def compare_log(conn_str, mock, program, source):
+    """Failing-row counts per validation code of one program run, in the test
+    database and in the source database's log (counts only)."""
+    import validation_runner
+    mock = _clean_mock(mock)
+    names = validation_runner._log_names(program)
+    marks = ", ".join("?" for _ in names)
+    counts = {}
+    with pyodbc.connect(conn_str) as conn:
+        cur = conn.cursor()
+        for side, db in (("test", TARGET_DB), ("source", SOURCE_DB)):
+            cur.execute(f"SELECT [Validation_Code], COUNT(*) FROM [{db}].dbo.[LOG_DATA_CLEANSE_DETAIL] WHERE [MOCK] = ? "
+                        f"AND [Source] = ? AND [Validation_Program] IN ({marks}) GROUP BY [Validation_Code]",
+                        [mock, source] + names)
+            for code, n in cur.fetchall():
+                counts.setdefault(code or "", {"test": 0, "source": 0})[side] = n
+    rows = [{"code": c, **v} for c, v in sorted(counts.items())]
+    return {"ok": True, "mock": mock, "program": program, "source": source, "codes": rows,
+            "test_total": sum(r["test"] for r in rows), "source_total": sum(r["source"] for r in rows),
+            "different": [r["code"] for r in rows if r["test"] != r["source"]]}
+
+
+# What a cycle's portal testing leaves behind: tables keyed by MOCK (form rows
+# follow their form) and S3 folders keyed by the cycle. Templates and user
+# guides are the team's set-up and stay.
+PORTAL_TABLES = ("DATA_CLEANSE_CERT_VALIDATION", "DATA_CLEANSE_CERT_FILE", "DATA_CLEANSE_CERT_ISSUE",
+                 "DATA_CLEANSE_CERT_SIGNOFF", "DATA_CLEANSE_CERT_ATTACHMENT", "DATA_CLEANSE_CERT_FORM",
+                 "DATA_CLEANSE_PUBLISHED_FILE")
+PORTAL_FOLDERS = ("Certifications", "Published", "PublishInbox", "Reports", "CertForms/{mock}/out")
+
+
+def reset_cycle(conn_str, bucket, mock, dry_run=False):
+    """Clear a cycle's portal activity from the test database and its bucket
+    so a test starts clean. Nothing is destroyed: the rows go to
+    <table>_ARCHIVE_<stamp> tables and the files under SymphonyPrivate/_Archive/<stamp>/."""
+    import boto3
+    _need_test_target()
+    mock = _clean_mock(mock)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    out = {"ok": True, "mock": mock, "dry_run": dry_run, "tables": {}, "files": {}}
+    with pyodbc.connect(conn_str, autocommit=False) as conn:
+        cur = conn.cursor()
+        for table in PORTAL_TABLES + ("DATA_CLEANSE_CERT_FORM_ROW",):
+            if not _exists(cur, table):
+                continue
+            where = ("[Form_ID] IN (SELECT [ID] FROM [dbo].[DATA_CLEANSE_CERT_FORM] WHERE [MOCK] = ?)"
+                     if table == "DATA_CLEANSE_CERT_FORM_ROW" else "[MOCK] = ?")
+            cur.execute(f"SELECT COUNT(*) FROM [dbo].[{table}] WHERE {where}", (mock,))
+            out["tables"][table] = cur.fetchone()[0]
+        if not dry_run:
+            # Form rows first: they find their forms through DATA_CLEANSE_CERT_FORM.
+            for table in ("DATA_CLEANSE_CERT_FORM_ROW",) + PORTAL_TABLES:
+                if not out["tables"].get(table):
+                    continue
+                where = ("[Form_ID] IN (SELECT [ID] FROM [dbo].[DATA_CLEANSE_CERT_FORM] WHERE [MOCK] = ?)"
+                         if table == "DATA_CLEANSE_CERT_FORM_ROW" else "[MOCK] = ?")
+                archive = f"{table}_ARCHIVE_{stamp.replace('-', '_')}"
+                cur.execute(f"SELECT * INTO [dbo].[{archive}] FROM [dbo].[{table}] WHERE {where}", (mock,))
+                cur.execute(f"DELETE FROM [dbo].[{table}] WHERE {where}", (mock,))
+            conn.commit()
+    s3 = boto3.client("s3")
+    for folder in PORTAL_FOLDERS:
+        prefix = f"{api_util.PRIVATE_ROOT}/" + (folder.format(mock=mock) if "{mock}" in folder else f"{folder}/{mock}") + "/"
+        keys = [o["Key"] for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix)
+                for o in page.get("Contents", [])]
+        out["files"][prefix] = len(keys)
+        if dry_run:
+            continue
+        for key in keys:
+            s3.copy_object(Bucket=bucket, Key=f"{api_util.PRIVATE_ROOT}/_Archive/{stamp}/{key}",
+                           CopySource={"Bucket": bucket, "Key": key})
+            s3.delete_object(Bucket=bucket, Key=key)
+    if not dry_run:
+        out["archived_to"] = f"{api_util.PRIVATE_ROOT}/_Archive/{stamp}/"
     return out
 
 
