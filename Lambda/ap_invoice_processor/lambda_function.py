@@ -2045,11 +2045,11 @@ def lambda_handler(event, context):
                     "body": json.dumps({"ok": False, "error": str(e)})}
 
     if action == "val_copy_log":
-        # POST { mock, dry_run } — copy a cycle's log rows from the source database into the test database
+        # POST { mock, dry_run, source? } — copy a cycle's log rows (one source's, when given) into the test database
         try:
             body = json.loads(event.get("body") or "{}")
             res = validation_seed.copy_log_rows(get_connection_string(), body.get("mock") or "",
-                                                dry_run=bool(body.get("dry_run")))
+                                                dry_run=bool(body.get("dry_run")), source=body.get("source"))
             return {"statusCode": 200, "headers": headers, "body": json.dumps(res, default=str)}
         except ValueError as e:
             return {"statusCode": 400, "headers": headers, "body": json.dumps({"ok": False, "error": str(e)})}

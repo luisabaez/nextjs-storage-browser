@@ -414,26 +414,30 @@ def plan_gate_check(conn_str, mock, pairs):
 LOG_TABLES = ("LOG_DATA_CLEANSE_DETAIL", "LOG_DATA_CLEANSE")
 
 
-def copy_log_rows(conn_str, mock, dry_run=False):
+def copy_log_rows(conn_str, mock, dry_run=False, source=None):
     """Copy one cycle's validation results from the source database into the
     test database so its screens show real data: the two log tables are
-    created when missing, the cycle's rows in the target are replaced. Rows
-    never leave the server; only counts come back."""
+    created when missing, the cycle's rows in the target are replaced (only
+    one source's rows when `source` is given). Rows never leave the server;
+    only counts come back."""
     mock = re.sub(r"[^A-Za-z0-9_]", "", mock or "").upper()
     if not mock:
         raise ValueError("mock is required")
     if not is_test_target():
         raise ValueError("Validation points at the source database; nothing to copy")
-    out = {"ok": True, "mock": mock, "source_db": SOURCE_DB, "target_db": TARGET_DB, "dry_run": dry_run, "tables": {}}
+    source = re.sub(r"[^A-Za-z0-9_]", "", source or "").upper() or None
+    where, args = ("[MOCK] = ? AND [Source] = ?", (mock, source)) if source else ("[MOCK] = ?", (mock,))
+    out = {"ok": True, "mock": mock, "source": source, "source_db": SOURCE_DB, "target_db": TARGET_DB,
+           "dry_run": dry_run, "tables": {}}
     with pyodbc.connect(conn_str) as conn:
         cur = conn.cursor()
         seeder = None if dry_run else Seeder(conn)
         for table in LOG_TABLES:
-            cur.execute(f"SELECT COUNT(*) FROM [{SOURCE_DB}].dbo.[{table}] WHERE [MOCK] = ?", (mock,))
+            cur.execute(f"SELECT COUNT(*) FROM [{SOURCE_DB}].dbo.[{table}] WHERE {where}", args)
             entry = {"source_rows": cur.fetchone()[0], "target_rows": 0, "copied": 0}
             out["tables"][table] = entry
             if _exists(cur, table):
-                cur.execute(f"SELECT COUNT(*) FROM [{TARGET_DB}].dbo.[{table}] WHERE [MOCK] = ?", (mock,))
+                cur.execute(f"SELECT COUNT(*) FROM [{TARGET_DB}].dbo.[{table}] WHERE {where}", args)
                 entry["target_rows"] = cur.fetchone()[0]
             if dry_run:
                 continue
@@ -447,14 +451,14 @@ def copy_log_rows(conn_str, mock, dry_run=False):
                     f"AND c.is_identity = 0 AND c.is_computed = 0 ORDER BY c.column_id")
                 cols.append({r[0].upper(): r[0] for r in cur.fetchall()})
             shared = ", ".join(f"[{cols[0][c]}]" for c in cols[0] if c in cols[1])
-            cur.execute(f"DELETE FROM [{TARGET_DB}].dbo.[{table}] WHERE [MOCK] = ?", (mock,))
+            cur.execute(f"DELETE FROM [{TARGET_DB}].dbo.[{table}] WHERE {where}", args)
             entry["removed"] = cur.rowcount
             if entry["source_rows"] == 0:
                 # The team's INSTEAD OF trigger raises on an empty insert.
                 conn.commit()
                 continue
             cur.execute(f"INSERT INTO [{TARGET_DB}].dbo.[{table}] ({shared}) "
-                        f"SELECT {shared} FROM [{SOURCE_DB}].dbo.[{table}] WHERE [MOCK] = ?", (mock,))
+                        f"SELECT {shared} FROM [{SOURCE_DB}].dbo.[{table}] WHERE {where}", args)
             entry["copied"] = cur.rowcount
             conn.commit()
         if seeder:
