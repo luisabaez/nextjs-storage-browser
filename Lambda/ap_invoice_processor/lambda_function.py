@@ -2073,11 +2073,12 @@ def lambda_handler(event, context):
             return {"statusCode": 500, "headers": headers,
                     "body": json.dumps({"ok": False, "error": str(e)})}
 
-    if action in ("val_copy_data", "val_copy_indexes", "val_reset_cycle", "val_compare"):
+    if action in ("val_copy_data", "val_copy_indexes", "val_sync_views", "val_reset_cycle", "val_compare"):
         # Test database only. These load real data and clear portal testing, so the
         # caller is who their sign-in token says, and must be a super user.
         #   POST val_copy_data   { mock, sources: [..], refresh_setup, dry_run } — call again until done
         #   POST val_copy_indexes { mock, sources: [..], dry_run } — the source's indexes; call again until done
+        #   POST val_sync_views  { mock, dry_run } — the cycle's views as the source defines them today
         #   POST val_reset_cycle { mock, dry_run }
         #   GET  val_compare     ?mock=&program=&source= — test vs source log counts per validation code
         try:
@@ -2095,6 +2096,9 @@ def lambda_handler(event, context):
                                                     body.get("sources") or [],
                                                     refresh_setup=bool(body.get("refresh_setup")),
                                                     dry_run=bool(body.get("dry_run")), remaining_ms=remaining)
+                elif action == "val_sync_views":
+                    res = validation_seed.sync_views(get_connection_string(), body.get("mock") or "",
+                                                     dry_run=bool(body.get("dry_run")))
                 elif action == "val_copy_indexes":
                     res = validation_seed.copy_indexes(get_connection_string(), body.get("mock") or "",
                                                        body.get("sources") or [], dry_run=bool(body.get("dry_run")),

@@ -238,6 +238,13 @@ class Seeder:
                 # are always refreshed so fixes in the source flow through.
                 self._note("exists", name)
                 return
+            if kind == "P" and _exists(self.cur, name):
+                # ...but only when the source changed it: re-creating a procedure
+                # another run is executing stops that run (error 2801).
+                self.cur.execute("SELECT OBJECT_DEFINITION(OBJECT_ID(?))", (f"dbo.[{name}]",))
+                if _definition_key(self.cur.fetchone()[0]) == _definition_key(definition):
+                    self._note("exists", name)
+                    return
             self.cur.execute(_as_create_or_alter(definition))
             self.conn.commit()
             self._note("created", name)
@@ -754,6 +761,64 @@ def copy_data(conn_str, mock, sources, refresh_setup=False, dry_run=False, remai
     return out
 
 
+def _definition_key(text):
+    """A module definition compared on its words: whitespace and CREATE/ALTER aside."""
+    body = _as_create_or_alter(text or "")
+    return " ".join(body.split()).upper()
+
+
+def sync_views(conn_str, mock, dry_run=False):
+    """Bring the test database's copies of a cycle's validation views, and the
+    views and functions they use, up to the source's definitions. Seeding
+    creates a module only when it is missing, so an older copy stays behind
+    when the team changes a rule."""
+    import validation_runner
+    _need_test_target()
+    mock = _clean_mock(mock)
+    out = {"ok": True, "mock": mock, "dry_run": dry_run, "same": 0, "missing": [], "different": [], "updated": [],
+           "failed": []}
+    with pyodbc.connect(conn_str, autocommit=False) as conn:
+        cur = conn.cursor()
+        cat = _Catalog(cur)
+        names, seen = [], set()
+
+        def walk(name):
+            key = name.upper()
+            if key in seen:
+                return
+            seen.add(key)
+            if cat.type_of(name) in ("V", "FN", "IF", "TF"):
+                definition = cat.definition(name)
+                for ref in cat.references(name, definition):
+                    walk(ref)
+                names.append((name, definition))
+
+        for program in _hcm_programs(cur, mock):
+            for view in validation_runner.catalog_views(cur, program, mock, db=SOURCE_DB):
+                walk(view)
+        for name, definition in names:
+            cur.execute("SELECT OBJECT_DEFINITION(OBJECT_ID(?))", (f"dbo.[{name}]",))
+            row = cur.fetchone()
+            current = row[0] if row else None
+            if current is None:
+                out["missing"].append(name)
+            elif _definition_key(current) != _definition_key(definition):
+                out["different"].append(name)
+            else:
+                out["same"] += 1
+                continue
+            if dry_run or current is None:   # missing ones are created by the next run's seeding
+                continue
+            try:
+                cur.execute(_as_create_or_alter(definition))
+                conn.commit()
+                out["updated"].append(name)
+            except Exception as e:  # noqa: BLE001
+                conn.rollback()
+                out["failed"].append(f"{name}: {str(e)[:200]}")
+    return out
+
+
 def compare_log(conn_str, mock, program, source):
     """Failing-row counts per validation code of one program run, in the test
     database and in the source database's log (counts only)."""
@@ -770,10 +835,25 @@ def compare_log(conn_str, mock, program, source):
                         [mock, source] + names)
             for code, n in cur.fetchall():
                 counts.setdefault(code or "", {"test": 0, "source": 0})[side] = n
+        # When each side last ran it, and which of the source's tables were
+        # loaded after the source's run (its results describe older data).
+        runs = {}
+        for side, db in (("test", TARGET_DB), ("source", SOURCE_DB)):
+            cur.execute(f"SELECT MAX(Validation_PROCESSED_DTTM) FROM [{db}].dbo.LOG_DATA_CLEANSE_RUNDTTM "
+                        f"WHERE MOCK = ? AND SOURCE = ? AND Validation_Program IN ({marks})", [mock, source] + names)
+            runs[side] = cur.fetchone()[0]
+        loaded_after = []
+        if runs["source"]:
+            cur.execute(f"SELECT TOP 30 Table_Name, MAX(LAST_LOAD_DTTM) FROM [{SOURCE_DB}].dbo.LAST_LOAD_BY_TABLE_VW "
+                        f"WHERE (Table_Name LIKE ? OR Table_Name LIKE ?) GROUP BY Table_Name "
+                        f"HAVING MAX(LAST_LOAD_DTTM) > ? ORDER BY MAX(LAST_LOAD_DTTM) DESC",
+                        (f"%[_]{source}", f"%{mock}%", runs["source"]))
+            loaded_after = [{"table": t, "at": at} for t, at in cur.fetchall()]
     rows = [{"code": c, **v} for c, v in sorted(counts.items())]
     return {"ok": True, "mock": mock, "program": program, "source": source, "codes": rows,
             "test_total": sum(r["test"] for r in rows), "source_total": sum(r["source"] for r in rows),
-            "different": [r["code"] for r in rows if r["test"] != r["source"]]}
+            "different": [r["code"] for r in rows if r["test"] != r["source"]],
+            "test_run_at": runs["test"], "source_run_at": runs["source"], "loaded_after_source_run": loaded_after}
 
 
 # What a cycle's portal testing leaves behind: tables keyed by MOCK (form rows
