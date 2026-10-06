@@ -8,3 +8,4 @@
 .dv-agency { align-items: flex-end; }
 .dv-agency label.dv-narrow { min-width: 160px; }
 .dv-agency input { font-size: 14px; }
+.dv-agency-results { display: grid; gap: 6px; flex-basis: 100%; }

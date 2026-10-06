@@ -39,9 +39,9 @@ from api_util import ApiError
 ACTIONS = {
     "pub_parties", "pub_tree", "pub_download_url", "guide_list", "guide_url",
     "pub_preview", "pub_upload_urls", "pub_publish", "pub_publish_report", "pub_delete",
-    "guide_upload_url", "guide_delete",
+    "guide_upload_url", "guide_delete", "pub_rules",
 }
-_READS = {"pub_parties", "pub_tree", "pub_download_url", "guide_list", "guide_url"}
+_READS = {"pub_parties", "pub_tree", "pub_download_url", "guide_list", "guide_url", "pub_rules"}
 
 DB = validation_seed.TARGET_DB
 SOURCE = validation_seed.SOURCE_DB
@@ -482,6 +482,19 @@ def _public(targets):
     return [{f: t[f] for f in _TARGET_FIELDS} for t in targets]
 
 
+def _rules(conn, cur, p, bucket):
+    """The distribution list's rows (optionally one source's): which file-name
+    beginning goes to which party and folder. Super users only."""
+    authz.require(_s(p.get("email")), what="viewing the distribution list")
+    mock = api_util.mock(p.get("mock"))
+    table = _team_table(conn, cur, f"{DISTRIBUTION_PREFIX}{mock}")
+    if not table:
+        raise ApiError(f"{DISTRIBUTION_PREFIX}{mock} does not exist", 404)
+    source = _s(p.get("source")).upper()
+    rows = [r for r in _rows(cur, table, _DISTRIBUTION) if not source or r["source"].upper() == source]
+    return {"mock": mock, "rules": rows[:1000], "total": len(rows)}
+
+
 def _preview(conn, cur, data, bucket):
     _publisher(data)
     resolve = _resolver(conn, cur, api_util.mock(data.get("mock")))
@@ -658,7 +671,7 @@ def _guide_delete(data, bucket):
 
 _S3_ONLY = {"guide_list": _guide_list, "guide_url": _guide_url, "pub_upload_urls": _upload_urls,
             "guide_upload_url": _guide_upload_url, "guide_delete": _guide_delete}
-_WITH_DATABASE = {"pub_parties": _parties, "pub_tree": _tree, "pub_download_url": _download_url,
+_WITH_DATABASE = {"pub_rules": _rules, "pub_parties": _parties, "pub_tree": _tree, "pub_download_url": _download_url,
                   "pub_preview": _preview, "pub_publish": _publish, "pub_publish_report": _publish_report,
                   "pub_delete": _delete}
 

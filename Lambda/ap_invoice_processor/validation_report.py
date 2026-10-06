@@ -369,6 +369,96 @@ def _agency_name(cur, mock, source, bu):
     return names[0] if len(names) == 1 else ""
 
 
+# The team hands an agency two workbooks, each to its own folder: the HR
+# validations (HCM programs) and the Payroll ones (PAY programs). Each is named
+# with the beginning its distribution-list row gives, so publishing it lands it
+# in that party's folder: HCM_FileValidation_RHUM-018..., PAY_FileValidation_
+# RHUM-018..., HACIENDA_FileValidation_HCM_...
+_MODULE_PILLAR = {"HR": "HCM", "PAYROLL": "PAY"}
+
+
+def module_of(program):
+    return "PAYROLL" if (program or "").strip().upper().startswith("PAY") else "HR"
+
+
+def distribution_prefix(rules, source, bu, module):
+    """The distribution list's file-name beginning for a source (+ agency)
+    module workbook, or None. rules: portal_files distribution rows."""
+    pillar = _MODULE_PILLAR[module]
+    src, code = source.upper(), (bu or "")[:3].upper()
+    best = None
+    for r in rules:
+        name = r.get("file_name") or ""
+        up = name.upper()
+        if "VALID" not in (r.get("file_type") or "").upper() or pillar not in re.split(r"[_\-\s]+", up):
+            continue
+        if (code and f"{src}-{code}" in up) or up.startswith(f"{src}_"):
+            if best is None or len(name) > len(best):
+                best = name
+    return best
+
+
+def agency_reports(conn_str, bucket, mock, source, bu=None, audience="agency"):
+    """The agency's HR and Payroll workbooks (those with rows), named for the
+    distribution list. Returns {reports: [{module, key, name, rows, routed}], warnings}."""
+    import portal_files
+    mock = api_util.mock(mock)
+    source = api_util.ident(str(source or "").upper(), "source")
+    bu = str(bu or "").strip()
+    if bu and not re.fullmatch(r"[A-Za-z0-9]{1,20}", bu):
+        raise ApiError(f"Invalid business unit: {bu!r}")
+    flag = _AUDIENCE_FLAG.get(str(audience or "agency").strip().lower())
+    if not flag:
+        raise ApiError("audience must be 'agency' or 'source'")
+    warnings = []
+    _ensure_objects(conn_str, ["LOG_DATA_CLEANSE_DETAIL", "SETUP_ERROR_MESSAGES_SOURCE",
+                               f"SETUP_DATA_CLEANSE_FILE_LOCATION_{mock}"], warnings)
+    reported = f"Pillar = 'HCM' AND [{flag}] = 'Y'"
+    sql = (f"SELECT {', '.join(f'd.[{c}]' for c in HCM_DETAIL_COLS)}, d.[Validation_Program] "
+           f"FROM [{DB}].dbo.LOG_DATA_CLEANSE_DETAIL d "
+           f"WHERE d.MOCK = ? AND d.[Source] = ? AND d.Validation_Code IN ("
+           f"SELECT VALIDATION_CODE FROM [{DB}].dbo.SETUP_ERROR_MESSAGES_SOURCE WHERE {reported})")
+    params = [mock, source]
+    if bu:
+        sql += " AND LEFT(d.BU, 3) = LEFT(?, 3)"
+        params.append(bu)
+    sql += " ORDER BY d.Validation_Code, d.ERROR_MSG"
+    code_idx = HCM_DETAIL_COLS.index("Validation_Code")
+    out = []
+    with pyodbc.connect(conn_str) as conn:
+        cur = conn.cursor()
+        cur.execute(sql, params)
+        by_module = {"HR": [], "PAYROLL": []}
+        for r in cur.fetchall():
+            by_module[module_of(r[-1])].append(tuple(r[:-1]))
+        if not any(by_module.values()):
+            raise ApiError(f"No reportable HCM validation rows stored for {source}"
+                           f"{' / ' + bu if bu else ''} on {mock}", 404)
+        table = portal_files._team_table(conn, cur, f"{portal_files.DISTRIBUTION_PREFIX}{mock}")
+        rules = portal_files._rows(cur, table, portal_files._DISTRIBUTION) if table else []
+        if not table:
+            warnings.append(f"{portal_files.DISTRIBUTION_PREFIX}{mock} does not exist; the workbooks keep the app's names")
+        stamp = _stamp()
+        for module, records in by_module.items():
+            if not records:
+                continue
+            legend = legend_rows(cur, {r[code_idx] for r in records}, reported)
+            prefix = distribution_prefix(rules, source, bu, module)
+            if prefix:
+                name = f"{prefix}{'' if prefix.endswith(('_', '-')) else '_'}{mock}_{stamp}.xlsx"
+            else:
+                who = "-".join(api_util.safe_segment(p) for p in (source, bu) if p)
+                name = f"{_MODULE_PILLAR[module]}_FileValidation_{who}_{mock}_{stamp}.xlsx"
+                warnings.append(f"The distribution list has no {module.title()} validation name for {source}"
+                                f"{' / ' + bu if bu else ''}; {name} cannot be published until it does")
+            # The key keeps the exact name: publishing reads the name back from it.
+            safe_name = name.replace("/", "_").replace("\\", "_")
+            key = f"{REPORT_PREFIX}/{mock}/{AGENCY_DIR}/{source}/{safe_name}"
+            write_report(bucket, key, build_hcm_workbook(records, legend, mock))
+            out.append({"module": module, "key": key, "name": name, "rows": len(records), "routed": bool(prefix)})
+    return {"reports": out, "warnings": warnings}
+
+
 def agency_report(conn_str, bucket, mock, source, bu=None, audience="agency"):
     """Build and store the per-agency HCM workbook: every stored failing row of
     a source (+ business unit) for the HCM rules flagged as reported to the
@@ -430,7 +520,7 @@ def _key_codes(parts):
     source, name = parts[4], parts[-1]
     codes = [source]
     if parts[3] == AGENCY_DIR:
-        m = re.match(rf"^HCM_FileValidation_{re.escape(source)}-([A-Za-z0-9]+)[-_]", name)
+        m = re.match(rf"^(?:HCM|PAY)_FileValidation_{re.escape(source)}-([A-Za-z0-9]+)[-_]", name)
         if m:
             codes.append(m.group(1))
     return codes
@@ -463,6 +553,9 @@ def handle(action, event, bucket, headers, conn_str):
 
         body = api_util.body(event)
         authz.require((body.get("actor") or "").strip(), what="generating agency workbooks")
+        if body.get("split"):
+            return api_util.ok(headers, agency_reports(conn_str, bucket, body.get("mock"), body.get("source"),
+                                                       bu=body.get("bu"), audience=body.get("audience") or "agency"))
         res = agency_report(conn_str, bucket, body.get("mock"), body.get("source"),
                             bu=body.get("bu"), audience=body.get("audience") or "agency")
         res["url"] = api_util.presign_get(bucket, res["key"], res["name"])

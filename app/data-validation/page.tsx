@@ -44,7 +44,8 @@ interface ReportEntry { key: string; name: string; program: string; source: stri
 interface ReportsResponse extends ApiResult { prefix: string; reports: ReportEntry[] }
 interface ReportUrl extends ApiResult { url: string }
 interface SeedResponse extends ApiResult { created: number; copied: number; skipped: number; failed: string[] }
-interface AgencyReport extends ApiResult { key: string; name: string; rows: number; url: string; warnings: string[] }
+interface AgencyWorkbook { module: string; key: string; name: string; rows: number; routed: boolean }
+interface AgencyReports extends ApiResult { reports: AgencyWorkbook[]; warnings: string[] }
 // A procedure-run program runs in the background on the database server (validation_jobs).
 interface Job {
   id: number; mock: string; program: string; source: string;
@@ -107,7 +108,7 @@ function DataValidationPage() {
   const [agencyBu, setAgencyBu] = useState('');
   const [audience, setAudience] = useState<'agency' | 'source'>('agency');
   const [generating, setGenerating] = useState(false);
-  const [agencyReport, setAgencyReport] = useState<AgencyReport | null>(null);
+  const [agencyReports, setAgencyReports] = useState<AgencyReports | null>(null);
   const [jobs, setJobs] = useState<JobsResponse | null>(null);
   const [notice, setNotice] = useState('');
   const [publishing, setPublishing] = useState('');
@@ -163,7 +164,7 @@ function DataValidationPage() {
     setSelectedCode('');
     setDetail(null);
     setRunResult(null);
-    setAgencyReport(null);
+    setAgencyReports(null);
     if (program) loadSummary(program, source); else setSummary(null);
   }, [program, source, loadSummary]);
 
@@ -268,16 +269,16 @@ function DataValidationPage() {
     window.location.assign(d.url);  // served as an attachment: downloads in place, no pop-up to block
   };
 
+  // The agency's HR and Payroll workbooks, named as the distribution list routes them.
   const generateAgencyWorkbook = async () => {
     if (!isHcm || !source || !isSuperUser) return;
     setGenerating(true);
-    setAgencyReport(null);
+    setAgencyReports(null);
     setError('');
-    const d = await apiPost<AgencyReport>('val_agency_report', { actor: email, mock, source, bu: agencyBu.trim(), audience });
+    const d = await apiPost<AgencyReports>('val_agency_report', { actor: email, mock, source, bu: agencyBu.trim(), audience, split: true });
     if (!d.ok) setError(d.error || 'Agency workbook failed');
     else {
-      setAgencyReport(d);
-      window.location.assign(d.url);
+      setAgencyReports(d);
       await loadReports(program, source);
     }
     setGenerating(false);
@@ -388,20 +389,24 @@ function DataValidationPage() {
             </select>
           </label>
           <button className="btn btn-secondary" disabled={generating} onClick={generateAgencyWorkbook}
-            title={`One workbook with every HCM validation reported to the ${audience} for ${source}${agencyBu.trim() ? ` / ${agencyBu.trim()}` : ''}, built from the stored results`}>
-            {generating ? 'Generating…' : 'Generate agency workbook'}
+            title={`The HR and Payroll workbooks of every HCM validation reported to the ${audience} for ${source}${agencyBu.trim() ? ` / ${agencyBu.trim()}` : ''}, built from the stored results and named as the distribution list routes them`}>
+            {generating ? 'Generating…' : 'Generate agency workbooks'}
           </button>
-          {agencyReport && (
-            <span className="sy-muted small">
-              <button className="sy-link" onClick={() => openReport(agencyReport.key)}>{agencyReport.name}</button>
-              {' '}· {agencyReport.rows.toLocaleString()} rows
-              {agencyReport.warnings?.length > 0 && <> · {agencyReport.warnings.join('; ')}</>}
-              {' '}
-              <button className="btn btn-secondary" disabled={publishing === agencyReport.key} onClick={() => publishReport(agencyReport.key)}>
-                {publishing === agencyReport.key ? 'Publishing…' : 'Publish to the agency'}
-              </button>
-              {published[agencyReport.key] && <> · {published[agencyReport.key]}</>}
-            </span>
+          {agencyReports && (
+            <div className="sy-muted small dv-agency-results">
+              {agencyReports.reports.map(w => (
+                <div key={w.key}>
+                  {w.module === 'PAYROLL' ? 'Payroll' : 'HR'}:{' '}
+                  <button className="sy-link" onClick={() => openReport(w.key)}>{w.name}</button>
+                  {' '}· {w.rows.toLocaleString()} rows{' '}
+                  <button className="btn btn-secondary" disabled={publishing === w.key} onClick={() => publishReport(w.key)}>
+                    {publishing === w.key ? 'Publishing…' : 'Publish to the agency'}
+                  </button>
+                  {published[w.key] && <> · {published[w.key]}</>}
+                </div>
+              ))}
+              {agencyReports.warnings?.length > 0 && <div>{agencyReports.warnings.join(' ')}</div>}
+            </div>
           )}
         </section>
       )}
