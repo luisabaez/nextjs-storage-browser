@@ -5,7 +5,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiResult, apiGet, apiPost, fmtDateTime } from '../../lib/symphony';
 import { fileTypeLabel, partyKey, partyLabel, statusBadgeClass, useHcm } from '../HcmShell';
-import { FormInfo, FormRow, FormRowsTable, formTitle, openFormFile } from './FormsStep';
+import { FormInfo, FormRow, FormRowsTable, formTitle, isPdf, openFormFile } from './FormsStep';
 import {
   CertRecord, Documents, FOCUS_KEY, Issue, IssuesResult, ReasonForm, ResponseBadge, count, day, partyId, recordKey, recordName,
   responseShort,
@@ -291,8 +291,9 @@ function FormsTab() {
     if (!d.ok) setProblem(d.error || 'The rows of the form could not be loaded');
   };
   const open = async (f: FormInfo) => {
+    const tab = isPdf(f) ? window.open('', '_blank') : null;
     setBusy(f.id);
-    setProblem(await openFormFile(f.id, email));
+    setProblem(await openFormFile(f.id, email, tab));
     setBusy(0);
   };
 
@@ -321,15 +322,15 @@ function FormsTab() {
                     f.signer_name && `Signed by ${[f.signer_name, f.signer_title].filter(Boolean).join(', ')}`,
                     f.signed_date,
                     `${f.answered ?? 0} of ${f.rows ?? 0} entities answered`,
-                    f.uploaded_by && `${f.electronic ? 'Signed electronically in the portal' : 'Uploaded'} by ${f.uploaded_by} on ${day(f.uploaded_at)}`,
-                    !f.signature_image && !f.electronic && 'no signature image',
+                    f.uploaded_by && `${f.electronic ? 'Signed electronically in the portal' : isPdf(f) ? 'Signed PDF uploaded' : 'Uploaded'} by ${f.uploaded_by} on ${day(f.uploaded_at)}`,
+                    !f.signature_image && !f.electronic && !isPdf(f) && 'no signature image',
                   ].filter(Boolean).join(' · ')}
                 </div>
               </div>
               <div className="hcm-row-actions">
                 <button type="button" className="btn btn-secondary" disabled={busy === f.id} onClick={() => open(f)}
                   aria-label={`Open the file ${f.file_name}`}>
-                  {busy === f.id ? 'Please wait…' : 'Open file'}
+                  {busy === f.id ? 'Please wait…' : isPdf(f) ? 'View PDF' : 'Open file'}
                 </button>
                 <button type="button" className="btn btn-secondary" aria-expanded={openId === f.id} onClick={() => toggle(f)}>
                   {openId === f.id ? 'Hide rows' : 'Show rows'}

@@ -120,12 +120,16 @@ def _s3():
                         config=Config(signature_version="s3v4", s3={"addressing_style": "virtual"}))
 
 
-def presign_get(bucket, key, file_name=None, expires=900):
+def presign_get(bucket, key, file_name=None, expires=900, inline_type=None):
     """Time-limited download link. The browser never needs storage rights of
-    its own, so the server decides who may fetch what."""
+    its own, so the server decides who may fetch what. inline_type (e.g.
+    application/pdf) makes the browser show the file instead of saving it."""
     p = {"Bucket": bucket, "Key": key}
     if file_name:
-        p["ResponseContentDisposition"] = f'attachment; filename="{safe_segment(file_name)}"'
+        p["ResponseContentDisposition"] = (f'{"inline" if inline_type else "attachment"}; '
+                                           f'filename="{safe_segment(file_name)}"')
+    if inline_type:
+        p["ResponseContentType"] = inline_type
     return _s3().generate_presigned_url("get_object", Params=p, ExpiresIn=expires)
 
 

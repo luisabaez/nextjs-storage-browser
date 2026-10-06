@@ -261,27 +261,34 @@ def run_program(conn_str, program, source, mock="MOCK14", actor="", dry_run=Fals
         else:
             _run_views(cur, conn, spec, program, source, mock, actor, dry_run, remaining_ms, result, records)
         if bucket and result["ok"] and not dry_run:
-            try:
-                hcm = spec["mode"] == "sp" and _is_hcm_program(cur, program)
-                if hcm:
-                    records = _hcm_detail_records(cur, spec["label"] or program, source, mock)
-                elif spec["mode"] == "sp":
-                    records = _detail_records(cur, spec["label"] or program, source, mock)
-                legend = validation_report.legend_rows(cur, result["codes"], "Validation_Program = ?", (program,))
-                if hcm:
-                    key = validation_report.hcm_report_key(mock, program, source)
-                    content = validation_report.build_hcm_workbook(records, legend, mock)
-                else:
-                    key = validation_report.report_key(mock, program, source)
-                    content = validation_report.build_workbook(records, legend)
-                validation_report.write_report(bucket, key, content)
-                result["report_key"] = key
-                result["report_name"] = key.rsplit("/", 1)[-1]
-                result["report_rows"] = len(records)
-            except Exception as e:
-                result["warnings"].append(f"Excel report not written: {str(e)[:200]}")
+            write_report(cur, spec, program, source, mock, bucket, result, records)
     result["elapsed_s"] = round((datetime.now() - started).total_seconds(), 1)
     return result
+
+
+def write_report(cur, spec, program, source, mock, bucket, result, records=None):
+    """Write a run's client workbook to S3 and note it in `result`: the HCM
+    workbook for a procedure-run program of the HCM pillar, the Data + Summary
+    workbook otherwise. A failure is a warning, not a failed run."""
+    try:
+        hcm = spec["mode"] == "sp" and _is_hcm_program(cur, program)
+        if hcm:
+            records = _hcm_detail_records(cur, spec["label"] or program, source, mock)
+        elif spec["mode"] == "sp":
+            records = _detail_records(cur, spec["label"] or program, source, mock)
+        legend = validation_report.legend_rows(cur, result["codes"], "Validation_Program = ?", (program,))
+        if hcm:
+            key = validation_report.hcm_report_key(mock, program, source)
+            content = validation_report.build_hcm_workbook(records, legend, mock)
+        else:
+            key = validation_report.report_key(mock, program, source)
+            content = validation_report.build_workbook(records or [], legend)
+        validation_report.write_report(bucket, key, content)
+        result["report_key"] = key
+        result["report_name"] = key.rsplit("/", 1)[-1]
+        result["report_rows"] = len(records or [])
+    except Exception as e:
+        result["warnings"].append(f"Excel report not written: {str(e)[:200]}")
 
 
 def _detail_records(cur, log_program, source, mock):
@@ -322,6 +329,10 @@ def _new_run(cur, conn, program, source, mock, actor, log_program):
     run_dttm = datetime.now().replace(microsecond=0)
     cur.execute(f"SELECT [{DB}].dbo.GetBUfromSource(?)", (source,))
     bu = cur.fetchone()[0]
+    # Runs start side by side: the lock keeps two of them from taking the same
+    # number (it is released with the transaction below).
+    cur.execute("EXEC sp_getapplock @Resource = 'validation_run_number', @LockMode = 'Exclusive', "
+                "@LockOwner = 'Transaction', @LockTimeout = 30000")
     cur.execute(
         f"SELECT ISNULL(MAX(RunNumber), 0) FROM ("
         f"SELECT RunNumber FROM [{DB}].dbo.LOG_DATA_CLEANSE UNION ALL "
@@ -363,13 +374,19 @@ def _log_counts(cur, conn, codes, program, source, mock, bu, run_number, run_dtt
 
 # ── mode "sp": the team's insert procedure ──────────────────────────────────
 
-def _run_via_sp(cur, conn, spec, program, source, mock, actor, dry_run, result):
-    label = spec["label"] or program
+def sp_views(cur, spec, program, source, mock):
+    """The views a procedure-run program covers for a source."""
     views = []
     for family in spec["families"]:
         views.extend(discover_views(cur, family, source, mock))
     if not spec["families"]:
         views = catalog_views(cur, program, mock)
+    return views
+
+
+def _run_via_sp(cur, conn, spec, program, source, mock, actor, dry_run, result):
+    label = spec["label"] or program
+    views = sp_views(cur, spec, program, source, mock)
     result["views"] = [{"view": v} for v in views]
     result["runs_via"] = spec["sp"]
     if dry_run:
@@ -395,6 +412,13 @@ def _run_via_sp(cur, conn, spec, program, source, mock, actor, dry_run, result):
         result["error"] = f"{spec['sp']} failed: {str(e)[:300]}"
         result["procedure_messages"] = printed[-40:]
         return
+    finish_sp_run(cur, conn, spec, program, source, mock, run_number, run_dttm, bu, printed, result)
+
+
+def finish_sp_run(cur, conn, spec, program, source, mock, run_number, run_dttm, bu, printed, result):
+    """After the procedure ran: its messages, the codes it stored, and their
+    counts in LOG_DATA_CLEANSE (also how a background run is finished)."""
+    label = spec["label"] or program
     result["procedure_messages"] = printed[-40:]
     for m in printed:
         if re.search(r"\berror\b|not valid|terminated|invalid", m, re.I):

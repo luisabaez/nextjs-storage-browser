@@ -29,6 +29,11 @@ before agreement before no errors). Every row answered as incorrect becomes an
 issue on its record, and needs a supporting document before the party signs
 off (certifications._signoff).
 
+Signed PDF: an agency that signs the form on paper (or prints it to PDF and
+signs that) uploads the PDF. A PDF cannot be read, so the uploader records the
+form's answers in the portal, row by row as on the form; the PDF is kept as
+the signed form and the answers are recorded like an uploaded form's.
+
 Electronic signature: instead of downloading, signing and uploading, the
 agency answers the same rows in the portal and signs with its name and title.
 The portal writes the answers and a signature block (name, e-mail of the
@@ -77,7 +82,9 @@ T_ROW = "DATA_CLEANSE_CERT_FORM_ROW"
 FORMS_PREFIX = f"{api_util.PRIVATE_ROOT}/CertForms"
 KINDS = {"HR": "HCM-HR", "PAYROLL": "HCM-Payroll", "SOURCES": "Sources"}
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+PDF = "application/pdf"
 MAX_FORM_BYTES = 25 * 1024 * 1024
+PDF_STATEMENT = "The answers recorded in the portal are those of the signed PDF form."
 
 ESIGN_SETTING = "esign_agencies"   # "on" once electronic signature is approved for agencies
 ESIGN_CONSENT = ("Firmo este formulario electrónicamente con mi nombre, título y cuenta del portal. Acepto que esta "
@@ -103,8 +110,9 @@ _DDL = {
 # How serious an answer is: a record answered on several rows takes the most serious.
 _WEIGHT = {"ISSUES": 3, "AGREE": 2, "AGREE_EXCLUSIONS": 2, "COST_ALLOCATION": 2,
            "NO_ERRORS": 1, "NO_EXCLUSIONS": 1, "CONVERTED_OK": 1}
-# How a form was signed: Sign_Method ESIGN for one signed in the portal (NULL:
-# uploaded), with where it was signed from and a fingerprint of the file.
+# How a form was signed: Sign_Method ESIGN for one signed in the portal, PDF for
+# a signed PDF whose answers were recorded in the portal (NULL: the Excel form
+# uploaded), with where it came from and a fingerprint of the file.
 _ESIGN_COLUMNS = (("Sign_Method", "VARCHAR(20)"), ("Signer_IP", "VARCHAR(64)"), ("Signer_Agent", "NVARCHAR(400)"),
                   ("Content_SHA256", "CHAR(64)"), ("Consent_Text", "NVARCHAR(1000)"))
 
@@ -278,7 +286,7 @@ def form_problems(form, party):
                         + (" …" if len(blank) > 10 else ""))
     if not form["title"] or not form["date"]:
         warnings.append("Title or Date is empty in the signature block")
-    if not form["signature_image"] and not form.get("electronic"):
+    if not form["signature_image"] and not form.get("electronic") and not form.get("pdf"):
         warnings.append("No signature image was found in the file")
     return errors, warnings
 
@@ -445,7 +453,7 @@ def _form(r):
             "signer_title": r[11], "signed_date": r[12], "signature_image": bool(r[13]), "rows": r[14],
             "answered": r[15], "uploaded_by": r[16], "uploaded_at": r[17], "current": bool(r[18]),
             "revoked_by": r[19], "revoked_at": r[20], "revoke_reason": r[21], "electronic": r[22] == "ESIGN",
-            "signer_ip": r[23], "signer_agent": r[24], "sha256": r[25]}
+            "method": r[22] or "XLSX", "signer_ip": r[23], "signer_agent": r[24], "sha256": r[25]}
 
 
 def _public(form):
@@ -614,7 +622,9 @@ def _rows(conn, cur, p, bucket):
 
 def _file_url(conn, cur, p, bucket):
     _, form = _checked_form(cur, p.get("id"), p.get("email"), "downloading a certification form")
-    return {"file_name": form["file_name"], "url": api_util.presign_get(bucket, form["s3_key"], form["file_name"])}
+    view = bool(p.get("view")) and form["file_name"].lower().endswith(".pdf")
+    return {"file_name": form["file_name"], "inline": view,
+            "url": api_util.presign_get(bucket, form["s3_key"], form["file_name"], inline_type=PDF if view else None)}
 
 
 def _download(conn, cur, data, bucket):
@@ -646,8 +656,9 @@ def _upload_url(conn, cur, data, bucket):
     _, mock, rows, source, agency, bu = certs._writable_party(conn, cur, data, "uploading a certification form")
     kind = _kind(data, _party_rows(rows, source, agency))
     name = certs._need(data, "file_name", "File name", 300)
-    if not name.lower().endswith(".xlsx"):
-        raise ApiError("Upload the completed form as the Excel workbook (.xlsx) it was downloaded as")
+    if not name.lower().endswith((".xlsx", ".pdf")):
+        raise ApiError("Upload the completed form as the Excel workbook (.xlsx) it was downloaded as, "
+                       "or the signed form as a PDF")
     try:
         size = int(data.get("size") or 0)
     except (TypeError, ValueError):
@@ -655,7 +666,8 @@ def _upload_url(conn, cur, data, bucket):
     if not 0 < size <= MAX_FORM_BYTES:
         raise ApiError(f"The form must be between 1 byte and {MAX_FORM_BYTES // (1024 * 1024)} MB")
     key = certs.attachment_key(mock, source, agency, bu, "FORM", kind, name)
-    return {"key": key, "content_type": XLSX, "url": api_util.presign_put(bucket, key, XLSX)}
+    content_type = PDF if name.lower().endswith(".pdf") else XLSX
+    return {"key": key, "content_type": content_type, "url": api_util.presign_put(bucket, key, content_type)}
 
 
 def _submit(conn, cur, data, bucket):
@@ -675,11 +687,64 @@ def _submit(conn, cur, data, bucket):
     if obj["ContentLength"] > MAX_FORM_BYTES:
         raise ApiError(f"The form is larger than {MAX_FORM_BYTES // (1024 * 1024)} MB")
     party = {"source": source, "agency": agency, "bu": bu}
-    form = read_form(obj["Body"].read())
+    content = obj["Body"].read()
+    if name.lower().endswith(".pdf"):
+        return _submit_pdf(conn, cur, data, bucket, access, mock, party, mine, kind, key, name, content)
+    form = read_form(content)
     errors, warnings = form_problems(form, party)
     if errors:
         raise ApiError(". ".join(errors) + ".")
     return _record(conn, cur, access, mock, party, mine, kind, key, name, obj["ContentLength"], form, warnings)
+
+
+def _answers(data, table, kind):
+    """{row number: (resource, comment text)} from the answers a page sent,
+    checked against the form's rows and the comments each row offers."""
+    answers = {}
+    for a in data.get("answers") or []:
+        try:
+            row = int(a.get("row"))
+        except (TypeError, ValueError, AttributeError):
+            raise ApiError("Every answer needs the row of the form it answers")
+        if row not in table:
+            raise ApiError(f"Row {row} is not a data entity row of the {KINDS[kind]} form", 404)
+        code = _s(a.get("code")).upper() or None
+        if code and code not in certs.responses_for(table[row]["folder"] or "Validation"):
+            raise ApiError(f"{table[row]['entity']}: that comment is not one of the options for this row")
+        resource = _s(a.get("resource"))[:200]
+        if code or resource:
+            answers[row] = (resource, certs.RESPONSES[code] if code else "")
+    return answers
+
+
+def _submit_pdf(conn, cur, data, bucket, access, mock, party, mine, kind, key, name, content):
+    """A signed PDF: kept as the form, with the answers the uploader recorded."""
+    if not content.startswith(b"%PDF-"):
+        raise ApiError(f"{name} is not a PDF file")
+    signer = certs._need(data, "signer_name", "Name of the person who signed", 200)
+    title = certs._need(data, "signer_title", "Title of the person who signed", 200)
+    if data.get("confirm") is not True:
+        raise ApiError("Confirm that the answers are those of the signed PDF")
+    signed_on = certs._date(data.get("signed_date"), "Date signed") if data.get("signed_date") else None
+    table = {x["row"]: x for x in read_form(_party_form(bucket, mock, kind, party))["rows"]}
+    answers = _answers(data, table, kind)
+    rows = []
+    for number, x in table.items():
+        resource, comment = answers.get(number, ("", ""))
+        rows.append({**x, "resource": resource, "comment": comment, "code": match_comment(comment) if comment else None})
+    form = {"agency": agency_label(party), "name": signer, "title": title,
+            "date": signed_on.isoformat() if signed_on else date.today().isoformat(), "signature_image": False,
+            "rows": rows, "pdf": True}
+    errors, warnings = form_problems(form, party)
+    if errors:
+        raise ApiError(". ".join(errors) + ".")
+    client = data.get("_client") or {}
+    return _record(conn, cur, access, mock, party, mine, kind, key, name, len(content), form, warnings,
+                   esign={"method": "PDF", "ip": client.get("ip"), "agent": client.get("agent"),
+                          "sha256": hashlib.sha256(content).hexdigest(), "consent": PDF_STATEMENT})
+
+
+_NOTE = {"ESIGN": "Signed electronically on the form", "PDF": "From the signed PDF"}
 
 
 def _record(conn, cur, access, mock, party, mine, kind, key, name, size, form, warnings, esign=None):
@@ -702,7 +767,8 @@ def _record(conn, cur, access, mock, party, mine, kind, key, name, size, form, w
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, GETDATE(), 1, ?, ?, ?, ?, ?)",
         (mock, source, agency, bu, kind, name, key, size, form["agency"][:200] or None,
          form["name"][:200], form["title"][:200] or None, form["date"][:50] or None, form["signature_image"],
-         len(form["rows"]), answered, access.email, "ESIGN" if esign else None, _s(esign.get("ip"))[:64] or None,
+         len(form["rows"]), answered, access.email, (esign.get("method") or "ESIGN") if esign else None,
+         _s(esign.get("ip"))[:64] or None,
          _s(esign.get("agent"))[:400] or None, esign.get("sha256"), esign.get("consent")))
     form_id = cur.fetchone()[0]
     cur.fast_executemany = True
@@ -740,7 +806,7 @@ def _record(conn, cur, access, mock, party, mine, kind, key, name, size, form, w
             "[File_Type], [Response_Code], [Resource_Name], [Notes], [Certified_By], [Certified_DTTM], "
             "[Is_Current], [Form_ID]) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, GETDATE(), 1, ?)",
             (mock, source, agency, bu, rec["module"], rec["entity"], rec["file_type"], code, resources,
-             f"{'Signed electronically on the form' if esign else 'From the signed form'} {name}", access.email,
+             f"{_NOTE.get(esign.get('method') or 'ESIGN') if esign else 'From the signed form'} {name}", access.email,
              form_id))
         for x in chosen:
             if x["code"] != "ISSUES" or id(x) in raised:
@@ -810,20 +876,7 @@ def _esign(conn, cur, data, bucket):
     party = {"source": source, "agency": agency, "bu": bu}
     blank = _party_form(bucket, mock, kind, party)
     table = {x["row"]: x for x in read_form(blank)["rows"]}
-    answers = {}
-    for a in data.get("answers") or []:
-        try:
-            row = int(a.get("row"))
-        except (TypeError, ValueError, AttributeError):
-            raise ApiError("Every answer needs the row of the form it answers")
-        if row not in table:
-            raise ApiError(f"Row {row} is not a data entity row of the {KINDS[kind]} form", 404)
-        code = _s(a.get("code")).upper() or None
-        if code and code not in certs.responses_for(table[row]["folder"] or "Validation"):
-            raise ApiError(f"{table[row]['entity']}: that comment is not one of the options for this row")
-        resource = _s(a.get("resource"))[:200]
-        if code or resource:
-            answers[row] = (resource, certs.RESPONSES[code] if code else "")
+    answers = _answers(data, table, kind)
     at = datetime.now(_PR_TIME)
     content = sign_form(blank, answers, {"name": name, "title": title, "email": access.email, "at": at})
     form = read_form(content)
@@ -871,7 +924,7 @@ _WITH_DATABASE = {"certform_templates": _templates, "certform_status": _status, 
 def handle(action, event, bucket, headers, conn_str):
     def run():
         values = api_util.params(event) if action in _READS else api_util.body(event)
-        if action == "certform_esign":
+        if action in ("certform_esign", "certform_submit"):
             # Where the signature came from, for the record of an electronic signature.
             http = (event.get("requestContext") or {}).get("http") or {}
             values["_client"] = {"ip": http.get("sourceIp"), "agent": http.get("userAgent")}

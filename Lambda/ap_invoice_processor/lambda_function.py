@@ -44,6 +44,7 @@ import workbook_loaders
 import validation_runner
 import validation_seed
 import validation_report
+import validation_jobs
 # Feature modules: each exposes ACTIONS and handle(action, event, bucket, headers, conn_str)
 import app_settings
 import rules_admin
@@ -67,6 +68,8 @@ SUPER_USER_ACTIONS = {
     "val_seed": ("body", "actor", "preparing the test database"),
     "val_copy_log": ("body", "actor", "copying validation results into the test database"),
     "val_data_plan": ("query", "email", "planning a copy of validation data"),
+    "val_jobs": ("query", "email", "viewing validation runs"),
+    "val_job_cancel": ("body", "actor", "cancelling a validation run"),
     "val_detail": ("query", "email", "viewing validation detail rows"),
     "val_objects": ("query", "email", "listing database objects"),
     "val_object_def": ("query", "email", "reading database object definitions"),
@@ -1172,6 +1175,21 @@ def lambda_handler(event, context):
             "body": json.dumps({"status": "ignored", "reason": "S3 event trigger"}),
         }
 
+    # ── Background validation runs: the end of a run on the database server ──
+    # EventBridge reports the end of every Systems Manager command there; a run
+    # noticed while listing is finished in its own invocation.
+    if event.get("source") == "aws.ssm" or "validation_job_finish" in event:
+        try:
+            conn_str = get_connection_string()
+            if "validation_job_finish" in event:
+                job = validation_jobs.finish(conn_str, DEFAULT_BUCKET, int(event["validation_job_finish"]))
+            else:
+                job = validation_jobs.handle_ssm_event(conn_str, DEFAULT_BUCKET, event)
+            print(f"Validation run event handled: {job and job.get('id')} {job and job.get('status')}")
+        except Exception:
+            traceback.print_exc()
+        return {"statusCode": 200, "body": "{}"}
+
     # Parse query params
     params = {}
     if "queryStringParameters" in event and event["queryStringParameters"]:
@@ -2150,9 +2168,19 @@ def lambda_handler(event, context):
                     "body": json.dumps({"ok": False, "error": str(e)})}
 
     if action == "val_run":
-        # POST { program, source, mock, actor, dry_run }
+        # POST { program, source, mock, actor, dry_run } — a procedure-run program
+        # is queued and runs in the background (validation_jobs); the rest run here
         try:
             body = json.loads(event.get("body") or "{}")
+            spec = validation_runner.PROGRAMS.get(body.get("program") or "") or {}
+            if spec.get("mode") == "sp" and not body.get("dry_run"):
+                try:
+                    res = validation_jobs.submit(get_connection_string(), body.get("program") or "",
+                                                 body.get("source") or "", body.get("mock") or "MOCK14",
+                                                 body.get("actor") or "")
+                except api_util.ApiError as e:
+                    return api_util.fail(headers, str(e), e.status)
+                return {"statusCode": 200, "headers": headers, "body": json.dumps(res, default=str)}
             remaining = (lambda: context.get_remaining_time_in_millis()) \
                 if context and hasattr(context, "get_remaining_time_in_millis") else None
             res = validation_runner.run_program(
@@ -2163,6 +2191,26 @@ def lambda_handler(event, context):
             )
             return {"statusCode": 200 if res.get("ok") else 400,
                     "headers": headers, "body": json.dumps(res, default=str)}
+        except Exception as e:
+            traceback.print_exc()
+            return {"statusCode": 500, "headers": headers,
+                    "body": json.dumps({"ok": False, "error": str(e)})}
+
+    if action in ("val_jobs", "val_job_cancel"):
+        # GET  ?action=val_jobs&mock= — background runs, newest first (also moves finished ones on)
+        # POST val_job_cancel { id, actor } — stop a queued or running one
+        try:
+            if action == "val_jobs":
+                p = event.get("queryStringParameters") or {}
+                res = validation_jobs.list_jobs(get_connection_string(), mock=(p.get("mock") or "").upper() or None,
+                                                function_name=getattr(context, "function_name", None))
+            else:
+                body = json.loads(event.get("body") or "{}")
+                res = {"ok": True, "job": validation_jobs.cancel(get_connection_string(), body.get("id") or 0,
+                                                                 body.get("actor") or "")}
+            return {"statusCode": 200, "headers": headers, "body": json.dumps(res, default=str)}
+        except api_util.ApiError as e:
+            return api_util.fail(headers, str(e), e.status)
         except Exception as e:
             traceback.print_exc()
             return {"statusCode": 500, "headers": headers,

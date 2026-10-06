@@ -45,6 +45,42 @@ interface ReportsResponse extends ApiResult { prefix: string; reports: ReportEnt
 interface ReportUrl extends ApiResult { url: string }
 interface SeedResponse extends ApiResult { created: number; copied: number; skipped: number; failed: string[] }
 interface AgencyReport extends ApiResult { key: string; name: string; rows: number; url: string; warnings: string[] }
+// A procedure-run program runs in the background on the database server (validation_jobs).
+interface Job {
+  id: number; mock: string; program: string; source: string;
+  status: 'queued' | 'running' | 'finishing' | 'done' | 'failed' | 'cancelled';
+  requested_by: string | null; requested_at: string | null; started_at: string | null; finished_at: string | null;
+  run_number: number | null; total_rows: number | null; report_key: string | null; report_name?: string;
+  message: string | null; queue_position?: number | null;
+}
+interface JobsResponse extends ApiResult { jobs: Job[]; running: number; queued: number; max_parallel: number; now: string }
+interface Submitted extends ApiResult { background?: boolean; job?: Job; warnings?: string[] }
+interface PublishTarget { source: string; agency: string; party?: string; module?: string; file_type?: string; entity?: string }
+interface PublishResult extends ApiResult {
+  published?: { name: string; targets: PublishTarget[] }[];
+  unmatched?: { name: string; reason: string }[];
+}
+
+const ACTIVE = ['queued', 'running', 'finishing'];
+// Server times are UTC without a zone.
+const utc = (s?: string | null) => (s ? Date.parse(`${s.replace(' ', 'T').slice(0, 19)}Z`) : NaN);
+function span(ms: number): string {
+  const m = Math.max(0, Math.round(ms / 60000));
+  if (Number.isNaN(m) || m < 1) return 'under a minute';
+  return m < 90 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`;
+}
+const ordinal = (n: number) => `${n}${n % 10 === 1 && n % 100 !== 11 ? 'st' : n % 10 === 2 && n % 100 !== 12 ? 'nd' : n % 10 === 3 && n % 100 !== 13 ? 'rd' : 'th'}`;
+function jobStatus(j: Job, now: number): { text: string; cls: string } {
+  switch (j.status) {
+    case 'queued': return { text: j.queue_position ? `Waiting · ${ordinal(j.queue_position)} in line` : 'Waiting', cls: 'sy-badge sy-badge-warn' };
+    case 'running': return { text: `Running · ${span(now - utc(j.started_at))}`, cls: 'sy-badge sy-badge-info' };
+    case 'finishing': return { text: 'Writing the results', cls: 'sy-badge sy-badge-info' };
+    case 'done': return { text: `Done in ${span(utc(j.finished_at) - utc(j.started_at))}`, cls: 'sy-badge sy-badge-ok' };
+    case 'failed': return { text: 'Failed', cls: 'sy-badge sy-badge-bad' };
+    default: return { text: 'Cancelled', cls: 'sy-badge' };
+  }
+}
+const folderName = (fileType?: string) => (fileType || '').replace(/^\d+\s*[-.)]?\s*/, '');
 
 function DataValidationPage() {
   const session = useSymphonySession();
@@ -72,6 +108,11 @@ function DataValidationPage() {
   const [audience, setAudience] = useState<'agency' | 'source'>('agency');
   const [generating, setGenerating] = useState(false);
   const [agencyReport, setAgencyReport] = useState<AgencyReport | null>(null);
+  const [jobs, setJobs] = useState<JobsResponse | null>(null);
+  const [notice, setNotice] = useState('');
+  const [publishing, setPublishing] = useState('');
+  const [published, setPublished] = useState<Record<string, string>>({});
+  const lastStatus = useRef<Record<number, string>>({});
 
   // Programs (and the sources each can run for) depend on the mock being shown.
   useEffect(() => {
@@ -141,21 +182,82 @@ function DataValidationPage() {
     loadDetail(code, 0);
   };
 
+  // Background runs: listed for the cycle, refreshed every 10 seconds while any is active.
+  const loadJobs = useCallback(async () => {
+    if (!mock) return;
+    const d = await apiGet<JobsResponse>('val_jobs', { mock, email });
+    if (d.ok) setJobs(d);
+  }, [mock, email]);
+
+  useEffect(() => {
+    if (session.ready && isSuperUser) loadJobs();
+  }, [session.ready, isSuperUser, loadJobs]);
+
+  const activeCount = (jobs?.jobs || []).filter(j => ACTIVE.includes(j.status)).length;
+  useEffect(() => {
+    if (activeCount === 0) return;
+    const timer = window.setInterval(loadJobs, 10000);
+    return () => window.clearInterval(timer);
+  }, [activeCount, loadJobs]);
+
+  // A run of the program on screen that just finished: show its new results.
+  useEffect(() => {
+    let refresh = false;
+    for (const j of jobs?.jobs || []) {
+      const before = lastStatus.current[j.id];
+      if (before && ACTIVE.includes(before) && j.status === 'done' && j.program === program && (!source || j.source === source)) refresh = true;
+      lastStatus.current[j.id] = j.status;
+    }
+    if (refresh) loadSummary(program, source);
+  }, [jobs, program, source, loadSummary]);
+
   const runValidation = async (dryRun: boolean) => {
     if (!current?.runnable || !source || !isSuperUser) return;
+    const background = current.mode === 'sp';
     if (!dryRun && !window.confirm(
       `Run the ${program} validations for ${source} on ${mock}?\n\n`
-      + `This regenerates the source's validation views, replaces the stored results for `
-      + `${program} / ${source} / ${mock}, and logs the run under your name. It can take a few minutes.`
+      + `This replaces the stored results for ${program} / ${source} / ${mock} and logs the run under your name. `
+      + (background
+        ? 'It runs on the database server in the background, however long it takes: you can leave this page and follow it under Validation runs.'
+        : 'It can take a few minutes.')
     )) return;
     setRunning(dryRun ? 'preview' : 'run');
     setRunResult(null);
+    setNotice('');
     setError('');
-    const d = await apiPost<RunResult>('val_run', { program, source, mock, actor: email, dry_run: dryRun });
+    const d = await apiPost<RunResult & Submitted>('val_run', { program, source, mock, actor: email, dry_run: dryRun });
     if (!d.ok) setError(d.error || 'Run failed');
-    setRunResult(d);
-    if (d.ok && !dryRun) await loadSummary(program, source);
+    if (d.ok && d.background && d.job) {
+      setNotice(d.job.status === 'queued'
+        ? `${program} for ${source} is waiting for a free slot (${ordinal(d.job.queue_position || 1)} in line). It starts on its own; follow it under Validation runs.`
+        : `${program} for ${source} is running on the database server. You can leave this page; the result appears under Validation runs.`);
+      await loadJobs();
+    } else {
+      setRunResult(d);
+      if (d.ok && !dryRun) await loadSummary(program, source);
+    }
     setRunning('');
+  };
+
+  const cancelJob = async (j: Job) => {
+    if (!window.confirm(`Stop ${j.program} for ${j.source}? ${j.status === 'running' ? 'The results stored so far stay until the next run.' : ''}`)) return;
+    const d = await apiPost<ApiResult>('val_job_cancel', { id: j.id, actor: email });
+    if (!d.ok) setError(d.error || 'The run could not be stopped');
+    await loadJobs();
+  };
+
+  // A generated workbook goes to the folders the team's distribution list gives its name.
+  const publishReport = async (key: string) => {
+    setPublishing(key);
+    const d = await apiPost<PublishResult>('pub_publish_report', { actor: email, mock, key });
+    setPublishing('');
+    let text: string;
+    if (!d.ok) text = d.error || 'The workbook could not be published';
+    else if (d.published?.length) {
+      text = 'Published to ' + d.published[0].targets
+        .map(t => `${t.party || [t.source, t.agency].filter(Boolean).join(' · ')} — ${folderName(t.file_type)}`).join('; ');
+    } else text = `Not published: ${d.unmatched?.[0]?.reason || 'the distribution list has no folder for this name'}`;
+    setPublished(p => ({ ...p, [key]: text }));
   };
 
   // The workbooks hold person-level rows: the server checks the caller's role
@@ -294,6 +396,11 @@ function DataValidationPage() {
               <button className="sy-link" onClick={() => openReport(agencyReport.key)}>{agencyReport.name}</button>
               {' '}· {agencyReport.rows.toLocaleString()} rows
               {agencyReport.warnings?.length > 0 && <> · {agencyReport.warnings.join('; ')}</>}
+              {' '}
+              <button className="btn btn-secondary" disabled={publishing === agencyReport.key} onClick={() => publishReport(agencyReport.key)}>
+                {publishing === agencyReport.key ? 'Publishing…' : 'Publish to the agency'}
+              </button>
+              {published[agencyReport.key] && <> · {published[agencyReport.key]}</>}
             </span>
           )}
         </section>
@@ -302,8 +409,51 @@ function DataValidationPage() {
       {current?.runs_via && isSuperUser && !running && (
         <div className="sy-note">{program} runs through the validation team&apos;s procedure <code>{current.runs_via}</code>; Preview lists the views without running them.</div>
       )}
-      {running && <div className="sy-note">Running {program} for {source} — this runs every validation view and can take a few minutes.</div>}
+      {running && <div className="sy-note">{running === 'run' && current?.mode === 'sp' ? `Starting ${program} for ${source}…` : `Running ${program} for ${source} — this runs every validation view and can take a few minutes.`}</div>}
+      {notice && <div className="sy-note" role="status">{notice}</div>}
       {(error || session.error) && <div className="sy-error">{error || session.error}</div>}
+
+      {jobs && jobs.jobs.length > 0 && (
+        <section className="sy-card">
+          <div className="sy-card-head">
+            <h2>Validation runs · {mock}</h2>
+            <div className="sy-card-tools">
+              <span className="sy-total">
+                {jobs.running} running · {jobs.queued} waiting · up to {jobs.max_parallel} at a time
+              </span>
+              <button className="btn btn-secondary" onClick={loadJobs}>Refresh</button>
+            </div>
+          </div>
+          <p className="sy-muted small">Procedure-run programs run on the database server in the background; the rest of this page stays usable and you can leave it.</p>
+          <div className="sy-scroll">
+            <table className="sy-table">
+              <thead>
+                <tr><th>Program</th><th>Source</th><th>Status</th><th>Requested</th><th className="num">Rows</th><th>Workbook</th><th></th></tr>
+              </thead>
+              <tbody>
+                {jobs.jobs.slice(0, 15).map(j => {
+                  const st = jobStatus(j, utc(jobs.now));
+                  return (
+                    <tr key={j.id}>
+                      <td>{j.program}</td>
+                      <td className="mono">{j.source}</td>
+                      <td>
+                        <span className={st.cls}>{st.text}</span>
+                        {j.message && j.status !== 'done' && <div className="sy-muted small">{j.message.slice(0, 300)}</div>}
+                        {j.message && j.status === 'done' && <div className="sy-muted small" title={j.message}>With warnings</div>}
+                      </td>
+                      <td className="small">{j.requested_by}<div className="sy-muted">{fmtDate(j.requested_at).slice(0, 16)}</div></td>
+                      <td className="num">{j.total_rows != null ? j.total_rows.toLocaleString() : '—'}</td>
+                      <td>{j.report_key ? <button className="sy-link" onClick={() => openReport(j.report_key!)}>{j.report_name}</button> : '—'}</td>
+                      <td>{(j.status === 'queued' || j.status === 'running') && <button className="btn btn-secondary" onClick={() => cancelJob(j)}>Stop</button>}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
 
       {runResult && (
         <section className={`sy-card ${runResult.ok ? 'sy-card-ok' : 'sy-card-err'}`}>
@@ -425,7 +575,7 @@ function DataValidationPage() {
           <p className="sy-muted small">Excel workbooks (summary, failing rows and the error message legend) generated by each run{isHcm ? ', plus the per-agency workbooks' : ''}, stored under <code>DataValidation/Reports/{mock}/</code>. Send the latest one per file to the client.</p>
           <div className="sy-scroll">
             <table className="sy-table">
-              <thead><tr><th>Generated</th><th>Source</th><th>Report</th><th className="num">Size</th></tr></thead>
+              <thead><tr><th>Generated</th><th>Source</th><th>Report</th><th className="num">Size</th><th>Publish</th></tr></thead>
               <tbody>
                 {reports.slice(0, 40).map(r => (
                   <tr key={r.key}>
@@ -433,6 +583,13 @@ function DataValidationPage() {
                     <td className="mono">{r.source}</td>
                     <td><button className="sy-link" onClick={() => openReport(r.key)}>{r.name}</button></td>
                     <td className="num small">{Math.round(r.size / 1024).toLocaleString()} KB</td>
+                    <td className="small">
+                      <button className="btn btn-secondary" disabled={publishing === r.key} onClick={() => publishReport(r.key)}
+                        title="Publish to the agency or source folder the distribution list gives this name">
+                        {publishing === r.key ? 'Publishing…' : r.key.includes('/Agency/') ? 'Publish to the agency' : 'Publish'}
+                      </button>
+                      {published[r.key] && <div className="sy-muted">{published[r.key]}</div>}
+                    </td>
                   </tr>
                 ))}
               </tbody>
